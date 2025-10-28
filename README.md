@@ -109,3 +109,39 @@
 ---
 
 > 本文档旨在提供从架构到实施的参考蓝图，后续可结合实际团队资源与监管要求持续细化。
+---
+
+## New Skeleton Modules
+- `accounts/` houses portfolio registries and domain events.
+- `exchanges/` standardizes exchange client protocols including `exchanges/okx/paper.py`.
+- `services/webapp/` exposes the FastAPI web service entrypoint.
+
+## Web Service Quickstart
+- Install deps: `pip install fastapi uvicorn`
+- Run dev server: `uvicorn services.webapp.main:app --reload --port 8000`
+- Browse model dashboard UI: `http://localhost:8000/`
+- Raw portfolios (with metrics): `http://localhost:8000/portfolios`
+- System metrics: `http://localhost:8000/metrics/system`
+- Model metrics: `http://localhost:8000/metrics/models`
+
+## OKX Demo Trading Flow
+- Install deps: `pip install httpx`
+- Set env vars `OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`
+- Place order: `python scripts/okx_demo_trade.py place --inst-id BTC-USDT-SWAP --side buy --type limit --size 0.001 --price 24000`
+- Cancel order: `python scripts/okx_demo_trade.py cancel --inst-id BTC-USDT-SWAP --order-id <ordId>`
+
+
+
+## Model Signal Runtime
+- Install deps: `pip install httpx`
+- Default registry (`models/bootstrap.py`) registers DeepSeek and Qwen adapters automatically.
+- Runtime entrypoint: `SignalRuntime` (`models/runtime.py`) with async `generate_signal` / `batch_generate` helpers.
+- Offline deterministic mode works without API keys; set `DEEPSEEK_API_KEY` and `QWEN_API_KEY` for live inference.
+- Try it: `python scripts/signal_demo.py` prints sample signals for both models.
+
+
+## Risk Controls
+- Price bands: configure via `PriceLimitValidator` (`risk/price_limits.py`) and refresh with market data.
+- Circuit breaker: `CircuitBreaker` (`risk/circuit_breaker.py`) halts portfolios on drawdown/loss breaches.
+- Combined engine: `RiskEngine` (`risk/engine.py`) runs validations sequentially; extend with hooks.
+- Demo: `python scripts/risk_demo.py` shows price rejection and circuit halt output.
