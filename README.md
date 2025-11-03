@@ -145,3 +145,10 @@
 - Circuit breaker: `CircuitBreaker` (`risk/circuit_breaker.py`) halts portfolios on drawdown/loss breaches.
 - Combined engine: `RiskEngine` (`risk/engine.py`) runs validations sequentially; extend with hooks.
 - Demo: `python scripts/risk_demo.py` shows price rejection and circuit halt output.
+
+## Data Pipeline & AI Signals
+- Web UI 首页展示最近 AI 信号：访问 `http://localhost:8000/` 可查看中英双语的模型意见与建议订单。
+- Install deps: `pip install httpx pandas numpy influxdb-client`
+- Provide Influx access: (A) edit `config.py` token/URL or (B) set `INFLUX_TOKEN` env (plus optional `INFLUX_URL`/`INFLUX_BUCKET`)
+- Run pipeline: `python scripts/run_data_pipeline.py --instrument BTC-USDT-SWAP --instrument ETH-USDT-SWAP`
+- Pipeline steps: fetch multi-timeframe candles, funding, order book, trades → compute MACD/RSI/volatility/CVD/盘口不平衡 → write to InfluxDB → call `SignalRuntime` (DeepSeek/Qwen) for trade signals.

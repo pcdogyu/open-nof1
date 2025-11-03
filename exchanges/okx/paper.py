@@ -76,6 +76,37 @@ class OkxPaperClient(ExchangeClient):
         response = self._request("GET", "/api/v5/account/positions", params=params)
         return response.get("data", [])
 
+    def fetch_fills(self, *, after: str | None = None, limit: int = 100) -> list[dict]:
+        """
+        Fetch recent fills (executed trades) for the authenticated account.
+
+        Parameters mirror OKX REST fields:
+        - after: pagination cursor (bill ID) to fetch fills newer than the cursor.
+        - limit: maximum number of fills to return (default 100).
+        """
+        params = {"limit": str(limit)}
+        if after:
+            params["after"] = after
+        response = self._request("GET", "/api/v5/trade/fills", params=params)
+        return response.get("data", [])
+
+    def fetch_open_orders(self, *, inst_type: str | None = None, after: str | None = None, limit: int = 100) -> list[dict]:
+        """
+        Fetch currently pending orders for the authenticated account.
+
+        Args:
+            inst_type: Optional instrument type filter (e.g., SWAP, FUTURES).
+            after: Cursor bill ID for pagination.
+            limit: Maximum number of orders to fetch.
+        """
+        params = {"limit": str(limit)}
+        if inst_type:
+            params["instType"] = inst_type
+        if after:
+            params["after"] = after
+        response = self._request("GET", "/api/v5/trade/orders-pending", params=params)
+        return response.get("data", [])
+
     def place_order(self, payload: dict) -> dict:
         order = self._normalize_order_payload(payload)
         body = {
@@ -132,11 +163,11 @@ class OkxPaperClient(ExchangeClient):
         if self._credentials is None:
             raise RuntimeError("Client has not been authenticated")
 
-        timestamp = datetime.now(tz=timezone.utc).strftime(ISO_FORMAT)
+        timestamp = datetime.now(tz=timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
         body_text = json.dumps(json_body, separators=(",", ":")) if json_body else ""
         query = ""
         if params:
-            query = httpx.QueryParams(params).render()
+            query = str(httpx.QueryParams(params))
             path_with_params = f"{path}?{query}"
         else:
             path_with_params = path
@@ -152,7 +183,7 @@ class OkxPaperClient(ExchangeClient):
             "Content-Type": "application/json",
         }
         if self._simulate:
-            headers["x-api-simulate"] = "1"
+            headers["x-simulated-trading"] = "1"
 
         response = self._client.request(
             method,

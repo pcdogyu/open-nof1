@@ -11,6 +11,7 @@ from functools import lru_cache
 from typing import Iterable
 
 from accounts.portfolio_registry import PortfolioRecord, PortfolioRegistry
+from accounts.repository import AccountRepository, InfluxAccountRepository
 
 
 @lru_cache(maxsize=1)
@@ -54,3 +55,9 @@ def _demo_records() -> Iterable[PortfolioRecord]:
         api_key_id="secrets/okx/qwen-demo",
         notes="Seed account for Qwen model on OKX paper trading.",
     )
+
+
+@lru_cache(maxsize=1)
+def get_account_repository() -> AccountRepository:
+    """Provide a shared repository instance for account persistence."""
+    return InfluxAccountRepository()

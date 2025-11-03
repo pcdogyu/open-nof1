@@ -27,11 +27,17 @@ def deterministic_decision(request: SignalRequest, *, source: str) -> Dict[str, 
     bias = (request.market.price % 100) / 100
     ratio = request.risk.current_position / request.risk.max_position
     if ratio < 0.3 and bias > 0.5:
-        decision = "buy"
-    elif ratio > 0.8:
+        decision = "open_long"
+        side = "buy"
+    elif ratio > 0.7 and bias < 0.5:
+        decision = "open_short"
+        side = "sell"
+    elif ratio > 0.9:
         decision = "reduce"
+        side = "sell"
     else:
         decision = "hold"
+        side = "sell" if ratio > 0.5 else "buy"
     confidence = clamp_confidence(0.4 + bias / 2)
     return {
         "provider": source,
@@ -42,7 +48,7 @@ def deterministic_decision(request: SignalRequest, *, source: str) -> Dict[str, 
         ),
         "order": {
             "instrument_id": request.market.instrument_id,
-            "side": "buy" if decision == "buy" else "sell",
+            "side": side,
             "size": round(request.risk.max_position * 0.1, 4),
             "type": "limit",
             "price": round(request.market.price * (1 - 0.001), 2),

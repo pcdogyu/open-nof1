@@ -79,10 +79,14 @@ class QwenAdapter(BaseModelAdapter):
     def _parse_response(
         self, raw_output: Dict[str, Any], request: SignalRequest
     ) -> SignalResponse:
-        decision = raw_output.get("decision") or "hold"
+        decision = self._normalize_decision(raw_output.get("decision"))
         confidence = clamp_confidence(raw_output.get("confidence", 0.5))
         reasoning = raw_output.get("reasoning", "N/A")
         suggested_order = raw_output.get("order", {})
+        if decision == "open_long":
+            suggested_order.setdefault("side", "buy")
+        elif decision == "open_short":
+            suggested_order.setdefault("side", "sell")
         return SignalResponse(
             model_id=self.model_id,
             decision=decision,
@@ -101,4 +105,22 @@ class QwenAdapter(BaseModelAdapter):
         return (
             "You are Qwen, supporting quantitative trading decisions. Respond"
             " strictly with JSON keys: decision, confidence, reasoning, order."
+            " The decision must be one of open_long, open_short, hold, reduce,"
+            " or close. Include order.side/order.size/order.price when "
+            "providing trade instructions."
         )
+
+    @staticmethod
+    def _normalize_decision(value: Any) -> str:
+        if not value:
+            return "hold"
+        decision = str(value).lower()
+        if decision in {"buy", "long", "open_long"}:
+            return "open_long"
+        if decision in {"sell", "short", "open_short"}:
+            return "open_short"
+        if decision in {"reduce", "trim"}:
+            return "reduce"
+        if decision in {"close", "flat", "exit"}:
+            return "close"
+        return "hold"

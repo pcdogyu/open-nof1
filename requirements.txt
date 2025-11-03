@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+httpx
+python-multipart
+apscheduler
+influxdb-client
+numpy
+pandas
+tzdata

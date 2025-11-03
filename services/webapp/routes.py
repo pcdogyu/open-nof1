@@ -4,17 +4,177 @@ HTTP route handlers for the FastAPI web application.
 
 from __future__ import annotations
 
+import ast
+import json
+import logging
+import math
+import pprint
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import List
+from pathlib import Path
+from threading import Lock
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field, validator
 
+from accounts.models import Account, AccountSnapshot, Order, Position, Trade, Balance
 from accounts.portfolio_registry import PortfolioRecord, PortfolioRegistry
-from services.webapp.dependencies import get_portfolio_registry
+from accounts.repository import AccountRepository
+from services.analytics.leaderboard import get_leaderboard, refresh_leaderboard_cache
+from services.okx.catalog import (
+    load_catalog_cache,
+    refresh_okx_instrument_catalog,
+    search_instrument_catalog,
+)
+from services.okx.live import fetch_account_snapshot
+from services.webapp.dependencies import get_account_repository, get_portfolio_registry
 
+CONFIG_PATH = Path("config.py")
 
+try:
+    from config import (
+        MODEL_DEFAULTS,
+        OKX_ACCOUNTS,
+        PIPELINE_POLL_INTERVAL,
+        TRADABLE_INSTRUMENTS,
+    )
+    try:
+        from config import OKX_CACHE_TTL_SECONDS as _OKX_TTL
+    except Exception:  # name missing or other
+        _OKX_TTL = 600
+except ImportError:  # pragma: no cover - fallback for test envs
+    MODEL_DEFAULTS = {
+        "deepseek-v1": {
+            "display_name": "DeepSeek 交易模型",
+            "provider": "DeepSeek",
+            "enabled": True,
+            "api_key": "",
+        },
+        "qwen-v1": {
+            "display_name": "Qwen 千问模型",
+            "provider": "阿里云通义",
+            "enabled": True,
+            "api_key": "",
+        },
+    }
+    OKX_ACCOUNTS = {}
+    TRADABLE_INSTRUMENTS = [
+        "XRP-USDT-SWAP",
+        "BNB-USDT-SWAP",
+        "BTC-USDT-SWAP",
+        "ETH-USDT-SWAP",
+        "SOL-USDT-SWAP",
+        "DOGE-USDT-SWAP",
+    ]
+    PIPELINE_POLL_INTERVAL = 120
+    _OKX_TTL = 600
 router = APIRouter()
+_OKX_CACHE_TTL_SECONDS = int(_OKX_TTL)
+
+SIGNAL_LOG_PATH = Path("data/logs/ai_signals.jsonl")
+logger = logging.getLogger(__name__)
+_MODEL_REGISTRY_LOCK = Lock()
+_MODEL_REGISTRY: dict[str, dict] = {
+    model_id: {
+        **meta,
+        "model_id": model_id,
+        "last_updated": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    for model_id, meta in MODEL_DEFAULTS.items()
+}
+
+
+def _get_enabled_model_ids() -> set[str]:
+    """Return a set of model IDs that are currently enabled."""
+    with _MODEL_REGISTRY_LOCK:
+        return {
+            model_id
+            for model_id, record in _MODEL_REGISTRY.items()
+            if record.get("enabled")
+        }
+_PIPELINE_SETTINGS_LOCK = Lock()
+_PIPELINE_SETTINGS: dict[str, object] = {
+    "tradable_instruments": list(TRADABLE_INSTRUMENTS),
+    "poll_interval": int(PIPELINE_POLL_INTERVAL),
+    "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+}
+
+
+class PipelineSettingsPayload(BaseModel):
+    """Request payload for updating pipeline configuration."""
+
+    tradable_instruments: List[str] = Field(
+        ..., description="List of OKX instrument identifiers (e.g. BTC-USDT-SWAP)."
+    )
+    poll_interval: int = Field(
+        ..., ge=30, le=3600, description="Polling interval for the data pipeline in seconds."
+    )
+
+    @validator("tradable_instruments")
+    def _ensure_instruments(cls, value: List[str]) -> List[str]:
+        sanitized = [inst.strip() for inst in value if inst and inst.strip()]
+        if not sanitized:
+            raise ValueError("At least one instrument must be provided.")
+        return sanitized
+
+
+def get_pipeline_settings() -> dict:
+    """Return current pipeline settings snapshot."""
+    with _PIPELINE_SETTINGS_LOCK:
+        return {
+            "tradable_instruments": list(_PIPELINE_SETTINGS["tradable_instruments"]),
+            "poll_interval": int(_PIPELINE_SETTINGS["poll_interval"]),
+            "updated_at": _PIPELINE_SETTINGS["updated_at"],
+        }
+
+
+def update_pipeline_settings(tradable_instruments: List[str], poll_interval: int) -> dict:
+    """Update pipeline settings and persist them to config.py."""
+    normalized = _normalize_instrument_list(tradable_instruments)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="At least one instrument is required.")
+    poll = int(poll_interval)
+    if poll < 30 or poll > 3600:
+        raise HTTPException(status_code=400, detail="Polling interval must be between 30 and 3600 seconds.")
+
+    global TRADABLE_INSTRUMENTS, PIPELINE_POLL_INTERVAL
+    with _PIPELINE_SETTINGS_LOCK:
+        _PIPELINE_SETTINGS["tradable_instruments"] = normalized
+        _PIPELINE_SETTINGS["poll_interval"] = poll
+        _PIPELINE_SETTINGS["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
+        TRADABLE_INSTRUMENTS = normalized
+        PIPELINE_POLL_INTERVAL = poll
+        _persist_pipeline_settings(normalized, poll)
+        return {
+            "tradable_instruments": list(normalized),
+            "poll_interval": poll,
+            "updated_at": _PIPELINE_SETTINGS["updated_at"],
+        }
+
+
+def get_instrument_catalog(limit: int = 200) -> list[dict]:
+    """Return a sanitized snapshot of the cached OKX instrument catalog."""
+    entries = search_instrument_catalog(None, limit=limit)
+    return [_instrument_entry_to_payload(entry) for entry in entries]
+
+
+async def refresh_instrument_catalog() -> dict:
+    """Fetch the latest instrument catalog from OKX and persist caches."""
+    return await refresh_okx_instrument_catalog()
+
+
+def _normalize_instrument_list(instruments: List[str]) -> List[str]:
+    """Strip whitespace, uppercase instrument ids, and de-duplicate in order."""
+    seen: set[str] = set()
+    normalized: List[str] = []
+    for value in instruments:
+        inst_id = (value or "").strip().upper()
+        if not inst_id or inst_id in seen:
+            continue
+        seen.add(inst_id)
+        normalized.append(inst_id)
+    return normalized
 
 
 @router.get("/health", summary="Service health probe")
@@ -88,35 +248,562 @@ def get_system_metrics() -> dict:
     summary="Per-model performance snapshots",
 )
 def get_model_metrics() -> dict:
-    """Return mock performance stats for DeepSeek and Qwen models."""
+    return _collect_model_metrics()
+
+
+def _collect_model_metrics(repository: AccountRepository | None = None) -> dict:
+    """
+    Return live performance metrics sourced from the account repository.
+
+    When historical data is insufficient for a metric we return None so the UI can
+    display a placeholder instead of stale demo values.
+    """
+    repo = repository or get_account_repository()
     now = datetime.now(tz=timezone.utc).isoformat()
-    recent_trades = _mock_recent_trades()
+    try:
+        accounts = repo.list_accounts()
+    except Exception as exc:  # pragma: no cover - repository failures
+        logger.exception("Failed to load accounts for model metrics: %s", exc)
+        return {
+            "as_of": now,
+            "models": [],
+            "recent_trades": [],
+            "recent_ai_signals": _load_recent_ai_signals(),
+        }
+
+    model_rows: list[dict] = []
+    aggregated_trades: list[Trade] = []
+    for account in accounts:
+        try:
+            positions = repo.list_positions(account.account_id)
+        except Exception:
+            logger.warning("Unable to list positions for account %s", account.account_id)
+            positions = []
+        try:
+            trades = repo.list_trades(account.account_id, limit=200)
+        except Exception:
+            logger.warning("Unable to list trades for account %s", account.account_id)
+            trades = []
+        try:
+            equity_curve = repo.get_equity_curve(account.account_id, limit=200)
+        except Exception:
+            logger.warning("Unable to fetch equity curve for account %s", account.account_id)
+            equity_curve = []
+
+        aggregated_trades.extend(trades)
+        model_rows.append(
+            _summarize_account_performance(
+                account=account,
+                positions=positions,
+                trades=trades,
+                equity_curve=equity_curve,
+            )
+        )
+
+    recent_trades: list[dict] = []
+    for trade in sorted(aggregated_trades, key=lambda t: t.executed_at, reverse=True)[:200]:
+        payload = _trade_to_dict(trade)
+        quantity = payload.get("quantity")
+        if payload.get("size") is None and quantity is not None:
+            payload["size"] = quantity
+        price = payload.get("price")
+        if payload.get("entry_price") is None and price is not None:
+            payload["entry_price"] = price
+        if payload.get("exit_price") is None and price is not None:
+            payload["exit_price"] = price
+        if payload.get("pnl") is None and payload.get("realized_pnl") is not None:
+            payload["pnl"] = payload.get("realized_pnl")
+        recent_trades.append(payload)
+
+    # Fallback/live merge: include latest trades from OKX paper trading accounts
+    live_trades: list[dict] = []
+    for _, meta in OKX_ACCOUNTS.items():
+        try:
+            live = fetch_account_snapshot(meta)
+        except Exception:
+            continue
+        for item in live.get("recent_trades", []) or []:
+            # Ensure required keys exist; keep as dict already normalized by OKX layer
+            live_trades.append(dict(item))
+
+    def _parse_time(value: object) -> str:
+        # use string compare after ensuring isoformat strings; fallback empty
+        try:
+            return str(value)
+        except Exception:
+            return ""
+
+    combined_trades = recent_trades + live_trades
+    combined_trades = sorted(
+        combined_trades,
+        key=lambda d: _parse_time(d.get("executed_at") or d.get("timestamp")),
+        reverse=True,
+    )[:20]
+
+    enabled_models = _get_enabled_model_ids()
     return {
         "as_of": now,
-        "models": [
-            {
-                "model_id": "deepseek-v1",
-                "portfolio_id": "okx_deepseek_demo",
-                "sharpe_ratio": 1.8,
-                "max_drawdown_pct": 4.5,
-                "win_rate_pct": 58.0,
-                "avg_trade_duration_min": 42,
-                "exposure_usd": 6800.0,
-                "open_positions": 2,
-            },
-            {
-                "model_id": "qwen-v1",
-                "portfolio_id": "okx_qwen_demo",
-                "sharpe_ratio": 1.2,
-                "max_drawdown_pct": 6.1,
-                "win_rate_pct": 53.0,
-                "avg_trade_duration_min": 35,
-                "exposure_usd": 7200.0,
-                "open_positions": 1,
-            },
-        ],
-        "recent_trades": recent_trades,
+        "models": model_rows,
+        "recent_trades": combined_trades,
+        "recent_ai_signals": _load_recent_ai_signals(limit=20, enabled_model_ids=enabled_models),
     }
+
+
+@router.get(
+    "/api/accounts",
+    response_model=List[Account],
+    summary="List accounts with latest equity snapshots",
+)
+def list_accounts_api(
+    repository: AccountRepository = Depends(get_account_repository),
+) -> List[Account]:
+    return repository.list_accounts()
+
+
+@router.get(
+    "/api/accounts/{account_id}",
+    response_model=AccountSnapshot,
+    summary="Retrieve a single account snapshot including positions and trades",
+)
+def get_account_snapshot_api(
+    account_id: str,
+    repository: AccountRepository = Depends(get_account_repository),
+) -> AccountSnapshot:
+    snapshot = repository.get_snapshot(account_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return snapshot
+
+
+@router.get(
+    "/api/okx/summary",
+    summary="Aggregate OKX paper trading metrics",
+)
+def okx_summary_api(
+    repository: AccountRepository = Depends(get_account_repository),
+) -> dict:
+    return get_okx_summary(repository)
+
+
+def get_model_catalog() -> list[dict]:
+    """Return current model registry configuration."""
+    with _MODEL_REGISTRY_LOCK:
+        return [dict(info) for info in _MODEL_REGISTRY.values()]
+
+
+def update_model_config(model_id: str, *, enabled: bool, api_key: str | None) -> dict:
+    """Update an individual model configuration entry."""
+    with _MODEL_REGISTRY_LOCK:
+        record = _MODEL_REGISTRY.get(model_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Model not found")
+        record["enabled"] = enabled
+        if api_key is not None:
+            record["api_key"] = api_key
+        record["last_updated"] = datetime.now(tz=timezone.utc).isoformat()
+        _persist_model_defaults()
+        return dict(record)
+
+
+@router.get(
+    "/api/settings/pipeline",
+    summary="Retrieve current pipeline configuration (interval + instruments)",
+)
+def pipeline_settings_api() -> dict:
+    return get_pipeline_settings()
+
+
+@router.post(
+    "/api/settings/pipeline",
+    summary="Update pipeline configuration (interval + instruments)",
+)
+def update_pipeline_settings_api(payload: PipelineSettingsPayload) -> dict:
+    return update_pipeline_settings(payload.tradable_instruments, payload.poll_interval)
+
+
+@router.get(
+    "/api/settings/instruments/search",
+    summary="Search cached OKX instruments for quick selection",
+)
+def search_instruments_api(q: Optional[str] = None, limit: int = 50, quote: Optional[str] = None) -> dict:
+    limit = max(1, min(limit, 200))
+    matches = search_instrument_catalog(q or None, limit=limit, quote=(quote or None))
+    return {
+        "query": (q or "").strip(),
+        "quote": (quote or "").strip().upper(),
+        "results": [_instrument_entry_to_payload(item) for item in matches],
+        "limit": limit,
+        "total_cached": len(load_catalog_cache()),
+    }
+
+
+@router.post(
+    "/api/settings/instruments/refresh",
+    summary="Refresh the OKX instrument catalog cache (and persist to InfluxDB)",
+)
+async def refresh_instruments_api() -> dict:
+    result = await refresh_instrument_catalog()
+    return {
+        "count": result["count"],
+        "wrote_influx": result["wrote_influx"],
+        "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+def get_okx_summary(
+    repository: AccountRepository | None = None,
+    *,
+    force_refresh: bool = False,
+    ttl_seconds: int | None = None,
+) -> dict:
+    """Return OKX account snapshots, leaderboard, and equity curves.
+
+    Optimization: prefer cached Influx data; only refresh from OKX if cache is
+    older than 10 minutes, then persist refreshed data back to Influx.
+    """
+    repo = repository or get_account_repository()
+    repository_failed = False
+    try:
+        accounts = repo.list_accounts()
+    except Exception as exc:  # repository backend unavailable (e.g., Influx not running)
+        logger.exception("Failed to load accounts for OKX summary: %s", exc)
+        accounts = []
+        repository_failed = True
+
+    now = datetime.now(tz=timezone.utc)
+    ttl = int(ttl_seconds) if ttl_seconds is not None else _OKX_CACHE_TTL_SECONDS
+
+    # Build cached payloads from repository
+    account_payloads: list[dict] = []
+    account_map: Dict[str, dict] = {}
+    accounts_by_id: Dict[str, Account] = {a.account_id: a for a in accounts}
+    sync_errors: list[dict] = []
+    if repository_failed:
+        sync_errors.append(
+            {
+                "account_id": "repository",
+                "message": "Account repository unavailable; showing live data only if configured.",
+            }
+        )
+    for account in accounts:
+        positions = repo.list_positions(account.account_id)
+        trades = repo.list_trades(account.account_id, limit=20)
+        curve = repo.get_equity_curve(account.account_id, limit=50)
+        balances = repo.list_balances(account.account_id)
+        orders = repo.list_orders(account.account_id, limit=50)
+        payload = {
+            "account": account.dict(),
+            "balances": [balance.dict() for balance in balances],
+            "positions": [position.dict() for position in positions],
+            "recent_trades": [_trade_to_dict(trade) for trade in trades],
+            "open_orders": [_order_to_dict(order) for order in orders],
+            "equity_curve": curve,
+        }
+        account_payloads.append(payload)
+        account_map[account.account_id] = payload
+
+    # Merge or refresh live data conditionally per account (10-minute TTL)
+    for key, meta in OKX_ACCOUNTS.items():
+        account_id = meta.get("account_id") or key
+        cached = accounts_by_id.get(account_id)
+        fresh_enough = False
+        if not force_refresh and cached is not None:
+            try:
+                age = (now - cached.updated_at).total_seconds()
+                fresh_enough = age <= ttl
+            except Exception:
+                fresh_enough = False
+
+        if fresh_enough:
+            # Keep cached repository payload; skip OKX API call
+            continue
+
+        # Cache is missing or stale -> fetch from OKX
+        try:
+            live = fetch_account_snapshot(meta)
+        except Exception as exc:
+            sync_errors.append(
+                {
+                    "account_id": account_id,
+                    "message": str(exc),
+                }
+            )
+            continue
+
+        # Persist refreshed snapshot back to repository when available
+        if not repository_failed:
+            try:
+                _persist_live_snapshot(repo, live, existing=cached, timestamp=now)
+            except Exception as exc:
+                sync_errors.append(
+                    {
+                        "account_id": account_id,
+                        "message": f"Failed to persist refreshed data: {exc}",
+                    }
+                )
+
+        # Update response payload with freshest data
+        live_account = live.get("account", {})
+        target = account_map.get(account_id)
+        if target is None:
+            target = {
+                "account": live_account,
+                "balances": live.get("balances", []),
+                "positions": live.get("positions", []),
+                "recent_trades": live.get("recent_trades", []),
+                "open_orders": live.get("open_orders", []),
+                "equity_curve": [],
+            }
+            account_payloads.append(target)
+            account_map[account_id] = target
+        else:
+            target["account"].update(live_account)
+            target["balances"] = live.get("balances", [])
+            target["positions"] = live.get("positions", [])
+            target["recent_trades"] = live.get("recent_trades", [])
+            target["open_orders"] = live.get("open_orders", [])
+
+    # Leaderboard may also rely on repository; guard to avoid 500s in demo setups
+    try:
+        leaderboard = get_leaderboard(repo)
+    except Exception:
+        leaderboard = {"leaders": []}
+    if not leaderboard.get("leaders"):
+        leaderboard = refresh_leaderboard_cache(repo)
+    return {
+        "as_of": now.isoformat(),
+        "accounts": account_payloads,
+        "leaderboard": leaderboard,
+        "sync_errors": sync_errors,
+    }
+
+
+def _persist_live_snapshot(
+    repo: AccountRepository,
+    live: dict,
+    *,
+    existing: Account | None,
+    timestamp: datetime,
+) -> None:
+    """Persist a live OKX snapshot bundle into the repository."""
+    acc = live.get("account", {}) or {}
+    created_at = existing.created_at if existing is not None else timestamp
+    account_model = Account(
+        account_id=str(acc.get("account_id")),
+        model_id=str(acc.get("model_id")),
+        base_currency=str(acc.get("base_currency", "USD")),
+        starting_equity=float(acc.get("starting_equity", 0.0)),
+        cash_balance=float(acc.get("cash_balance", 0.0)),
+        equity=float(acc.get("equity", 0.0)),
+        pnl=float(acc.get("pnl", 0.0)),
+        created_at=created_at,
+        updated_at=timestamp,
+    )
+    repo.upsert_account(account_model)
+    try:
+        repo.record_equity_point(account_model)
+    except Exception:  # best-effort, non-fatal
+        pass
+
+    # Persist balances
+    for b in live.get("balances", []) or []:
+        try:
+            balance = Balance(
+                balance_id=str(b.get("balance_id") or f"{account_model.account_id}-{b.get('currency','')}"),
+                account_id=str(b.get("account_id", account_model.account_id)),
+                currency=str(b.get("currency", "")),
+                total=float(b.get("total", 0.0)),
+                available=float(b.get("available", 0.0)),
+                frozen=float(b.get("frozen", 0.0)),
+                equity=float(b.get("equity", 0.0)),
+                updated_at=timestamp,
+            )
+            repo.record_balance(balance)
+        except Exception:
+            continue
+
+    # Persist positions
+    for p in live.get("positions", []) or []:
+        try:
+            position = Position(
+                position_id=str(p.get("position_id")),
+                account_id=str(p.get("account_id", account_model.account_id)),
+                instrument_id=str(p.get("instrument_id", "")),
+                side=str(p.get("side", "")),
+                quantity=float(p.get("quantity", 0.0)),
+                entry_price=float(p.get("entry_price", 0.0)),
+                mark_price=p.get("mark_price"),
+                leverage=p.get("leverage"),
+                unrealized_pnl=p.get("unrealized_pnl"),
+                updated_at=timestamp,
+            )
+            repo.record_position(position)
+        except Exception:
+            continue
+
+    # Persist open orders
+    for o in live.get("open_orders", []) or []:
+        try:
+            order = Order(
+                order_id=str(o.get("order_id")),
+                account_id=str(o.get("account_id", account_model.account_id)),
+                model_id=str(o.get("model_id", account_model.model_id)),
+                instrument_id=str(o.get("instrument_id", "")),
+                side=str(o.get("side", "")),
+                order_type=str(o.get("order_type", "")),
+                size=float(o.get("size", 0.0)),
+                filled_size=float(o.get("filled_size", 0.0)),
+                price=o.get("price"),
+                average_price=o.get("average_price"),
+                state=str(o.get("state", "live")),
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+            repo.record_order(order)
+        except Exception:
+            continue
+
+    # Persist recent trades
+    for t in live.get("recent_trades", []) or []:
+        try:
+            trade = Trade(
+                trade_id=str(t.get("trade_id")),
+                account_id=str(t.get("account_id", account_model.account_id)),
+                model_id=str(t.get("model_id", account_model.model_id)),
+                instrument_id=str(t.get("instrument_id", "")),
+                side=str(t.get("side", "")),
+                quantity=float(t.get("quantity", 0.0)),
+                price=float(t.get("price", 0.0)),
+                fee=t.get("fee"),
+                realized_pnl=t.get("realized_pnl"),
+                executed_at=timestamp,
+            )
+            repo.record_trade(trade)
+        except Exception:
+            continue
+
+
+def _trade_to_dict(trade: Trade) -> dict:
+    payload = trade.dict()
+    if isinstance(payload.get("executed_at"), datetime):
+        payload["executed_at"] = payload["executed_at"].isoformat()
+    return payload
+
+
+def _order_to_dict(order: Order) -> dict:
+    payload = order.dict()
+    if isinstance(payload.get("created_at"), datetime):
+        payload["created_at"] = payload["created_at"].isoformat()
+    if isinstance(payload.get("updated_at"), datetime):
+        payload["updated_at"] = payload["updated_at"].isoformat()
+    return payload
+
+
+def _summarize_account_performance(
+    *,
+    account: Account,
+    positions: List[Position],
+    trades: List[Trade],
+    equity_curve: List[dict],
+) -> dict:
+    exposure = _compute_notional_exposure(positions)
+    sharpe_ratio = _compute_sharpe_ratio(equity_curve)
+    max_drawdown_pct = _compute_max_drawdown_pct(equity_curve)
+    win_rate_pct = _compute_win_rate_pct(trades)
+    avg_trade_duration_min = _compute_avg_trade_interval_minutes(trades)
+
+    return {
+        "model_id": account.model_id,
+        "portfolio_id": account.account_id,
+        "sharpe_ratio": sharpe_ratio,
+        "max_drawdown_pct": max_drawdown_pct,
+        "win_rate_pct": win_rate_pct,
+        "avg_trade_duration_min": avg_trade_duration_min,
+        "exposure_usd": exposure,
+        "open_positions": len(positions),
+    }
+
+
+def _compute_notional_exposure(positions: List[Position]) -> float:
+    exposure = 0.0
+    for position in positions:
+        price = position.mark_price if position.mark_price is not None else position.entry_price
+        exposure += abs(position.quantity * price)
+    return round(exposure, 2)
+
+
+def _compute_sharpe_ratio(equity_curve: List[dict]) -> Optional[float]:
+    equities: List[float] = []
+    for point in equity_curve:
+        try:
+            equities.append(float(point.get("equity", 0.0)))
+        except (TypeError, ValueError):
+            continue
+    if len(equities) < 2:
+        return None
+    returns: List[float] = []
+    for previous, current in zip(equities, equities[1:]):
+        if previous <= 0:
+            continue
+        returns.append((current - previous) / previous)
+    if not returns:
+        return None
+    mean_return = sum(returns) / len(returns)
+    variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
+    if variance <= 0:
+        return None
+    sharpe = mean_return / math.sqrt(variance) * math.sqrt(len(returns))
+    return round(sharpe, 2)
+
+
+def _compute_max_drawdown_pct(equity_curve: List[dict]) -> Optional[float]:
+    peak = None
+    max_drawdown = 0.0
+    for point in equity_curve:
+        try:
+            equity = float(point.get("equity", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if equity <= 0:
+            continue
+        if peak is None or equity > peak:
+            peak = equity
+        drawdown = ((peak - equity) / peak) if peak else 0.0
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+    if peak is None:
+        return None
+    return round(max_drawdown * 100, 2)
+
+
+def _compute_win_rate_pct(trades: List[Trade]) -> Optional[float]:
+    wins = 0
+    losses = 0
+    for trade in trades:
+        pnl = trade.realized_pnl
+        if pnl is None:
+            continue
+        if pnl > 0:
+            wins += 1
+        elif pnl < 0:
+            losses += 1
+    total = wins + losses
+    if total == 0:
+        return None
+    return round((wins / total) * 100, 2)
+
+
+def _compute_avg_trade_interval_minutes(trades: List[Trade]) -> Optional[float]:
+    if len(trades) < 2:
+        return None
+    ordered = sorted(trades, key=lambda trade: trade.executed_at)
+    intervals: List[float] = []
+    for prev, current in zip(ordered, ordered[1:]):
+        delta = current.executed_at - prev.executed_at
+        intervals.append(delta.total_seconds() / 60.0)
+    if not intervals:
+        return None
+    return round(sum(intervals) / len(intervals), 2)
 
 
 def _mock_portfolio_metrics(record: PortfolioRecord) -> dict:
@@ -138,40 +825,103 @@ def _mock_portfolio_metrics(record: PortfolioRecord) -> dict:
     }
 
 
-def _mock_recent_trades() -> list[dict]:
-    """Return placeholder recent trade records shared by UI."""
-    return [
-        {
-            "executed_at": "2025-10-28T09:39:10+00:00",
-            "model_id": "deepseek-v1",
-            "portfolio_id": "okx_deepseek_demo",
-            "instrument_id": "BTC-USDT-SWAP",
-            "side": "buy",
-            "size": 0.25,
-            "entry_price": 34050.5,
-            "exit_price": 34210.0,
-            "pnl": 42.1,
-        },
-        {
-            "executed_at": "2025-10-28T09:33:52+00:00",
-            "model_id": "qwen-v1",
-            "portfolio_id": "okx_qwen_demo",
-            "instrument_id": "ETH-USDT-SWAP",
-            "side": "sell",
-            "size": 3.0,
-            "entry_price": 1785.8,
-            "exit_price": 1792.3,
-            "pnl": -18.4,
-        },
-        {
-            "executed_at": "2025-10-28T09:27:18+00:00",
-            "model_id": "deepseek-v1",
-            "portfolio_id": "okx_deepseek_demo",
-            "instrument_id": "BTC-USDT-SWAP",
-            "side": "sell",
-            "size": 0.1,
-            "entry_price": 34120.0,
-            "exit_price": 33980.5,
-            "pnl": 8.6,
-        },
-    ]
+def _instrument_entry_to_payload(entry: dict) -> dict:
+    """Return a compact instrument record suitable for API/HTML clients."""
+    return {
+        "inst_id": entry.get("instId"),
+        "alias": entry.get("alias"),
+        "base_currency": entry.get("baseCcy"),
+        "quote_currency": entry.get("quoteCcy"),
+        "settle_currency": entry.get("settleCcy"),
+        "category": entry.get("category"),
+        "state": entry.get("state"),
+    }
+
+
+def _load_recent_ai_signals(limit: int = 10, *, enabled_model_ids: set[str] | None = None) -> list[dict]:
+    if not SIGNAL_LOG_PATH.exists():
+        return []
+    try:
+        lines = SIGNAL_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    records: list[dict] = []
+    for line in reversed(lines[-limit:]):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+            model_id = (payload.get("model_id") or "").strip()
+            if enabled_model_ids is not None and model_id and model_id not in enabled_model_ids:
+                continue
+            records.append(payload)
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+def _persist_model_defaults() -> None:
+    """Persist current model registry to config.py for durability."""
+    sanitized: Dict[str, dict] = {}
+    for model_id, record in _MODEL_REGISTRY.items():
+        sanitized[model_id] = {
+            key: record.get(key)
+            for key in ("display_name", "provider", "enabled", "api_key")
+        }
+    _replace_config_assignment("MODEL_DEFAULTS", sanitized)
+    try:
+        import config as config_module  # type: ignore
+
+        config_module.MODEL_DEFAULTS = sanitized  # type: ignore[attr-defined]
+    except ImportError:
+        pass
+
+
+def _persist_pipeline_settings(tradable_instruments: List[str], poll_interval: int) -> None:
+    """Persist pipeline tradable instruments and poll interval to config.py."""
+    _replace_config_assignment("TRADABLE_INSTRUMENTS", tradable_instruments)
+    _replace_config_assignment("PIPELINE_POLL_INTERVAL", poll_interval)
+    try:
+        import config as config_module  # type: ignore
+
+        config_module.TRADABLE_INSTRUMENTS = tradable_instruments  # type: ignore[attr-defined]
+        config_module.PIPELINE_POLL_INTERVAL = poll_interval  # type: ignore[attr-defined]
+    except ImportError:
+        pass
+
+
+def _replace_config_assignment(var_name: str, value: object) -> None:
+    """Replace a top-level assignment in config.py with the provided value."""
+    if not CONFIG_PATH.exists():
+        return
+    source = CONFIG_PATH.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return
+
+    assign_node: ast.Assign | None = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == var_name:
+                    assign_node = node
+                    break
+        if assign_node is not None:
+            break
+
+    if assign_node is None or not hasattr(assign_node, "lineno") or not hasattr(assign_node, "end_lineno"):
+        return
+
+    start = assign_node.lineno - 1
+    end = assign_node.end_lineno
+    lines = source.splitlines()
+    if isinstance(value, (dict, list, tuple)):
+        formatted_value = pprint.pformat(value, indent=4, sort_dicts=False, width=100)
+    else:
+        formatted_value = repr(value)
+    formatted = f"{var_name} = {formatted_value}"
+    replacement_lines = formatted.splitlines()
+    lines[start:end] = replacement_lines
+    CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
