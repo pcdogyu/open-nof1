@@ -1548,6 +1548,7 @@ ORDERBOOK_TEMPLATE = r"""
                 <span>买盘深度（前${{levels}}档）${{buyDepthText}}</span>
                 <span>卖盘深度（前${{levels}}档）${{sellDepthText}}</span>
                 <span>总深度 ${{totalDepthText}}</span>
+                <span>净深度 ${{totalDepth > 0 ? formatNumber(buyDepth - sellDepth, 2) : '--'}}</span>
               </div>
               <canvas class="chart-canvas"></canvas>
               <p class="chart-insight ${{tone}}">${{analysis}}</p>
@@ -1584,16 +1585,15 @@ ORDERBOOK_TEMPLATE = r"""
         window.addEventListener('resize', () => {{
           document.querySelectorAll('.chart-canvas').forEach((canvas) => {{
             try {{
-              const buy = JSON.parse(canvas.dataset.buy || '[]');
-              const sell = JSON.parse(canvas.dataset.sell || '[]');
-              drawStrengthChart(canvas, buy, sell);
+              const history = JSON.parse(canvas.dataset.history || '[]');
+              drawNetDepthChart(canvas, history);
             }} catch (err) {{
               console.error(err);
             }}
           }});
         }});
         refresh();
-        setInterval(refresh, 4000);
+        setInterval(refresh, 5000);
       }})();
     </script>
 </body>
