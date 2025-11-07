@@ -1332,7 +1332,7 @@ ORDERBOOK_TEMPLATE = r"""
         .controls {{ display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 1rem; }}
         .controls label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
         select {{ min-width: 160px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; padding: 8px 10px; }}
-        .book-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 20px; }}
+        .book-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 20px; }}
         .orderbook-chart {{ background: #0f1b2d; border-radius: 16px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.15); display: flex; flex-direction: column; gap: 14px; }}
         .orderbook-chart.tone-positive {{ border-color: rgba(74, 222, 128, 0.4); }}
         .orderbook-chart.tone-negative {{ border-color: rgba(248, 113, 113, 0.35); }}
@@ -1348,6 +1348,7 @@ ORDERBOOK_TEMPLATE = r"""
         .chart-insight.positive {{ color: #4ade80; }}
         .chart-insight.negative {{ color: #f87171; }}
         .chart-insight.neutral {{ color: #94a3b8; }}
+        .section-heading {{ margin: 0 0 1rem; font-size: 1.25rem; color: #e2e8f0; }}
         .empty-state {{ color: #94a3b8; padding: 16px; text-align: center; }}
     </style>
 </head>
@@ -1374,6 +1375,7 @@ ORDERBOOK_TEMPLATE = r"""
             </select>
         </label>
         <span>最后更新：<span class="timestamp" id="orderbook-updated">{updated_at}</span></span>
+    <h2 class="section-heading">市场深度</h2>
     <div id="orderbook-container" class="book-grid">
         {cards}
     </div>
