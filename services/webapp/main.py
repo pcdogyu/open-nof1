@@ -1375,6 +1375,7 @@ ORDERBOOK_TEMPLATE = r"""
             </select>
         </label>
         <span>最后更新：<span class="timestamp" id="orderbook-updated">{updated_at}</span></span>
+    </div>
     <h2 class="section-heading">市场深度</h2>
     <div id="orderbook-container" class="book-grid">
         {cards}
@@ -1383,6 +1384,9 @@ ORDERBOOK_TEMPLATE = r"""
       (function() {{
         const instrumentSelect = document.getElementById('orderbook-instrument');
         const levelSelect = document.getElementById('depth-levels');
+        const DEFAULT_PAIRS = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP'];
+        const HISTORY_LIMIT = 120;
+        const netDepthHistory = new Map();
 
         const formatNumber = (value, digits = 2) => {{
           if (value === null || value === undefined || value === '') {{ return '--'; }}
@@ -1425,17 +1429,21 @@ ORDERBOOK_TEMPLATE = r"""
           }}
           return {{ tone: 'neutral', text: '买卖力量接近平衡，关注成交突破信号。' }};
         }};
-        const buildSeries = (entries, depth) => {{
-          const series = [];
-          let cumulative = 0;
-          for (let i = 0; i < depth; i += 1) {{
-            const size = Number(entries[i]?.[1]) || 0;
-            cumulative += size;
-            series.push({{ level: i + 1, value: cumulative }});
+        const appendNetDepth = (symbol, timestamp, value) => {{
+          const key = (symbol || '--').toUpperCase();
+          const history = netDepthHistory.get(key) || [];
+          const point = {{
+            time: timestamp ? new Date(timestamp) : new Date(),
+            value,
+          }};
+          history.push(point);
+          while (history.length > HISTORY_LIMIT) {{
+            history.shift();
           }}
-          return series;
+          netDepthHistory.set(key, history);
+          return history;
         }};
-        const drawStrengthChart = (canvas, bids, asks) => {{
+        const drawNetDepthChart = (canvas, history) => {{
           const parent = canvas.parentElement;
           const width = Math.max((parent ? parent.clientWidth : 320), 280);
           const height = 220;
@@ -1448,59 +1456,58 @@ ORDERBOOK_TEMPLATE = r"""
           ctx.setTransform(1, 0, 0, 1, 0, 0);
           ctx.scale(dpr, dpr);
           ctx.clearRect(0, 0, width, height);
-          const values = [...bids, ...asks].map((pt) => pt.value);
-          const maxValue = Math.max(...values, 0);
-          if (!maxValue) {{
+          if (!history.length) {{
             ctx.fillStyle = '#94a3b8';
             ctx.font = '14px Arial';
-            ctx.fillText('深度不足', 20, height / 2);
+            ctx.fillText('暂无净深度数据', 20, height / 2);
             return;
           }}
-          const left = 46;
+          const values = history.map((pt) => pt.value);
+          const maxVal = Math.max(...values);
+          const minVal = Math.min(...values);
+          const padding = Math.max(Math.abs(maxVal), Math.abs(minVal), 1) * 0.1;
+          const topVal = maxVal + padding;
+          const bottomVal = minVal - padding;
+          const range = topVal - bottomVal || 1;
+          const left = 50;
           const right = 16;
           const top = 18;
           const bottom = 30;
           const chartWidth = width - left - right;
           const chartHeight = height - top - bottom;
-          ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
+          const zeroY = top + chartHeight - ((0 - bottomVal) / range) * chartHeight;
+          ctx.strokeStyle = '#475569';
           ctx.lineWidth = 1;
           ctx.beginPath();
-          ctx.moveTo(left, top);
-          ctx.lineTo(left, top + chartHeight);
-          ctx.lineTo(width - right, top + chartHeight);
+          ctx.moveTo(left, zeroY);
+          ctx.lineTo(width - right, zeroY);
           ctx.stroke();
-          const drawSeries = (series, color) => {{
-            if (!series.length) {{ return; }}
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            series.forEach((pt, idx) => {{
-              const ratio = series.length > 1 ? idx / (series.length - 1) : 0;
-              const x = left + chartWidth * ratio;
-              const y = top + chartHeight - (pt.value / maxValue) * chartHeight;
-              if (idx === 0) {{
-                ctx.moveTo(x, y);
-              }} else {{
-                ctx.lineTo(x, y);
-              }}
-            }});
-            ctx.stroke();
-          }};
-          drawSeries(bids, '#4ade80');
-          drawSeries(asks, '#f87171');
-          ctx.font = '12px Arial';
-          ctx.fillStyle = '#4ade80';
-          ctx.fillText('买盘', left, top - 4);
-          ctx.fillStyle = '#f87171';
-          ctx.fillText('卖盘', left + 48, top - 4);
-          const tickCount = Math.min(5, bids.length);
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          history.forEach((pt, idx) => {{
+            const x = left + (chartWidth * idx) / Math.max(1, history.length - 1);
+            const y = top + chartHeight - ((pt.value - bottomVal) / range) * chartHeight;
+            if (idx === 0) {{
+              ctx.moveTo(x, y);
+            }} else {{
+              ctx.lineTo(x, y);
+            }}
+          }});
+          ctx.stroke();
           ctx.fillStyle = '#94a3b8';
+          ctx.font = '12px Arial';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'top';
+          const tickCount = Math.min(history.length, 6);
           for (let i = 0; i < tickCount; i += 1) {{
-            const idx = Math.round((bids.length - 1) * (i / (tickCount - 1 || 1)));
-            const x = left + chartWidth * (idx / Math.max(1, bids.length - 1));
-            ctx.fillText(`${{idx + 1}}档`, x, height - bottom + 6);
+            const idx = Math.round((history.length - 1) * (i / Math.max(1, tickCount - 1)));
+            const pt = history[idx];
+            const x = left + (chartWidth * idx) / Math.max(1, history.length - 1);
+            const label = pt.time instanceof Date && !Number.isNaN(pt.time)
+              ? `${{String(pt.time.getHours()).padStart(2, '0')}}:${{String(pt.time.getMinutes()).padStart(2, '0')}}:${{String(pt.time.getSeconds()).padStart(2, '0')}}`
+              : '';
+            ctx.fillText(label, x, height - bottom + 6);
           }}
         }};
 
@@ -1508,7 +1515,27 @@ ORDERBOOK_TEMPLATE = r"""
           const container = document.getElementById('orderbook-container');
           container.innerHTML = '';
           const levels = parseInt(levelSelect.value || '{levels}', 10) || {levels};
-          (data.items || []).forEach((item) => {{
+          const filterValue = (instrumentSelect.value || '').trim();
+          let items = Array.isArray(data.items) ? data.items.slice() : [];
+          if (!filterValue) {{
+            const prioritized = [];
+            DEFAULT_PAIRS.forEach((pair) => {{
+              const found = items.find(
+                (entry) => (entry.instrument_id || '').toUpperCase() === pair,
+              );
+              if (found) {{
+                prioritized.push(found);
+              }}
+            }});
+            items = prioritized;
+          }}
+          if (!items.length) {{
+            container.innerHTML = '<p class="empty-state">暂无深度数据</p>';
+            const updated = document.getElementById('orderbook-updated');
+            if (updated) {{ updated.textContent = formatTimestamp(data.updated_at); }}
+            return;
+          }}
+          items.forEach((item) => {{
             const bids = Array.isArray(item.bids) ? item.bids : [];
             const asks = Array.isArray(item.asks) ? item.asks : [];
             const buyDepth = sumDepth(bids, levels);
@@ -1556,16 +1583,12 @@ ORDERBOOK_TEMPLATE = r"""
               <p class="chart-insight ${{tone}}">${{analysis}}</p>
             `;
             const canvas = card.querySelector('canvas');
-            const buySeries = buildSeries(bids, levels);
-            const sellSeries = buildSeries(asks, levels);
-            canvas.dataset.buy = JSON.stringify(buySeries);
-            canvas.dataset.sell = JSON.stringify(sellSeries);
-            drawStrengthChart(canvas, buySeries, sellSeries);
+            const symbol = (item.instrument_id || '--').toUpperCase();
+            const history = appendNetDepth(symbol, item.timestamp, buyDepth - sellDepth);
+            canvas.dataset.history = JSON.stringify(history);
+            drawNetDepthChart(canvas, history);
             container.appendChild(card);
           }});
-          if ((data.items || []).length === 0) {{
-            container.innerHTML = '<p class="empty-state">暂无深度数据</p>';
-          }}
           const updated = document.getElementById('orderbook-updated');
           if (updated) {{ updated.textContent = formatTimestamp(data.updated_at); }}
         }}
