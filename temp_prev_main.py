@@ -87,7 +87,7 @@ def liquidation_dashboard(request: Request) -> HTMLResponse:
 @app.get("/orderbook", include_in_schema=False, response_class=HTMLResponse)
 def orderbook_dashboard(request: Request) -> HTMLResponse:
     instrument = request.query_params.get("instrument")
-    levels_param = request.query_params.get("levels", "50")
+    levels_param = request.query_params.get("levels", "10")
     try:
         levels = max(1, min(int(levels_param), 400))
     except ValueError:
@@ -206,7 +206,7 @@ def _render_dashboard(metrics: dict) -> str:
         for row in metrics.get("models", [])
     ]
     if not model_rows:
-        model_rows.append("<tr><td colspan='8'>暂无模型数据</td></tr>")
+        model_rows.append("<tr><td colspan='8'>鏆傛棤妯″瀷鏁版嵁</td></tr>")
 
     trade_rows: list[str] = []
     for trade in metrics.get("recent_trades", []):
@@ -233,10 +233,10 @@ def _render_dashboard(metrics: dict) -> str:
             "</tr>"
         )
     if not trade_rows:
-        trade_rows.append("<tr><td colspan='9'>暂无成交记录</td></tr>")
+        trade_rows.append("<tr><td colspan='9'>鏆傛棤鎴愪氦璁板綍</td></tr>")
     signal_rows: list[str] = []
     for signal in metrics.get("recent_ai_signals", []):
-        action_zh = signal.get("action_zh") or "未知"
+        action_zh = signal.get("action_zh") or "鏈煡"
         action_en = signal.get("action_en") or "Unknown"
         reason = signal.get("reason_zh") or signal.get("reason_en") or ""
         hold_action = _is_hold_action(action_zh, action_en)
@@ -252,7 +252,7 @@ def _render_dashboard(metrics: dict) -> str:
             "</tr>"
         )
     if not signal_rows:
-        signal_rows.append("<tr><td colspan='7'>暂无 AI 信号</td></tr>")
+        signal_rows.append("<tr><td colspan='7'>鏆傛棤 AI 淇″彿</td></tr>")
 
     return HTML_TEMPLATE.format(
         as_of=as_of,
@@ -269,12 +269,12 @@ def _render_model_manager(catalog: list[dict]) -> str:
     for entry in catalog:
         model_id = esc(entry.get("model_id"))
         display_name = esc(entry.get("display_name", entry.get("model_id")))
-        provider = esc(entry.get("provider", "未知来源"))
+        provider = esc(entry.get("provider", "鏈煡鏉ユ簮"))
         last_updated = esc(_format_asia_shanghai(entry.get("last_updated")))
         raw_api_key = entry.get("api_key") or ""
         masked_value = "*" * len(raw_api_key) if raw_api_key else ""
         masked_value_html = esc(masked_value)
-        placeholder_text = "请输入模型 API Key" if not raw_api_key else "已配置，修改请重新输入"
+        placeholder_text = "璇疯緭鍏ユā鍨?API Key" if not raw_api_key else "宸查厤缃紝淇敼璇烽噸鏂拌緭鍏?
         placeholder_html = esc(placeholder_text)
         enabled = bool(entry.get("enabled"))
         checked_attr = "checked" if enabled else ""
@@ -284,7 +284,7 @@ def _render_model_manager(catalog: list[dict]) -> str:
             <section class=\"model-card\">
                 <header>
                     <h2>{display_name}</h2>
-                    <p class=\"model-meta\">模型ID：{model_id} · 提供方：{provider}</p>
+                    <p class=\"model-meta\">妯″瀷ID锛歿model_id} 路 鎻愪緵鏂癸細{provider}</p>
                 </header>
                 <form method=\"post\" action=\"/models/update\">
                     <input type=\"hidden\" name=\"model_id\" value=\"{model_id}\">
@@ -293,7 +293,7 @@ def _render_model_manager(catalog: list[dict]) -> str:
                     <div class=\"form-row toggle-row\">
                         <label class=\"toggle\">
                             <input type=\"checkbox\" name=\"enabled\" value=\"on\" {checked}>
-                            <span>启用模型</span>
+                            <span>鍚敤妯″瀷</span>
                         </label>
                     </div>
                     <div class=\"form-row\">
@@ -301,10 +301,10 @@ def _render_model_manager(catalog: list[dict]) -> str:
                         <input id=\"api-{model_id}\" type=\"password\" name=\"api_key\" value=\"{masked_value}\" placeholder=\"{placeholder}\" autocomplete=\"new-password\" oncopy=\"return false;\" oncut=\"return false;\" ondragstart=\"return false;">
                     </div>
                     <div class=\"form-actions\">
-                        <button type=\"submit\">保存设置</button>
+                        <button type=\"submit\">淇濆瓨璁剧疆</button>
                     </div>
                 </form>
-                <p class=\"last-updated\">最近更新：{last_updated}</p>
+                <p class=\"last-updated\">鏈€杩戞洿鏂帮細{last_updated}</p>
             </section>
             """.format(
                 display_name=display_name,
@@ -321,7 +321,7 @@ def _render_model_manager(catalog: list[dict]) -> str:
 
     if not cards:
 
-        return "<p class='empty-state'>暂无可用深度数据</p>"
+        return "<p class='empty-state'>鏆傛棤鍙敤娣卞害鏁版嵁</p>"
 
     return "\n".join(cards)
 
@@ -339,12 +339,12 @@ def _render_okx_dashboard(summary: dict) -> str:
         for item in errors:
             error_items.append(
                 "<li>"
-                f"账户：{esc(item.get('account_id')) or '-'} · 错误：{esc(item.get('message'))}"
+                f"璐︽埛锛歿esc(item.get('account_id')) or '-'} 路 閿欒锛歿esc(item.get('message'))}"
                 "</li>"
             )
         error_block = (
             "<section class='error-card'>"
-            "<h2>实时同步告警</h2>"
+            "<h2>瀹炴椂鍚屾鍛婅</h2>"
             f"<ul>{''.join(error_items)}</ul>"
             "</section>"
         )
@@ -371,14 +371,14 @@ def _render_okx_dashboard(summary: dict) -> str:
             f"""
             <section class=\"okx-card\">
                 <header>
-                    <h2>{account_id or '未命名账户'}</h2>
+                    <h2>{account_id or '鏈懡鍚嶈处鎴?}</h2>
                     <table class='dense summary-table'>
                         <tr>
-                            <th>模型</th>
-                            <th>初始资金</th>
-                            <th>当前权益</th>
-                            <th>现金余额</th>
-                            <th>累计盈亏</th>
+                            <th>妯″瀷</th>
+                            <th>鍒濆璧勯噾</th>
+                            <th>褰撳墠鏉冪泭</th>
+                            <th>鐜伴噾浣欓</th>
+                            <th>绱鐩堜簭</th>
                         </tr>
                         <tr>
                             <td>{model_id or '-'}</td>
@@ -390,25 +390,25 @@ def _render_okx_dashboard(summary: dict) -> str:
                     </table>
                 </header>
                 <div class=\"panel\">
-                    <h3>持仓明细</h3>
+                    <h3>鎸佷粨鏄庣粏</h3>
                     {positions_html}
                 </div>
                 <div class=\"panel\">
-                    <h3>挂单列表</h3>
+                    <h3>鎸傚崟鍒楄〃</h3>
                     {orders_html}
                 </div>
                 <div class=\"split\">
                     <div class=\"panel\">
-                        <h3>余额信息</h3>
+                        <h3>浣欓淇℃伅</h3>
                         {balances_html}
                     </div>
                     <div class=\"panel\">
-                        <h3>近期成交</h3>
+                        <h3>杩戞湡鎴愪氦</h3>
                         {trades_html}
                     </div>
                 </div>
                 <div class=\"panel\">
-                    <h3>资产曲线</h3>
+                    <h3>璧勪骇鏇茬嚎</h3>
                     {curve_html}
                 </div>
             </section>
@@ -416,7 +416,7 @@ def _render_okx_dashboard(summary: dict) -> str:
         )
 
     if not account_sections:
-        account_sections.append("<p class='empty-state'>暂无 OKX 模拟账户数据。</p>")
+        account_sections.append("<p class='empty-state'>鏆傛棤 OKX 妯℃嫙璐︽埛鏁版嵁銆?/p>")
 
     return OKX_TEMPLATE.format(
         as_of=as_of,
@@ -461,7 +461,7 @@ def _render_settings_page(settings: dict, catalog: Sequence[dict]) -> str:
         f"<span class='instrument-chip'>{esc(inst)}</span>"
         for inst in instruments
     ]
-    chips_html = "".join(chips) if chips else "<span class='empty-state'>当前未配置可交易币对</span>"
+    chips_html = "".join(chips) if chips else "<span class='empty-state'>褰撳墠鏈厤缃彲浜ゆ槗甯佸</span>"
 
     instruments_text = "\n".join(instruments)
     current_value_attr = ",".join(instruments)
@@ -512,9 +512,9 @@ def _render_settings_page(settings: dict, catalog: Sequence[dict]) -> str:
     )
     catalog_count = len(catalog)
     if catalog_count:
-        catalog_hint = f"已缓存 {catalog_count} 个 OKX 交易对信息"
+        catalog_hint = f"宸茬紦瀛?{catalog_count} 涓?OKX 浜ゆ槗瀵逛俊鎭?
     else:
-        catalog_hint = "未发现已缓存的币对，请点击\"刷新币对库\" 按钮获取"
+        catalog_hint = "鏈彂鐜板凡缂撳瓨鐨勫竵瀵癸紝璇风偣鍑籠"鍒锋柊甯佸搴揬" 鎸夐挳鑾峰彇"
 
     return SETTINGS_TEMPLATE.format(
         poll_interval=poll_interval,
@@ -541,10 +541,10 @@ def _render_balances_table(balances: Sequence[dict] | None) -> str:
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='5'>暂无余额信息</td></tr>")
+        rows.append("<tr><td colspan='5'>鏆傛棤浣欓淇℃伅</td></tr>")
     return (
         "<table class='dense'>"
-        "<thead><tr><th>币种</th><th>总权益</th><th>总金额</th><th>可用余额</th><th>冻结金额</th></tr></thead>"
+        "<thead><tr><th>甯佺</th><th>鎬绘潈鐩?/th><th>鎬婚噾棰?/th><th>鍙敤浣欓</th><th>鍐荤粨閲戦</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
@@ -567,11 +567,11 @@ def _render_positions_table(positions: Sequence[dict] | None) -> str:
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='8'>暂无持仓</td></tr>")
+        rows.append("<tr><td colspan='8'>鏆傛棤鎸佷粨</td></tr>")
 
     return (
         "<table class='dense'>"
-        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>未实现盈亏</th><th>更新时间</th></tr></thead>"
+        "<thead><tr><th>鎸佷粨ID</th><th>浜ゆ槗瀵?/th><th>鏂瑰悜</th><th>鎸佷粨閲?/th><th>寮€浠撳潎浠?/th><th>鏍囪浠锋牸</th><th>鏈疄鐜扮泩浜?/th><th>鏇存柊鏃堕棿</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
@@ -594,11 +594,11 @@ def _render_trades_table(trades: Sequence[dict] | None) -> str:
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='9'>暂无成交记录</td></tr>")
+        rows.append("<tr><td colspan='9'>鏆傛棤鎴愪氦璁板綍</td></tr>")
 
     return (
         "<table class='dense'>"
-        "<thead><tr><th>成交时间</th><th>模型</th><th>投资组合</th><th>合约</th><th>方向</th><th>数量</th><th>入场价</th><th>离场价</th><th>盈亏(USD)</th></tr></thead>"
+        "<thead><tr><th>鎴愪氦鏃堕棿</th><th>妯″瀷</th><th>鎶曡祫缁勫悎</th><th>鍚堢害</th><th>鏂瑰悜</th><th>鏁伴噺</th><th>鍏ュ満浠?/th><th>绂诲満浠?/th><th>鐩堜簭(USD)</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
@@ -624,10 +624,10 @@ def _render_orders_table(orders: Sequence[dict] | None) -> str:
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='11'>暂无挂单</td></tr>")
+        rows.append("<tr><td colspan='11'>鏆傛棤鎸傚崟</td></tr>")
     return (
         "<table class='dense'>"
-        "<thead><tr><th>订单ID</th><th>交易对</th><th>委托类型</th><th>方向</th><th>委托数量</th><th>已成交数量</th><th>委托价格</th><th>成交均价</th><th>订单状态</th><th>更新时间</th><th>创建时间</th></tr></thead>"
+        "<thead><tr><th>璁㈠崟ID</th><th>浜ゆ槗瀵?/th><th>濮旀墭绫诲瀷</th><th>鏂瑰悜</th><th>濮旀墭鏁伴噺</th><th>宸叉垚浜ゆ暟閲?/th><th>濮旀墭浠锋牸</th><th>鎴愪氦鍧囦环</th><th>璁㈠崟鐘舵€?/th><th>鏇存柊鏃堕棿</th><th>鍒涘缓鏃堕棿</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
@@ -638,17 +638,17 @@ def _render_equity_curve(points: Sequence[dict] | None) -> str:
     items = []
     for point in points or []:
         items.append(
-            f"<li><span class='timestamp'>{esc(_format_asia_shanghai(point.get('timestamp')))}</span> · {esc(point.get('equity'))} USD</li>"
+            f"<li><span class='timestamp'>{esc(_format_asia_shanghai(point.get('timestamp')))}</span> 路 {esc(point.get('equity'))} USD</li>"
         )
     if not items:
-        items.append("<li>暂无资产曲线数据</li>")
+        items.append("<li>鏆傛棤璧勪骇鏇茬嚎鏁版嵁</li>")
     return "<ul class='curve-list'>{}</ul>".format("\n".join(items))
 
 
 def _build_instrument_options(instruments: Sequence[str], selected: Optional[str]) -> str:
     esc = _escape
     selected_norm = (selected or "").strip().upper()
-    options = ['<option value="">全部</option>']
+    options = ['<option value="">鍏ㄩ儴</option>']
     seen: set[str] = set()
     for instrument in instruments:
         inst_upper = str(instrument or "").strip().upper()
@@ -671,9 +671,9 @@ def _build_depth_options(selected: int) -> str:
     rendered: list[str] = []
     for value in choices:
         selected_attr = " selected" if value == sanitized else ""
-        rendered.append(f'<option value="{value}"{selected_attr}>{value} 档</option>')
+        rendered.append(f'<option value="{value}"{selected_attr}>{value} 妗?/option>')
     if sanitized not in choices:
-        rendered.append(f'<option value="{sanitized}" selected>{sanitized} 档</option>')
+        rendered.append(f'<option value="{sanitized}" selected>{sanitized} 妗?/option>')
     return "\n".join(rendered)
 
 
@@ -693,13 +693,128 @@ def _render_liquidation_rows(items: Sequence[dict]) -> str:
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='6' class='empty-state'>暂无爆仓数据</td></tr>")
+        rows.append("<tr><td colspan='6' class='empty-state'>鏆傛棤鐖嗕粨鏁版嵁</td></tr>")
     return "\n".join(rows)
 
 
 def _render_orderbook_cards(items: Sequence[dict], levels: int) -> str:
-    _ = items, levels
-    return "<p class='empty-state'>加载市场深度...</p>"
+    esc = _escape
+    level_count = max(1, levels)
+    cards: list[str] = []
+
+    def _as_float(value: object) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _depth_sum(levels_data: Sequence[Sequence[object]]) -> float:
+        total = 0.0
+        for entry in levels_data[:level_count]:
+            try:
+                size = float(entry[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            total += size
+        return total
+
+    def _depth_insight(imbalance: float) -> tuple[str, str]:
+        if imbalance >= 0.2:
+            return "positive", "涔扮洏娣卞害鏄庢樉鍗犱紭锛岀煭绾垮姩鑳藉亸澶氥€?
+        if imbalance <= -0.2:
+            return "negative", "鍗栫洏鍘嬪埗澧炲己锛岃皑闃蹭环鏍煎洖钀姐€?
+        return "neutral", "涔板崠鍔涢噺鎺ヨ繎骞宠　锛屽叧娉ㄦ垚浜ょ獊鐮翠俊鍙枫€?
+
+    for item in items:
+        instrument = esc(item.get("instrument_id") or "--")
+        timestamp = esc(_format_asia_shanghai(item.get("timestamp")))
+        best_bid = _format_number(item.get("best_bid"), digits=4)
+        best_ask = _format_number(item.get("best_ask"), digits=4)
+        spread = _format_number(item.get("spread"), digits=4)
+        bids = item.get("bids") or []
+        asks = item.get("asks") or []
+
+        bid_depth = _depth_sum(bids)
+        ask_depth = _depth_sum(asks)
+        total_depth = bid_depth + ask_depth
+        bid_share = bid_depth / total_depth if total_depth > 0 else 0.5
+        ask_share = 1.0 - bid_share if total_depth > 0 else 0.5
+        imbalance = (bid_depth - ask_depth) / total_depth if total_depth > 0 else 0.0
+        net_depth = bid_depth - ask_depth
+
+        bid_depth_fmt = _format_number(bid_depth, digits=2)
+        ask_depth_fmt = _format_number(ask_depth, digits=2)
+        total_depth_fmt = _format_number(total_depth, digits=2)
+        net_depth_fmt = _format_number(net_depth, digits=2)
+        imbalance_pct = f"{imbalance * 100:.1f}%" if total_depth > 0 else "--"
+        bid_share_pct = f"{bid_share * 100:.0f}%"
+        ask_share_pct = f"{ask_share * 100:.0f}%"
+
+        best_bid_val = _as_float(item.get("best_bid"))
+        best_ask_val = _as_float(item.get("best_ask"))
+        mid_price_val = None
+        if best_bid_val is not None and best_ask_val is not None:
+            mid_price_val = (best_bid_val + best_ask_val) / 2
+        mid_price = _format_number(mid_price_val, digits=4)
+
+        tone, insight = _depth_insight(imbalance)
+        analysis_text = f"涔扮洏鍗犳瘮 {bid_share_pct}锛寋insight}锛堢偣宸?{spread or '--'}锛?
+        analysis = esc(analysis_text)
+
+        cards.append(
+            f"""
+            <section class="orderbook-card tone-{tone}">
+                <header>
+                    <div class="title-row">
+                        <h2>{instrument}</h2>
+                        <span class="timestamp">鏇存柊鏃堕棿锛歿timestamp}</span>
+                    </div>
+                    <div class="quote-meta">
+                        <span>涔颁竴 {best_bid}</span>
+                        <span>鍗栦竴 {best_ask}</span>
+                        <span>鐐瑰樊 {spread}</span>
+                        <span>涓棿浠?{mid_price}</span>
+                    </div>
+                </header>
+                <div class="metric-grid">
+                    <div>
+                        <span class="label">涔扮洏娣卞害锛堝墠{level_count}妗ｏ級</span>
+                        <span class="value accent">{bid_depth_fmt}</span>
+                    </div>
+                    <div>
+                        <span class="label">鍗栫洏娣卞害锛堝墠{level_count}妗ｏ級</span>
+                        <span class="value">{ask_depth_fmt}</span>
+                    </div>
+                    <div>
+                        <span class="label">鍑€娣卞害</span>
+                        <span class="value">{net_depth_fmt}</span>
+                    </div>
+                    <div>
+                        <span class="label">娣卞害鍗犳瘮</span>
+                        <span class="value">{imbalance_pct}</span>
+                    </div>
+                    <div>
+                        <span class="label">鎬绘繁搴?/span>
+                        <span class="value">{total_depth_fmt}</span>
+                    </div>
+                </div>
+                <div class="depth-bars">
+                    <div class="bar bid" style="width: {bid_share * 100:.1f}%;">
+                        涔版柟 {bid_share_pct}
+                    </div>
+                    <div class="bar ask" style="width: {ask_share * 100:.1f}%;">
+                        鍗栨柟 {ask_share_pct}
+                    </div>
+                </div>
+                <p class="insight-text {tone}">{analysis}</p>
+            </section>
+            """
+        )
+
+    if not cards:
+        return "<p class='empty-state'>鏆傛棤鍙敤娣卞害鏁版嵁</p>"
+
+    return "\n".join(cards)
 
     return "\n".join(cards)
 
@@ -715,7 +830,7 @@ def _render_orderbook_cards(items: Sequence[dict], levels: int) -> str:
 
 def _format_order(order: dict | None, *, hold_action: bool = False) -> str:
     if hold_action:
-        return "无"
+        return "鏃?
     if not order:
         return "N/A"
     side = _escape(order.get("side", "?"))
@@ -787,7 +902,7 @@ def _format_asia_shanghai(value: Optional[str]) -> str:
 def _is_hold_action(action_zh: str, action_en: str) -> bool:
     zh = (action_zh or "").lower()
     en = (action_en or "").lower()
-    return any(keyword in zh for keyword in ("观望", "保持", "等待")) or en in {"hold", "wait", "neutral"}
+    return any(keyword in zh for keyword in ("瑙傛湜", "淇濇寔", "绛夊緟")) or en in {"hold", "wait", "neutral"}
 
 
 HTML_TEMPLATE = r"""
@@ -818,65 +933,65 @@ HTML_TEMPLATE = r"""
 </head>
 <body>
     <nav class="top-nav">
-        <a href="/" class="nav-link active">首页</a>
-        <a href="/models" class="nav-link">模型管理</a>
-        <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link">策略配置</a>
-        <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/" class="nav-link active">棣栭〉</a>
+        <a href="/models" class="nav-link">妯″瀷绠＄悊</a>
+        <a href="/okx" class="nav-link">OKX 妯℃嫙</a>
+        <a href="/liquidations" class="nav-link">鐖嗕粨鐩戞帶</a>
+        <a href="/orderbook" class="nav-link">甯傚満娣卞害</a>
+        <a href="/settings" class="nav-link">绛栫暐閰嶇疆</a>
+        <a href="/scheduler" class="nav-link">璋冨害鍣?/a>
     </nav>
 
 
-    <h1>模型表现概览</h1>
-    <div>数据时间：<span class="timestamp">{as_of}</span></div>
+    <h1>妯″瀷琛ㄧ幇姒傝</h1>
+    <div>鏁版嵁鏃堕棿锛?span class="timestamp">{as_of}</span></div>
     <table>
         <thead>
             <tr>
-                <th>模型</th>
-                <th>投资组合</th>
-                <th>夏普比率</th>
-                <th>最大回撤(%)</th>
-                <th>胜率(%)</th>
-                <th>平均持仓时长(分钟)</th>
-                <th>仓位敞口(USD)</th>
-                <th>持仓数量</th>
+                <th>妯″瀷</th>
+                <th>鎶曡祫缁勫悎</th>
+                <th>澶忔櫘姣旂巼</th>
+                <th>鏈€澶у洖鎾?%)</th>
+                <th>鑳滅巼(%)</th>
+                <th>骞冲潎鎸佷粨鏃堕暱(鍒嗛挓)</th>
+                <th>浠撲綅鏁炲彛(USD)</th>
+                <th>鎸佷粨鏁伴噺</th>
             </tr>
         </thead>
         <tbody>
             {model_rows}
         </tbody>
     </table>
-    <h2>近期成交</h2>
+    <h2>杩戞湡鎴愪氦</h2>
     <table>
         <thead>
             <tr>
-                <th>成交时间</th>
-                <th>模型</th>
-                <th>投资组合</th>
-                <th>合约</th>
-                <th>方向</th>
-                <th>数量</th>
-                <th>入场价</th>
-                <th>离场价</th>
-                <th>盈亏(USD)</th>
+                <th>鎴愪氦鏃堕棿</th>
+                <th>妯″瀷</th>
+                <th>鎶曡祫缁勫悎</th>
+                <th>鍚堢害</th>
+                <th>鏂瑰悜</th>
+                <th>鏁伴噺</th>
+                <th>鍏ュ満浠?/th>
+                <th>绂诲満浠?/th>
+                <th>鐩堜簭(USD)</th>
             </tr>
         </thead>
         <tbody>
             {trade_rows}
         </tbody>
     </table>
-    <h2>最新 AI 信号</h2>
+    <h2>鏈€鏂?AI 淇″彿</h2>
     <table>
         <thead>
             <tr>
-                <th>时间</th>
-                <th>模型</th>
-                <th>合约</th>
-                <th>动作</th>
-                <th>置信度</th>
-                <th>理由</th>
-                <th>建议操作</th>
+                <th>鏃堕棿</th>
+                <th>妯″瀷</th>
+                <th>鍚堢害</th>
+                <th>鍔ㄤ綔</th>
+                <th>缃俊搴?/th>
+                <th>鐞嗙敱</th>
+                <th>寤鸿鎿嶄綔</th>
             </tr>
         </thead>
         <tbody>
@@ -884,7 +999,7 @@ HTML_TEMPLATE = r"""
         </tbody>
     </table>
     <footer>
-        数据来源：<a href="/metrics/models">/metrics/models</a> ｜ 健康检查：<a href="/health">/health</a>
+        鏁版嵁鏉ユ簮锛?a href="/metrics/models">/metrics/models</a> 锝?鍋ュ悍妫€鏌ワ細<a href="/health">/health</a>
     </footer>
 </body>
 </html>
@@ -896,7 +1011,7 @@ MODEL_MANAGER_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 模型管理</title>
+    <title>open-nof1.ai 妯″瀷绠＄悊</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         h1 {{ margin-bottom: 0.5rem; }}
@@ -922,17 +1037,17 @@ MODEL_MANAGER_TEMPLATE = r"""
 </head>
 <body>
     <nav class="top-nav">
-        <a href="/" class="nav-link">首页</a>
-        <a href="/models" class="nav-link active">模型管理</a>
-        <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link">策略配置</a>
-        <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/" class="nav-link">棣栭〉</a>
+        <a href="/models" class="nav-link active">妯″瀷绠＄悊</a>
+        <a href="/okx" class="nav-link">OKX 妯℃嫙</a>
+        <a href="/liquidations" class="nav-link">鐖嗕粨鐩戞帶</a>
+        <a href="/orderbook" class="nav-link">甯傚満娣卞害</a>
+        <a href="/settings" class="nav-link">绛栫暐閰嶇疆</a>
+        <a href="/scheduler" class="nav-link">璋冨害鍣?/a>
     </nav>
 
-    <h1>模型管理</h1>
-    <p>在此启用或停用不同的大模型，并配置各自的 API Key。</p>
+    <h1>妯″瀷绠＄悊</h1>
+    <p>鍦ㄦ鍚敤鎴栧仠鐢ㄤ笉鍚岀殑澶фā鍨嬶紝骞堕厤缃悇鑷殑 API Key銆?/p>
     <div class="models-grid">
         {models_html}
     </div>
@@ -946,7 +1061,7 @@ SETTINGS_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 币对设置</title>
+    <title>open-nof1.ai 甯佸璁剧疆</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         h1 {{ margin-bottom: 0.5rem; }}
@@ -997,30 +1112,30 @@ SETTINGS_TEMPLATE = r"""
 </head>
 <body>
     <nav class="top-nav">
-        <a href="/" class="nav-link">首页</a>
-        <a href="/models" class="nav-link">模型管理</a>
-        <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link active">策略配置</a>
-        <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/" class="nav-link">棣栭〉</a>
+        <a href="/models" class="nav-link">妯″瀷绠＄悊</a>
+        <a href="/okx" class="nav-link active">OKX 妯℃嫙</a>
+        <a href="/liquidations" class="nav-link">鐖嗕粨鐩戞帶</a>
+        <a href="/orderbook" class="nav-link">甯傚満娣卞害</a>
+        <a href="/settings" class="nav-link">绛栫暐閰嶇疆</a>
+        <a href="/scheduler" class="nav-link">璋冨害鍣?/a>
     </nav>
 
-    <h1>币对与刷新频率</h1>
-    <p class="updated">最近保存：<span class="timestamp">{updated_at}</span></p>
+    <h1>甯佸涓庡埛鏂伴鐜?/h1>
+    <p class="updated">鏈€杩戜繚瀛橈細<span class="timestamp">{updated_at}</span></p>
     <section class="settings-card">
-        <h2>运行参数</h2>
+        <h2>杩愯鍙傛暟</h2>
         <form method="post" action="/settings/update">
-            <label for="poll-interval">刷新间隔（秒）</label>
+            <label for="poll-interval">鍒锋柊闂撮殧锛堢锛?/label>
             <input id="poll-interval" type="number" name="poll_interval" min="30" max="3600" value="{poll_interval}" required>
-            <label for="instrument-list">当前合约列表（每行一个）</label>
+            <label for="instrument-list">褰撳墠鍚堢害鍒楄〃锛堟瘡琛屼竴涓級</label>
             <textarea id="instrument-list" name="instruments" spellcheck="false">{instruments_text}</textarea>
             <div class="chip-row">{chips_html}</div>
-            <button type="submit">保存配置</button>
+            <button type="submit">淇濆瓨閰嶇疆</button>
         </form>
     </section>
     <section class="settings-card">
-        <h2>添加合约</h2>
+        <h2>娣诲姞鍚堢害</h2>
         <p class="hint">{catalog_hint}</p>
         <form method="post" action="/settings/add" class="control-row" id="add-instrument-form">
             <input type="hidden" name="poll_interval" value="{poll_interval}">
@@ -1028,14 +1143,14 @@ SETTINGS_TEMPLATE = r"""
             <label for="instrument-select-usdt" class="control-label">USDT</label>
             <div class="control-field">
                 <select id="instrument-select-usdt" name="new_instrument" size="12">
-                    <option value="">请选择合约...</option>
+                    <option value="">璇烽€夋嫨鍚堢害...</option>
 {datalist_options_usdt}
                 </select>
             </div>
-            <button type="submit">添加到列表</button>
+            <button type="submit">娣诲姞鍒板垪琛?/button>
         </form>
         <form method="post" action="/settings/refresh-catalog" class="inline-form">
-            <button type="submit" class="secondary">刷新合约库</button>
+            <button type="submit" class="secondary">鍒锋柊鍚堢害搴?/button>
         </form>
     </section>
 </body>
@@ -1048,7 +1163,7 @@ OKX_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai OKX 模拟交易</title>
+    <title>open-nof1.ai OKX 妯℃嫙浜ゆ槗</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         h1 {{ margin-bottom: 0.5rem; }}
@@ -1078,17 +1193,17 @@ OKX_TEMPLATE = r"""
 </head>
 <body>
     <nav class="top-nav">
-        <a href="/" class="nav-link">首页</a>
-        <a href="/models" class="nav-link">模型管理</a>
-        <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link active">策略配置</a>
-        <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/" class="nav-link">棣栭〉</a>
+        <a href="/models" class="nav-link">妯″瀷绠＄悊</a>
+        <a href="/okx" class="nav-link">OKX 妯℃嫙</a>
+        <a href="/liquidations" class="nav-link">鐖嗕粨鐩戞帶</a>
+        <a href="/orderbook" class="nav-link">甯傚満娣卞害</a>
+        <a href="/settings" class="nav-link active">绛栫暐閰嶇疆</a>
+        <a href="/scheduler" class="nav-link">璋冨害鍣?/a>
     </nav>
 
-    <h1>OKX 模拟交易概览</h1>
-    <p class="inline-row">数据时间：<span class="timestamp">{as_of}</span><span class="local-time">（本地时间：<span id="local-time">--:--:--</span>）</span><a href="/okx?refresh=1" class="btn-refresh" title="从交易所拉取最新并写入缓存">强制刷新</a></p>
+    <h1>OKX 妯℃嫙浜ゆ槗姒傝</h1>
+    <p class="inline-row">鏁版嵁鏃堕棿锛?span class="timestamp">{as_of}</span><span class="local-time">锛堟湰鍦版椂闂达細<span id="local-time">--:--:--</span>锛?/span><a href="/okx?refresh=1" class="btn-refresh" title="浠庝氦鏄撴墍鎷夊彇鏈€鏂板苟鍐欏叆缂撳瓨">寮哄埗鍒锋柊</a></p>
     {error_block}
     {account_sections}
     <script>
@@ -1121,7 +1236,7 @@ SCHEDULER_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 任务调度</title>
+    <title>open-nof1.ai 浠诲姟璋冨害</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         h1 {{ margin-bottom: 0.5rem; }}
@@ -1147,33 +1262,31 @@ SCHEDULER_TEMPLATE = r"""
 </head>
 <body>
     <nav class="top-nav">
-        <a href="/" class="nav-link">首页</a>
-        <a href="/models" class="nav-link">模型管理</a>
-        <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link">策略配置</a>
-        <a href="/scheduler" class="nav-link active">调度器</a>
+        <a href="/" class="nav-link">棣栭〉</a>
+        <a href="/models" class="nav-link">妯″瀷绠＄悊</a>
+        <a href="/okx" class="nav-link">OKX 妯℃嫙</a>
+        <a href="/liquidations" class="nav-link">鐖嗕粨鐩戞帶</a>
+        <a href="/orderbook" class="nav-link">甯傚満娣卞害</a>
+        <a href="/settings" class="nav-link">绛栫暐閰嶇疆</a>
+        <a href="/scheduler" class="nav-link active">璋冨害鍣?/a>
     </nav>
 
-    <h1>任务调度控制</h1>
-    <p class="hint">设置行情抽取与 AI 交互的周期，变更会实时更新后台 APScheduler 任务。</p>
+    <h1>浠诲姟璋冨害鎺у埗</h1>
+    <p class="hint">璁剧疆琛屾儏鎶藉彇涓?AI 浜や簰鐨勫懆鏈燂紝鍙樻洿浼氬疄鏃舵洿鏂板悗鍙?APScheduler 浠诲姟銆?/p>
     <section class="card">
         <form method="post" action="/scheduler/update">
             <label for="market-interval">
-                行情抽取间隔（秒）
-                <input id="market-interval" name="market_interval" type="number" min="30" max="3600" value="{market_interval}" required>
-                <span class="hint">用于调用 OKX 行情 API、写入 Influx、生成最新指标。</span>
+                琛屾儏鎶藉彇闂撮殧锛堢锛?                <input id="market-interval" name="market_interval" type="number" min="30" max="3600" value="{market_interval}" required>
+                <span class="hint">鐢ㄤ簬璋冪敤 OKX 琛屾儏 API銆佸啓鍏?Influx銆佺敓鎴愭渶鏂版寚鏍囥€?/span>
             </label>
             <label for="ai-interval">
-                AI 交互间隔（秒）
-                <input id="ai-interval" name="ai_interval" type="number" min="60" max="7200" value="{ai_interval}" required>
-                <span class="hint">触发 LLM 信号 → 风控 → 模拟下单流程的周期。</span>
+                AI 浜や簰闂撮殧锛堢锛?                <input id="ai-interval" name="ai_interval" type="number" min="60" max="7200" value="{ai_interval}" required>
+                <span class="hint">瑙﹀彂 LLM 淇″彿 鈫?椋庢帶 鈫?妯℃嫙涓嬪崟娴佺▼鐨勫懆鏈熴€?/span>
             </label>
-            <button type="submit">保存调度设置</button>
+            <button type="submit">淇濆瓨璋冨害璁剧疆</button>
         </form>
         <div class="meta">
-            最近更新：<span class="timestamp">{updated_at}</span>
+            鏈€杩戞洿鏂帮細<span class="timestamp">{updated_at}</span>
         </div>
     </section>
 </body>
@@ -1204,7 +1317,7 @@ LIQUIDATION_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 爆仓监控</title>
+    <title>open-nof1.ai 鐖嗕粨鐩戞帶</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
@@ -1224,32 +1337,32 @@ LIQUIDATION_TEMPLATE = r"""
 </head>
 <body>
     <nav class="top-nav">
-        <a href="/" class="nav-link">首页</a>
-        <a href="/models" class="nav-link">模型管理</a>
-        <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link active">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link">策略配置</a>
-        <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/" class="nav-link">棣栭〉</a>
+        <a href="/models" class="nav-link">妯″瀷绠＄悊</a>
+        <a href="/okx" class="nav-link">OKX 妯℃嫙</a>
+        <a href="/liquidations" class="nav-link active">鐖嗕粨鐩戞帶</a>
+        <a href="/orderbook" class="nav-link">甯傚満娣卞害</a>
+        <a href="/settings" class="nav-link">绛栫暐閰嶇疆</a>
+        <a href="/scheduler" class="nav-link">璋冨害鍣?/a>
     </nav>
-    <h1>OKX 爆仓监控</h1>
+    <h1>OKX 鐖嗕粨鐩戞帶</h1>
     <div class="controls">
-        <label>选择合约
+        <label>閫夋嫨鍚堢害
             <select id="instrument-select">
                 {instrument_options}
             </select>
         </label>
-        <span>最后更新：<span class="timestamp" id="liquidations-updated">{updated_at}</span></span>
+        <span>鏈€鍚庢洿鏂帮細<span class="timestamp" id="liquidations-updated">{updated_at}</span></span>
     </div>
     <table>
         <thead>
             <tr>
-                <th>时间</th>
-                <th>合约</th>
-                <th>多单爆仓</th>
-                <th>空单爆仓</th>
-                <th>净爆仓</th>
-                <th>最新价</th>
+                <th>鏃堕棿</th>
+                <th>鍚堢害</th>
+                <th>澶氬崟鐖嗕粨</th>
+                <th>绌哄崟鐖嗕粨</th>
+                <th>鍑€鐖嗕粨</th>
+                <th>鏈€鏂颁环</th>
             </tr>
         </thead>
         <tbody id="liquidations-body">
@@ -1300,7 +1413,7 @@ LIQUIDATION_TEMPLATE = r"""
                 body.appendChild(tr);
               }});
               if ((data.items || []).length === 0) {{
-                body.innerHTML = '<tr><td colspan="6" class="empty-state">暂无爆仓数据</td></tr>';
+                body.innerHTML = '<tr><td colspan="6" class="empty-state">鏆傛棤鐖嗕粨鏁版嵁</td></tr>';
               }}
               const updated = document.getElementById('liquidations-updated');
               if (updated) {{ updated.textContent = fmtTimestamp(data.updated_at); }}
@@ -1322,7 +1435,7 @@ ORDERBOOK_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 市场深度</title>
+    <title>open-nof1.ai 甯傚満娣卞害</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
@@ -1332,48 +1445,64 @@ ORDERBOOK_TEMPLATE = r"""
         .controls {{ display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 1rem; }}
         .controls label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
         select {{ min-width: 160px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; padding: 8px 10px; }}
-        .book-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 20px; }}
-        .orderbook-chart {{ background: #0f1b2d; border-radius: 16px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.15); display: flex; flex-direction: column; gap: 14px; }}
-        .orderbook-chart.tone-positive {{ border-color: rgba(74, 222, 128, 0.4); }}
-        .orderbook-chart.tone-negative {{ border-color: rgba(248, 113, 113, 0.35); }}
-        .orderbook-chart.tone-neutral {{ border-color: rgba(59, 130, 246, 0.25); }}
-        .chart-header {{ display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }}
-        .chart-header h2 {{ margin: 0; font-size: 1.15rem; }}
-        .chart-header small {{ display: block; font-size: 0.8rem; color: #94a3b8; margin-top: 4px; }}
-        .chart-meta {{ display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.9rem; color: #cbd5f5; }}
-        .chart-stats {{ display: flex; gap: 16px; flex-wrap: wrap; font-size: 0.9rem; color: #cbd5f5; }}
-        .chart-stats span {{ background: rgba(148, 163, 184, 0.1); padding: 4px 10px; border-radius: 999px; }}
-        .chart-canvas {{ width: 100%; height: 220px; }}
-        .chart-insight {{ margin: 0; font-size: 0.9rem; color: #e2e8f0; }}
-        .chart-insight.positive {{ color: #4ade80; }}
-        .chart-insight.negative {{ color: #f87171; }}
-        .chart-insight.neutral {{ color: #94a3b8; }}
+        .book-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }}
+        .orderbook-card {{ background: #1e293b; border-radius: 14px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); display: flex; flex-direction: column; gap: 14px; border: 1px solid rgba(148, 163, 184, 0.15); }}
+        .orderbook-card.tone-positive {{ border-color: rgba(74, 222, 128, 0.4); }}
+        .orderbook-card.tone-negative {{ border-color: rgba(248, 113, 113, 0.35); }}
+        .orderbook-card.tone-neutral {{ border-color: rgba(59, 130, 246, 0.25); }}
+        .title-row {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }}
+        .title-row h2 {{ margin: 0; font-size: 1.15rem; }}
+        .title-row .timestamp {{ font-size: 0.85rem; color: #94a3b8; }}
+        .quote-meta {{ display: flex; flex-wrap: wrap; gap: 12px; font-size: 0.9rem; color: #cbd5f5; }}
+        .metric-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }}
+        .metric-grid .label {{ font-size: 0.8rem; color: #94a3b8; }}
+        .metric-grid .value {{ font-size: 1.2rem; font-weight: 600; }}
+        .metric-grid .value.accent {{ color: #34d399; }}
+        .depth-bars {{ display: flex; width: 100%; height: 34px; border-radius: 20px; overflow: hidden; border: 1px solid #1f2937; background: rgba(15, 23, 42, 0.8); }}
+        .depth-bars .bar {{ display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 0.85rem; color: #0f172a; }}
+        .depth-bars .bid {{ background: rgba(34, 197, 94, 0.85); }}
+        .depth-bars .ask {{ background: rgba(239, 68, 68, 0.85); }}
+        .insight-text {{ margin: 0; font-size: 0.9rem; color: #e2e8f0; }}
+        .insight-text.positive {{ color: #4ade80; }}
+        .insight-text.negative {{ color: #f87171; }}
+        .insight-text.neutral {{ color: #94a3b8; }}
         .empty-state {{ color: #94a3b8; padding: 16px; text-align: center; }}
     </style>
 </head>
 <body>
     <nav class="top-nav">
-        <a href="/" class="nav-link">首页</a>
-        <a href="/models" class="nav-link">模型管理</a>
-        <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link active">市场深度</a>
-        <a href="/settings" class="nav-link">参数设置</a>
-        <a href="/scheduler" class="nav-link">任务队列</a>
+        <a href="/" class="nav-link">棣栭〉</a>
+        <a href="/models" class="nav-link">妯″瀷绠＄悊</a>
+        <a href="/okx" class="nav-link">OKX 妯℃嫙</a>
+        <a href="/liquidations" class="nav-link">鐖嗕粨鐩戞帶</a>
+        <a href="/orderbook" class="nav-link active">甯傚満娣卞害</a>
+        <a href="/settings" class="nav-link">鍙傛暟璁剧疆</a>
+        <a href="/scheduler" class="nav-link">浠诲姟闃熷垪</a>
     </nav>
-    <h1>OKX 市场深度</h1>
+    <h1>OKX 甯傚満娣卞害</h1>
     <div class="controls">
-        <label>选择合约
+        <label>閫夋嫨鍚堢害
             <select id="orderbook-instrument">
                 {instrument_options}
             </select>
         </label>
-        <label>分析档位
+        <label>鍒嗘瀽妗ｄ綅
             <select id="depth-levels">
                 {level_options}
             </select>
         </label>
-        <span>最后更新：<span class="timestamp" id="orderbook-updated">{updated_at}</span></span>
+        <span>鏈€鍚庢洿鏂帮細<span class="timestamp" id="orderbook-updated">{updated_at}</span></span>
+    </div>
+    <section class="net-depth-panel">
+        <div class="panel-header">
+            <div>
+                <h2>鍑€娣卞害鍒嗗竷</h2>
+                <p class="panel-subtitle" id="net-depth-hint">鍩轰簬鍓峽levels}妗ｅ噣娣卞害</p>
+            </div>
+        </div>
+        <canvas id="net-depth-chart"></canvas>
+        <p id="net-depth-analysis" class="insight-summary">鏆傛棤鏁版嵁</p>
+    </section>
     <div id="orderbook-container" class="book-grid">
         {cards}
     </div>
@@ -1381,6 +1510,11 @@ ORDERBOOK_TEMPLATE = r"""
       (function() {{
         const instrumentSelect = document.getElementById('orderbook-instrument');
         const levelSelect = document.getElementById('depth-levels');
+        const netDepthCanvas = document.getElementById('net-depth-chart');
+        const netDepthAnalysis = document.getElementById('net-depth-analysis');
+        const netDepthHint = document.getElementById('net-depth-hint');
+        let latestChartPoints = [];
+        let latestChartLevels = {levels};
 
         const formatNumber = (value, digits = 2) => {{
           if (value === null || value === undefined || value === '') {{ return '--'; }}
@@ -1416,111 +1550,132 @@ ORDERBOOK_TEMPLATE = r"""
         }};
         const describeDepth = (imbalance) => {{
           if (imbalance >= 0.2) {{
-            return {{ tone: 'positive', text: '买盘深度明显占优，短线动能偏多。' }};
+            return {{ tone: 'positive', text: '涔扮洏娣卞害鏄庢樉鍗犱紭锛岀煭绾垮姩鑳藉亸澶氥€? }};
           }}
           if (imbalance <= -0.2) {{
-            return {{ tone: 'negative', text: '卖盘压制增强，谨防价格回落。' }};
+            return {{ tone: 'negative', text: '鍗栫洏鍘嬪埗澧炲己锛岃皑闃蹭环鏍煎洖钀姐€? }};
           }}
-          return {{ tone: 'neutral', text: '买卖力量接近平衡，关注成交突破信号。' }};
+          return {{ tone: 'neutral', text: '涔板崠鍔涢噺鎺ヨ繎骞宠　锛屽叧娉ㄦ垚浜ょ獊鐮翠俊鍙枫€? }};
         }};
-        const buildSeries = (entries, depth) => {{
-          const series = [];
-          let cumulative = 0;
-          for (let i = 0; i < depth; i += 1) {{
-            const size = Number(entries[i]?.[1]) || 0;
-            cumulative += size;
-            series.push({{ level: i + 1, value: cumulative }});
-          }}
-          return series;
-        }};
-        const drawStrengthChart = (canvas, bids, asks) => {{
-          const parent = canvas.parentElement;
-          const width = Math.max((parent ? parent.clientWidth : 320), 280);
-          const height = 220;
+
+        function renderNetDepthOverview(points, depthLevels) {{
+          if (!netDepthCanvas) {{ return; }}
+          const parentWidth = netDepthCanvas.parentElement ? netDepthCanvas.parentElement.clientWidth - 16 : 900;
+          const height = 260;
           const dpr = window.devicePixelRatio || 1;
-          canvas.width = width * dpr;
-          canvas.height = height * dpr;
-          canvas.style.width = width + 'px';
-          canvas.style.height = height + 'px';
-          const ctx = canvas.getContext('2d');
+          const width = Math.max(parentWidth, 320);
+          netDepthCanvas.width = width * dpr;
+          netDepthCanvas.height = height * dpr;
+          netDepthCanvas.style.width = width + 'px';
+          netDepthCanvas.style.height = height + 'px';
+          const ctx = netDepthCanvas.getContext('2d');
           ctx.setTransform(1, 0, 0, 1, 0, 0);
           ctx.scale(dpr, dpr);
           ctx.clearRect(0, 0, width, height);
-          const values = [...bids, ...asks].map((pt) => pt.value);
-          const maxValue = Math.max(...values, 0);
-          if (!maxValue) {{
+          if (netDepthHint) {{
+            netDepthHint.textContent = `鍩轰簬鍓?{{depthLevels}}妗ｅ噣娣卞害`;
+          }}
+          if (!points.length) {{
             ctx.fillStyle = '#94a3b8';
             ctx.font = '14px Arial';
-            ctx.fillText('深度不足', 20, height / 2);
+            ctx.fillText('鏆傛棤鍑€娣卞害鏁版嵁', 20, height / 2);
+            if (netDepthAnalysis) {{
+              netDepthAnalysis.textContent = '鏆傛棤鏁版嵁';
+            }}
             return;
           }}
-          const left = 46;
-          const right = 16;
-          const top = 18;
-          const bottom = 30;
+          const values = points.map((pt) => pt.value);
+          const maxVal = Math.max(...values, 0);
+          const minVal = Math.min(...values, 0);
+          const range = maxVal - minVal || 1;
+          const left = 50;
+          const right = 20;
+          const top = 20;
+          const bottom = 40;
           const chartWidth = width - left - right;
           const chartHeight = height - top - bottom;
-          ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
+          const zeroY = top + chartHeight - ((0 - minVal) / range) * chartHeight;
+
+          ctx.strokeStyle = '#475569';
           ctx.lineWidth = 1;
           ctx.beginPath();
-          ctx.moveTo(left, top);
-          ctx.lineTo(left, top + chartHeight);
-          ctx.lineTo(width - right, top + chartHeight);
+          ctx.moveTo(left, zeroY);
+          ctx.lineTo(width - right, zeroY);
           ctx.stroke();
-          const drawSeries = (series, color) => {{
-            if (!series.length) {{ return; }}
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            series.forEach((pt, idx) => {{
-              const ratio = series.length > 1 ? idx / (series.length - 1) : 0;
-              const x = left + chartWidth * ratio;
-              const y = top + chartHeight - (pt.value / maxValue) * chartHeight;
-              if (idx === 0) {{
-                ctx.moveTo(x, y);
-              }} else {{
-                ctx.lineTo(x, y);
-              }}
-            }});
-            ctx.stroke();
-          }};
-          drawSeries(bids, '#4ade80');
-          drawSeries(asks, '#f87171');
-          ctx.font = '12px Arial';
-          ctx.fillStyle = '#4ade80';
-          ctx.fillText('买盘', left, top - 4);
-          ctx.fillStyle = '#f87171';
-          ctx.fillText('卖盘', left + 48, top - 4);
-          const tickCount = Math.min(5, bids.length);
-          ctx.fillStyle = '#94a3b8';
+
+          const step = points.length > 1 ? chartWidth / (points.length - 1) : 0;
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          points.forEach((pt, idx) => {{
+            const x = left + step * idx;
+            const y = top + (maxVal - pt.value) / range * chartHeight;
+            if (idx === 0) {{
+              ctx.moveTo(x, y);
+            }} else {{
+              ctx.lineTo(x, y);
+            }}
+          }});
+          ctx.stroke();
+
+          ctx.font = '11px Arial';
           ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
-          for (let i = 0; i < tickCount; i += 1) {{
-            const idx = Math.round((bids.length - 1) * (i / (tickCount - 1 || 1)));
-            const x = left + chartWidth * (idx / Math.max(1, bids.length - 1));
-            ctx.fillText(`${{idx + 1}}档`, x, height - bottom + 6);
+          ctx.textBaseline = 'middle';
+          points.forEach((pt, idx) => {{
+            const x = left + step * idx;
+            const y = top + (maxVal - pt.value) / range * chartHeight;
+            ctx.fillStyle = pt.value >= 0 ? '#4ade80' : '#f87171';
+            ctx.beginPath();
+            ctx.arc(x, y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillText(pt.label, x, height - 12);
+          }});
+
+          if (netDepthAnalysis) {{
+            const strongestBid = [...points].filter((pt) => pt.value > 0).sort((a, b) => b.value - a.value)[0];
+            const strongestAsk = [...points].filter((pt) => pt.value < 0).sort((a, b) => a.value - b.value)[0];
+            const totalNet = values.reduce((sum, val) => sum + val, 0);
+            let analysis;
+            if (strongestBid && strongestAsk) {{
+              analysis = `涔扮洏鏈€寮猴細${{strongestBid.label}}锛?{{formatNumber(strongestBid.value, 2)}}锛夛紝鍗栧帇鏈€澶э細${{strongestAsk.label}}锛?{{formatNumber(strongestAsk.value, 2)}}锛夛紝鍑€娣卞害鍚堣 ${{formatNumber(totalNet, 2)}}銆俙;
+            }} else if (strongestBid) {{
+              analysis = `鏁翠綋鍋忓锛?{{strongestBid.label}} 棰嗗厛锛?{{formatNumber(strongestBid.value, 2)}}锛夛紝鍑€娣卞害鍚堣 ${{formatNumber(totalNet, 2)}}銆俙;
+            }} else if (strongestAsk) {{
+              analysis = `鏁翠綋鍋忕┖锛?{{strongestAsk.label}} 鍗栧帇鏈€寮猴紙${{formatNumber(strongestAsk.value, 2)}}锛夛紝鍑€娣卞害鍚堣 ${{formatNumber(totalNet, 2)}}銆俙;
+            }} else {{
+              analysis = '鍑€娣卞害鎺ヨ繎闆讹紝涔板崠鍔涢噺鏆傛椂鍧囪　銆?;
+            }}
+            netDepthAnalysis.textContent = analysis;
           }}
-        }};
+        }}
 
         function renderBooks(data) {{
           const container = document.getElementById('orderbook-container');
           container.innerHTML = '';
           const levels = parseInt(levelSelect.value || '{levels}', 10) || {levels};
+          const chartPoints = [];
           (data.items || []).forEach((item) => {{
             const bids = Array.isArray(item.bids) ? item.bids : [];
             const asks = Array.isArray(item.asks) ? item.asks : [];
-            const buyDepth = sumDepth(bids, levels);
-            const sellDepth = sumDepth(asks, levels);
-            const totalDepth = buyDepth + sellDepth;
-            const bidShare = totalDepth > 0 ? buyDepth / totalDepth : 0.5;
+            const bidDepth = sumDepth(bids, levels);
+            const askDepth = sumDepth(asks, levels);
+            const totalDepth = bidDepth + askDepth;
+            const bidShare = totalDepth > 0 ? bidDepth / totalDepth : 0.5;
             const askShare = 1 - bidShare;
-            const imbalance = totalDepth > 0 ? (buyDepth - sellDepth) / totalDepth : 0;
+            const imbalance = totalDepth > 0 ? (bidDepth - askDepth) / totalDepth : 0;
+            const netDepth = bidDepth - askDepth;
+            chartPoints.push({ label: item.instrument_id || '--', value: netDepth });
             const {{ tone, text: guidance }} = describeDepth(imbalance);
+            const bidSharePct = Math.round(bidShare * 100);
+            const askSharePct = Math.round(askShare * 100);
+            const imbalancePct = totalDepth > 0 ? (imbalance * 100).toFixed(1) + '%' : '--';
             const spreadText = formatNumber(item.spread, 4);
             const bestBidText = formatNumber(item.best_bid, 4);
             const bestAskText = formatNumber(item.best_ask, 4);
-            const buyDepthText = formatNumber(buyDepth, 2);
-            const sellDepthText = formatNumber(sellDepth, 2);
+            const bidDepthText = formatNumber(bidDepth, 2);
+            const askDepthText = formatNumber(askDepth, 2);
+            const netDepthText = formatNumber(netDepth, 2);
             const totalDepthText = formatNumber(totalDepth, 2);
             const bestBidNum = Number(item.best_bid);
             const bestAskNum = Number(item.best_ask);
@@ -1528,40 +1683,63 @@ ORDERBOOK_TEMPLATE = r"""
             if (Number.isFinite(bestBidNum) && Number.isFinite(bestAskNum)) {{
               midText = formatNumber((bestBidNum + bestAskNum) / 2, 4);
             }}
-            const analysis = `买盘占比 ${{Math.round(bidShare * 100)}}%，${{guidance}}（点差 ${{spreadText}}）`;
+            const analysis = `涔扮洏鍗犳瘮 ${{bidSharePct}}%锛?{{guidance}}锛堢偣宸?${{spreadText}}锛塦;
+
             const card = document.createElement('section');
-            card.className = `orderbook-chart tone-${{tone}}`;
+            card.className = `orderbook-card tone-${{tone}}`;
             card.innerHTML = `
-              <div class="chart-header">
-                <div>
+              <header>
+                <div class="title-row">
                   <h2>${{item.instrument_id || '--'}}</h2>
-                  <small>更新时间：${{formatTimestamp(item.timestamp)}}</small>
+                  <span class="timestamp">鏇存柊鏃堕棿锛?{{formatTimestamp(item.timestamp)}}</span>
                 </div>
-                <div class="chart-meta">
-                  <span>买一 ${{bestBidText}}</span>
-                  <span>卖一 ${{bestAskText}}</span>
-                  <span>点差 ${{spreadText}}</span>
-                  <span>中间价 ${{midText}}</span>
+                <div class="quote-meta">
+                  <span>涔颁竴 ${{bestBidText}}</span>
+                  <span>鍗栦竴 ${{bestAskText}}</span>
+                  <span>鐐瑰樊 ${{spreadText}}</span>
+                  <span>涓棿浠?${{midText}}</span>
+                </div>
+              </header>
+              <div class="metric-grid">
+                <div>
+                  <span class="label">涔扮洏娣卞害锛堝墠${{levels}}妗ｏ級</span>
+                  <span class="value accent">${{bidDepthText}}</span>
+                </div>
+                <div>
+                  <span class="label">鍗栫洏娣卞害锛堝墠${{levels}}妗ｏ級</span>
+                  <span class="value">${{askDepthText}}</span>
+                </div>
+                <div>
+                  <span class="label">鍑€娣卞害</span>
+                  <span class="value">${{netDepthText}}</span>
+                </div>
+                <div>
+                  <span class="label">娣卞害鍗犳瘮</span>
+                  <span class="value">${{imbalancePct}}</span>
+                </div>
+                <div>
+                  <span class="label">鎬绘繁搴?/span>
+                  <span class="value">${{totalDepthText}}</span>
                 </div>
               </div>
-              <div class="chart-stats">
-                <span>买盘深度（前${{levels}}档）${{buyDepthText}}</span>
-                <span>卖盘深度（前${{levels}}档）${{sellDepthText}}</span>
-                <span>总深度 ${{totalDepthText}}</span>
+              <div class="depth-bars">
+                <div class="bar bid" style="width: ${{(bidShare * 100).toFixed(1)}}%;">
+                  涔版柟 ${{bidSharePct}}%
+                </div>
+                <div class="bar ask" style="width: ${{(askShare * 100).toFixed(1)}}%;">
+                  鍗栨柟 ${{askSharePct}}%
+                </div>
               </div>
-              <canvas class="chart-canvas"></canvas>
-              <p class="chart-insight ${{tone}}">${{analysis}}</p>
+              <p class="insight-text ${{tone}}">${{analysis}}</p>
             `;
-            const canvas = card.querySelector('canvas');
-            const buySeries = buildSeries(bids, levels);
-            const sellSeries = buildSeries(asks, levels);
-            canvas.dataset.buy = JSON.stringify(buySeries);
-            canvas.dataset.sell = JSON.stringify(sellSeries);
-            drawStrengthChart(canvas, buySeries, sellSeries);
             container.appendChild(card);
           }});
+          latestChartPoints = chartPoints;
+          latestChartLevels = levels;
+          renderNetDepthOverview(chartPoints, levels);
           if ((data.items || []).length === 0) {{
-            container.innerHTML = '<p class="empty-state">暂无深度数据</p>';
+            container.innerHTML = '<p class="empty-state">鏆傛棤娣卞害鏁版嵁</p>';
+            renderNetDepthOverview([], levels);
           }}
           const updated = document.getElementById('orderbook-updated');
           if (updated) {{ updated.textContent = formatTimestamp(data.updated_at); }}
@@ -1581,19 +1759,11 @@ ORDERBOOK_TEMPLATE = r"""
 
         instrumentSelect.addEventListener('change', refresh);
         levelSelect.addEventListener('change', refresh);
-        window.addEventListener('resize', () => {{
-          document.querySelectorAll('.chart-canvas').forEach((canvas) => {{
-            try {{
-              const buy = JSON.parse(canvas.dataset.buy || '[]');
-              const sell = JSON.parse(canvas.dataset.sell || '[]');
-              drawStrengthChart(canvas, buy, sell);
-            }} catch (err) {{
-              console.error(err);
-            }}
-          }});
-        }});
         refresh();
         setInterval(refresh, 4000);
+        window.addEventListener('resize', () => {{
+          renderNetDepthOverview(latestChartPoints, latestChartLevels);
+        }});
       }})();
     </script>
 </body>
