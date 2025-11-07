@@ -1535,7 +1535,9 @@ ORDERBOOK_TEMPLATE = r"""
                 prioritized.push(found);
               }}
             }});
-            items = prioritized;
+            if (prioritized.length) {{
+              items = prioritized;
+            }}
           }}
           if (!items.length) {{
             container.innerHTML = '<p class="empty-state">暂无深度数据</p>';
