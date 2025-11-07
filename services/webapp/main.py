@@ -1332,7 +1332,7 @@ ORDERBOOK_TEMPLATE = r"""
         .controls {{ display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 1rem; }}
         .controls label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
         select {{ min-width: 160px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; padding: 8px 10px; }}
-        .book-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 20px; }}
+        .book-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 20px; align-items: stretch; }}
         .orderbook-chart {{ background: #0f1b2d; border-radius: 16px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.15); display: flex; flex-direction: column; gap: 14px; }}
         .orderbook-chart.tone-positive {{ border-color: rgba(74, 222, 128, 0.4); }}
         .orderbook-chart.tone-negative {{ border-color: rgba(248, 113, 113, 0.35); }}
@@ -1445,8 +1445,8 @@ ORDERBOOK_TEMPLATE = r"""
         }};
         const drawNetDepthChart = (canvas, history) => {{
           const parent = canvas.parentElement;
-          const width = Math.max((parent ? parent.clientWidth : 320), 280);
-          const height = 220;
+          const width = Math.max((parent ? parent.clientWidth : 320), 420);
+          const height = 260;
           const dpr = window.devicePixelRatio || 1;
           canvas.width = width * dpr;
           canvas.height = height * dpr;
@@ -1499,7 +1499,7 @@ ORDERBOOK_TEMPLATE = r"""
           ctx.font = '12px Arial';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'top';
-          const tickCount = Math.min(history.length, 6);
+          const tickCount = Math.min(history.length, 8);
           for (let i = 0; i < tickCount; i += 1) {{
             const idx = Math.round((history.length - 1) * (i / Math.max(1, tickCount - 1)));
             const pt = history[idx];
@@ -1508,6 +1508,14 @@ ORDERBOOK_TEMPLATE = r"""
               ? `${{String(pt.time.getHours()).padStart(2, '0')}}:${{String(pt.time.getMinutes()).padStart(2, '0')}}:${{String(pt.time.getSeconds()).padStart(2, '0')}}`
               : '';
             ctx.fillText(label, x, height - bottom + 6);
+          }}
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'middle';
+          const yTicks = 5;
+          for (let i = 0; i <= yTicks; i += 1) {{
+            const value = bottomVal + (range * i) / yTicks;
+            const y = top + chartHeight - (chartHeight * i) / yTicks;
+            ctx.fillText(formatNumber(value, 2), left - 6, y);
           }}
         }};
 
