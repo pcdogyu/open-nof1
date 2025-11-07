@@ -1000,10 +1000,10 @@ SETTINGS_TEMPLATE = r"""
     <nav class="top-nav">
         <a href="/" class="nav-link">首页</a>
         <a href="/models" class="nav-link">模型管理</a>
-        <a href="/okx" class="nav-link">OKX 模拟</a>
+        <a href="/okx" class="nav-link active">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link active">策略配置</a>
+        <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
 
