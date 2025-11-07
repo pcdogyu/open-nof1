@@ -32,6 +32,10 @@ PIPELINE_POLL_INTERVAL = 120
 # Web OKX page cache TTL (seconds) for Influx-backed snapshots.
 OKX_CACHE_TTL_SECONDS = 600
 
+# Scheduler defaults (seconds)
+MARKET_SYNC_INTERVAL = 60
+AI_INTERACTION_INTERVAL = 300
+
 # OKX demo accounts (API keys / secrets / passphrases).
 # Populate secrets/passphrases when available.
 OKX_ACCOUNTS = {

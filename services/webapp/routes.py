@@ -10,7 +10,7 @@ import logging
 import math
 import pprint
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Dict, List, Optional
@@ -22,6 +22,7 @@ from accounts.models import Account, AccountSnapshot, Order, Position, Trade, Ba
 from accounts.portfolio_registry import PortfolioRecord, PortfolioRegistry
 from accounts.repository import AccountRepository
 from services.analytics.leaderboard import get_leaderboard, refresh_leaderboard_cache
+from services.jobs import scheduler as scheduler_module
 from services.okx.catalog import (
     load_catalog_cache,
     refresh_okx_instrument_catalog,
@@ -29,12 +30,26 @@ from services.okx.catalog import (
 )
 from services.okx.live import fetch_account_snapshot
 from services.webapp.dependencies import get_account_repository, get_portfolio_registry
+from data_pipeline.influx import InfluxConfig
+
+try:  # optional during tests
+    from influxdb_client import InfluxDBClient
+except ImportError:  # pragma: no cover
+    InfluxDBClient = None  # type: ignore
+
+try:
+    from websocket import set_instruments as set_websocket_instruments
+except ImportError:  # pragma: no cover
+    def set_websocket_instruments(_: List[str]) -> None:
+        logger.debug("websocket instrumentation unavailable; skipping stream update.")
 
 CONFIG_PATH = Path("config.py")
 
 try:
     from config import (
         MODEL_DEFAULTS,
+        AI_INTERACTION_INTERVAL,
+        MARKET_SYNC_INTERVAL,
         OKX_ACCOUNTS,
         PIPELINE_POLL_INTERVAL,
         TRADABLE_INSTRUMENTS,
@@ -68,6 +83,8 @@ except ImportError:  # pragma: no cover - fallback for test envs
         "DOGE-USDT-SWAP",
     ]
     PIPELINE_POLL_INTERVAL = 120
+    MARKET_SYNC_INTERVAL = 60
+    AI_INTERACTION_INTERVAL = 300
     _OKX_TTL = 600
 router = APIRouter()
 _OKX_CACHE_TTL_SECONDS = int(_OKX_TTL)
@@ -97,6 +114,13 @@ _PIPELINE_SETTINGS_LOCK = Lock()
 _PIPELINE_SETTINGS: dict[str, object] = {
     "tradable_instruments": list(TRADABLE_INSTRUMENTS),
     "poll_interval": int(PIPELINE_POLL_INTERVAL),
+    "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+}
+
+_SCHEDULER_SETTINGS_LOCK = Lock()
+_SCHEDULER_SETTINGS: dict[str, object] = {
+    "market_interval": int(MARKET_SYNC_INTERVAL),
+    "ai_interval": int(AI_INTERACTION_INTERVAL),
     "updated_at": datetime.now(tz=timezone.utc).isoformat(),
 }
 
@@ -146,17 +170,58 @@ def update_pipeline_settings(tradable_instruments: List[str], poll_interval: int
         TRADABLE_INSTRUMENTS = normalized
         PIPELINE_POLL_INTERVAL = poll
         _persist_pipeline_settings(normalized, poll)
-        return {
-            "tradable_instruments": list(normalized),
-            "poll_interval": poll,
-            "updated_at": _PIPELINE_SETTINGS["updated_at"],
-        }
+    try:
+        scheduler_module.refresh_pipeline(normalized)
+    except Exception as exc:  # pragma: no cover - scheduler optional
+        logger.debug("Unable to refresh scheduler pipeline: %s", exc)
+    try:
+        set_websocket_instruments(normalized)
+    except Exception as exc:  # pragma: no cover - websocket optional
+        logger.debug("Unable to update websocket instruments: %s", exc)
+    return {
+        "tradable_instruments": list(normalized),
+        "poll_interval": poll,
+        "updated_at": _PIPELINE_SETTINGS["updated_at"],
+    }
 
 
 def get_instrument_catalog(limit: int = 200) -> list[dict]:
     """Return a sanitized snapshot of the cached OKX instrument catalog."""
     entries = search_instrument_catalog(None, limit=limit)
     return [_instrument_entry_to_payload(entry) for entry in entries]
+
+
+def get_scheduler_settings() -> dict:
+    """Return current scheduler interval configuration."""
+    with _SCHEDULER_SETTINGS_LOCK:
+        return {
+            "market_interval": int(_SCHEDULER_SETTINGS["market_interval"]),
+            "ai_interval": int(_SCHEDULER_SETTINGS["ai_interval"]),
+            "updated_at": _SCHEDULER_SETTINGS["updated_at"],
+        }
+
+
+def update_scheduler_settings(market_interval: int, ai_interval: int) -> dict:
+    """Update scheduler intervals and persist configuration."""
+    market = int(market_interval)
+    ai = int(ai_interval)
+    if market < 30 or market > 3600:
+        raise HTTPException(status_code=400, detail="市场行情抽取频率需在 30-3600 秒之间。")
+    if ai < 60 or ai > 7200:
+        raise HTTPException(status_code=400, detail="AI 交互频率需在 60-7200 秒之间。")
+
+    with _SCHEDULER_SETTINGS_LOCK:
+        _SCHEDULER_SETTINGS["market_interval"] = market
+        _SCHEDULER_SETTINGS["ai_interval"] = ai
+        _SCHEDULER_SETTINGS["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
+        _persist_scheduler_settings(market, ai)
+
+    try:
+        scheduler_module.update_task_intervals(market_interval=market, ai_interval=ai)
+    except Exception as exc:  # pragma: no cover - scheduler optional
+        logger.debug("Failed to notify scheduler of interval change: %s", exc)
+
+    return get_scheduler_settings()
 
 
 async def refresh_instrument_catalog() -> dict:
@@ -450,6 +515,24 @@ async def refresh_instruments_api() -> dict:
     }
 
 
+@router.get(
+    "/api/streams/liquidations/latest",
+    summary="Fetch recent liquidation aggregates from InfluxDB",
+)
+def latest_liquidations_api(limit: int = 30, instrument: Optional[str] = None) -> dict:
+    limit = max(1, min(limit, 200))
+    return get_liquidation_snapshot(limit=limit, instrument=instrument)
+
+
+@router.get(
+    "/api/streams/orderbook/latest",
+    summary="Fetch recent order book depth snapshots from InfluxDB",
+)
+def latest_orderbook_api(limit: int = 10, instrument: Optional[str] = None) -> dict:
+    limit = max(1, min(limit, 500))
+    return get_orderbook_snapshot(levels=limit, instrument=instrument)
+
+
 def get_okx_summary(
     repository: AccountRepository | None = None,
     *,
@@ -575,6 +658,112 @@ def get_okx_summary(
         "accounts": account_payloads,
         "leaderboard": leaderboard,
         "sync_errors": sync_errors,
+    }
+
+
+def get_liquidation_snapshot(limit: int = 30, instrument: Optional[str] = None) -> dict:
+    """Return recent liquidation aggregates for dashboard/API consumption."""
+    instrument_filter = (instrument or "").strip().upper()
+    sanitized_limit = max(1, limit)
+    lookback = "60m"
+    query_limit = sanitized_limit
+    if instrument_filter:
+        lookback = "24h"
+        query_limit = max(sanitized_limit * 4, 120)
+    records = _query_influx_measurement(
+        measurement="okx_liquidations",
+        limit=query_limit,
+        instrument=instrument_filter or None,
+        lookback=lookback,
+    )
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=5)
+    items: list[dict] = []
+    fallback_items: list[dict] = []
+    for row in records:
+        inst_id = (row.get("instrument_id") or "").upper()
+        timestamp = row.get("_time")
+        ts = timestamp
+        if isinstance(timestamp, str):
+            try:
+                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                ts = None
+        if isinstance(ts, datetime) and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        record_payload = {
+            "instrument_id": inst_id,
+            "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
+            "long_qty": _coerce_float(row.get("long_qty")),
+            "short_qty": _coerce_float(row.get("short_qty")),
+            "net_qty": _coerce_float(row.get("net_qty")),
+            "last_price": _coerce_float(row.get("last_price")),
+        }
+        fallback_items.append(record_payload)
+        if isinstance(ts, datetime) and ts < cutoff:
+            continue
+        items.append(record_payload)
+    if not items:
+        items = fallback_items[:limit]
+    items.sort(key=lambda entry: entry["timestamp"], reverse=True)
+    items = items[:sanitized_limit]
+    return {
+        "instrument": instrument_filter,
+        "items": items,
+        "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -> dict:
+    """Return latest order book snapshots for configured instruments."""
+    instrument_filter = (instrument or "").strip().upper()
+    fetch_limit = max(1, max(levels, len(TRADABLE_INSTRUMENTS)))
+    records = _query_influx_measurement(
+        measurement="okx_orderbook_depth",
+        limit=fetch_limit * 2,
+        instrument=instrument_filter or None,
+        lookback="2h",
+    )
+    seen: set[str] = set()
+    items: list[dict] = []
+    for row in records:
+        inst_id = (row.get("instrument_id") or "").upper()
+        if not inst_id:
+            continue
+        if instrument_filter and inst_id != instrument_filter:
+            continue
+        if inst_id in seen:
+            continue
+        seen.add(inst_id)
+        timestamp = row.get("_time")
+        bids_raw = row.get("bids_json") or "[]"
+        asks_raw = row.get("asks_json") or "[]"
+        try:
+            bids = json.loads(bids_raw)
+        except (TypeError, json.JSONDecodeError):
+            bids = []
+        try:
+            asks = json.loads(asks_raw)
+        except (TypeError, json.JSONDecodeError):
+            asks = []
+        items.append(
+            {
+                "instrument_id": inst_id,
+                "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp),
+                "best_bid": _coerce_float(row.get("best_bid")),
+                "best_ask": _coerce_float(row.get("best_ask")),
+                "spread": _coerce_float(row.get("spread")),
+                "total_bid_qty": _coerce_float(row.get("total_bid_qty")),
+                "total_ask_qty": _coerce_float(row.get("total_ask_qty")),
+                "bids": bids[: max(1, levels)],
+                "asks": asks[: max(1, levels)],
+            }
+        )
+    items.sort(key=lambda entry: entry["instrument_id"])
+    return {
+        "instrument": instrument_filter,
+        "levels": max(1, levels),
+        "items": items,
+        "updated_at": datetime.now(tz=timezone.utc).isoformat(),
     }
 
 
@@ -838,6 +1027,57 @@ def _instrument_entry_to_payload(entry: dict) -> dict:
     }
 
 
+def _query_influx_measurement(
+    *,
+    measurement: str,
+    limit: int,
+    instrument: Optional[str],
+    lookback: str,
+) -> list[dict]:
+    if InfluxDBClient is None:
+        return []
+    try:
+        config = InfluxConfig.from_env()
+    except Exception as exc:
+        logger.debug("Influx configuration unavailable for %s: %s", measurement, exc)
+        return []
+    if not config.token:
+        return []
+    instrument_filter = ""
+    if instrument:
+        instrument_filter = f'  |> filter(fn: (r) => r["instrument_id"] == "{instrument}")\n'
+    flux = f"""
+from(bucket: "{config.bucket}")
+  |> range(start: -{lookback})
+  |> filter(fn: (r) => r["_measurement"] == "{measurement}")
+{instrument_filter}  |> pivot(rowKey:["_time"], columnKey:["_field"], valueColumn:"_value")
+  |> sort(columns: ["_time"], desc: true)
+  |> limit(n: {max(1, limit)})
+"""
+    try:
+        with InfluxDBClient(url=config.url, token=config.token, org=config.org) as client:
+            tables = client.query_api().query(flux)
+    except Exception as exc:
+        logger.debug("Flux query failed for %s: %s", measurement, exc)
+        return []
+    records: list[dict] = []
+    for table in tables:
+        for record in getattr(table, "records", []):
+            records.append(dict(record.values))
+    return records
+
+
+def _coerce_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _load_recent_ai_signals(limit: int = 10, *, enabled_model_ids: set[str] | None = None) -> list[dict]:
     if not SIGNAL_LOG_PATH.exists():
         return []
@@ -874,6 +1114,19 @@ def _persist_model_defaults() -> None:
         import config as config_module  # type: ignore
 
         config_module.MODEL_DEFAULTS = sanitized  # type: ignore[attr-defined]
+    except ImportError:
+        pass
+
+
+def _persist_scheduler_settings(market_interval: int, ai_interval: int) -> None:
+    """Persist scheduler intervals to config.py."""
+    _replace_config_assignment("MARKET_SYNC_INTERVAL", market_interval)
+    _replace_config_assignment("AI_INTERACTION_INTERVAL", ai_interval)
+    try:
+        import config as config_module  # type: ignore
+
+        config_module.MARKET_SYNC_INTERVAL = market_interval  # type: ignore[attr-defined]
+        config_module.AI_INTERACTION_INTERVAL = ai_interval  # type: ignore[attr-defined]
     except ImportError:
         pass
 

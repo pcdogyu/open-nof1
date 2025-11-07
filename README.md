@@ -1,7 +1,5 @@
 <div align="center">
 
-# open-nof1.ai
-
 面向 LLM 的量化交易控制平面（社区版）
 
 </div>

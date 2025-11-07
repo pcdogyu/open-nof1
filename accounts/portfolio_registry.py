@@ -59,6 +59,13 @@ class PortfolioRegistry:
         """Return all registered portfolios."""
         return list(self._records.values())
 
+    def find_by_model(self, model_id: str) -> Optional[PortfolioRecord]:
+        """Return the first portfolio managed by the given model identifier."""
+        for record in self._records.values():
+            if record.model_id == model_id:
+                return record
+        return None
+
     def resolve_credentials(self, portfolio_id: str) -> Dict[str, str]:
         """
         Fetch exchange credentials using the configured resolver.
