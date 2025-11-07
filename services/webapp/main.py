@@ -320,10 +320,11 @@ def _render_model_manager(catalog: list[dict]) -> str:
         )
 
     if not cards:
+        cards_html = "<p class='empty-state'>暂无可用深度数据</p>"
+    else:
+        cards_html = "\n".join(cards)
 
-        return "<p class='empty-state'>暂无可用深度数据</p>"
-
-    return "\n".join(cards)
+    return MODEL_MANAGER_TEMPLATE.format(models_html=cards_html)
 
 
 

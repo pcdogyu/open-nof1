@@ -6,15 +6,15 @@ needed for your environment.
 """
 
 INFLUX_URL = "http://localhost:8086"
-INFLUX_ORG = "your-influxdb-org"
-INFLUX_BUCKET = "your-influxdb-bucket"
+INFLUX_ORG = "hy"
+INFLUX_BUCKET = "orderflow"
 
 # Auto-generated InfluxDB token (scope manually configure in Influx UI).
-INFLUX_TOKEN = "your-influxdb-token"
+INFLUX_TOKEN = "kf7vIL3tUMSvGNMS4mbyeFpSG9wmM40Adw-sx_2DicV5CXKuGNJp4pPy1i3cyzilUn9--2VoBOND8uGZovj7vA=="
 
 # Optional: admin credentials if needed for scripts (avoid using in production).
-INFLUX_USERNAME = "your-influxdb-username"
-INFLUX_PASSWORD = "your-influxdb-password"
+INFLUX_USERNAME = "admin"
+INFLUX_PASSWORD = "Admin123"
 
 # Supported OKX swap instruments for the default pipeline run.
 TRADABLE_INSTRUMENTS = [   'XRP-USDT-SWAP',
@@ -40,9 +40,9 @@ AI_INTERACTION_INTERVAL = 300
 # Populate secrets/passphrases when available.
 OKX_ACCOUNTS = {
     "moni": {
-        "api_key": "moni-okx-api-key",
-        "api_secret": "moni-okx-api-secret",
-        "passphrase": "moni-okx-api-passphrase",
+        "api_key": "d7f7bde1-b1b7-427b-b97a-37087c8560db",
+        "api_secret": "8A831D36FBC2EB7010B3B37D7D495F9A",
+        "passphrase": "123456.coM",
         "model_id": "deepseek-v1",
         "account_id": "okx_moni",
         "starting_equity": 10000.0,
