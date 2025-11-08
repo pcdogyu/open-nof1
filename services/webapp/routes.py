@@ -721,6 +721,8 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
     """Return latest order book snapshots for configured instruments."""
     instrument_filter = (instrument or "").strip().upper()
     fetch_limit = max(1, max(levels, len(TRADABLE_INSTRUMENTS)))
+    history_cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+    max_history_points = 1200
     records = _query_influx_measurement(
         measurement="okx_orderbook_depth",
         limit=fetch_limit * 2,
@@ -735,6 +737,14 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
         if not inst_id:
             continue
         timestamp = row.get("_time")
+        ts = timestamp
+        if isinstance(timestamp, str):
+            try:
+                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                ts = None
+        if isinstance(ts, datetime) and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
         bids_raw = row.get("bids_json") or "[]"
         asks_raw = row.get("asks_json") or "[]"
         total_bid_qty = _coerce_float(row.get("total_bid_qty"))
@@ -743,13 +753,21 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
         if total_bid_qty is not None and total_ask_qty is not None:
             net_depth = total_bid_qty - total_ask_qty
         hist_entry = {
-            "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp),
+            "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
             "net_depth": net_depth,
         }
+        if isinstance(ts, datetime):
+            hist_entry["_ts"] = ts
         history_list = history_map.setdefault(inst_id, [])
         history_list.append(hist_entry)
-        if len(history_list) > 240:
-            del history_list[: len(history_list) - 240]
+        if isinstance(ts, datetime):
+            history_list[:] = [
+                entry
+                for entry in history_list
+                if not isinstance(entry.get("_ts"), datetime) or entry["_ts"] >= history_cutoff
+            ]
+        if len(history_list) > max_history_points:
+            del history_list[: len(history_list) - max_history_points]
         if instrument_filter and inst_id != instrument_filter:
             continue
         if inst_id in seen:
@@ -763,10 +781,15 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
             asks = json.loads(asks_raw)
         except (TypeError, json.JSONDecodeError):
             asks = []
+        raw_history = history_map.get(inst_id, [])
+        history = [
+            {"timestamp": entry["timestamp"], "net_depth": entry["net_depth"]}
+            for entry in reversed(raw_history)
+        ]
         items.append(
             {
                 "instrument_id": inst_id,
-                "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp),
+                "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
                 "best_bid": _coerce_float(row.get("best_bid")),
                 "best_ask": _coerce_float(row.get("best_ask")),
                 "spread": _coerce_float(row.get("spread")),
@@ -774,7 +797,7 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
                 "total_ask_qty": _coerce_float(row.get("total_ask_qty")),
                 "bids": bids[: max(1, levels)],
                 "asks": asks[: max(1, levels)],
-                "history": list(reversed(history_map.get(inst_id, []))),
+                "history": history,
             }
         )
     if not items:
