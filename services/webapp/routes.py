@@ -13,14 +13,16 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, validator
 
-from accounts.models import Account, AccountSnapshot, Order, Position, Trade, Balance
+from accounts.models import Account, AccountSnapshot, Balance, Order, Position, Trade
 from accounts.portfolio_registry import PortfolioRecord, PortfolioRegistry
 from accounts.repository import AccountRepository
+from data_pipeline.influx import InfluxConfig, InfluxWriter
 from services.analytics.leaderboard import get_leaderboard, refresh_leaderboard_cache
 from services.jobs import scheduler as scheduler_module
 from services.okx.catalog import (
@@ -30,7 +32,6 @@ from services.okx.catalog import (
 )
 from services.okx.live import fetch_account_snapshot
 from services.webapp.dependencies import get_account_repository, get_portfolio_registry
-from data_pipeline.influx import InfluxConfig
 
 try:  # optional during tests
     from influxdb_client import InfluxDBClient
@@ -123,6 +124,9 @@ _SCHEDULER_SETTINGS: dict[str, object] = {
     "ai_interval": int(AI_INTERACTION_INTERVAL),
     "updated_at": datetime.now(tz=timezone.utc).isoformat(),
 }
+
+_ORDERBOOK_WRITER: InfluxWriter | None = None
+OKX_REST_BASE = "https://www.okx.com"
 
 
 class PipelineSettingsPayload(BaseModel):
@@ -725,18 +729,32 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
     )
     seen: set[str] = set()
     items: list[dict] = []
+    history_map: dict[str, list[dict]] = {}
     for row in records:
         inst_id = (row.get("instrument_id") or "").upper()
         if not inst_id:
             continue
+        timestamp = row.get("_time")
+        bids_raw = row.get("bids_json") or "[]"
+        asks_raw = row.get("asks_json") or "[]"
+        total_bid_qty = _coerce_float(row.get("total_bid_qty"))
+        total_ask_qty = _coerce_float(row.get("total_ask_qty"))
+        net_depth = None
+        if total_bid_qty is not None and total_ask_qty is not None:
+            net_depth = total_bid_qty - total_ask_qty
+        hist_entry = {
+            "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp),
+            "net_depth": net_depth,
+        }
+        history_list = history_map.setdefault(inst_id, [])
+        history_list.append(hist_entry)
+        if len(history_list) > 240:
+            del history_list[: len(history_list) - 240]
         if instrument_filter and inst_id != instrument_filter:
             continue
         if inst_id in seen:
             continue
         seen.add(inst_id)
-        timestamp = row.get("_time")
-        bids_raw = row.get("bids_json") or "[]"
-        asks_raw = row.get("asks_json") or "[]"
         try:
             bids = json.loads(bids_raw)
         except (TypeError, json.JSONDecodeError):
@@ -756,8 +774,11 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
                 "total_ask_qty": _coerce_float(row.get("total_ask_qty")),
                 "bids": bids[: max(1, levels)],
                 "asks": asks[: max(1, levels)],
+                "history": list(reversed(history_map.get(inst_id, []))),
             }
         )
+    if not items:
+        items = _fetch_live_orderbooks(levels=levels, instrument_filter=instrument_filter)
     items.sort(key=lambda entry: entry["instrument_id"])
     return {
         "instrument": instrument_filter,
@@ -1076,6 +1097,118 @@ def _coerce_float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _fetch_live_orderbooks(*, levels: int, instrument_filter: str | None) -> list[dict]:
+    instruments: Sequence[str]
+    if instrument_filter:
+        instruments = [instrument_filter]
+    else:
+        instruments = TRADABLE_INSTRUMENTS
+    if not instruments:
+        return []
+    depth = max(1, min(500, levels if instrument_filter else max(levels, 50)))
+    writer = _get_orderbook_writer()
+    items: list[dict] = []
+    try:
+        with httpx.Client(base_url=OKX_REST_BASE, timeout=6.0) as client:
+            for inst in instruments:
+                inst_id = (inst or "").strip().upper()
+                if not inst_id:
+                    continue
+                response = client.get(
+                    "/api/v5/market/books",
+                    params={"instId": inst_id, "sz": depth},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get("code") != "0":
+                    continue
+                data = payload.get("data") or []
+                if not data:
+                    continue
+                snapshot = data[0]
+                bids = _sanitize_book_levels(snapshot.get("bids") or [], depth)
+                asks = _sanitize_book_levels(snapshot.get("asks") or [], depth)
+                if not bids and not asks:
+                    continue
+                timestamp = _parse_okx_timestamp(snapshot.get("ts"))
+                if writer is not None:
+                    try:
+                        writer.write_orderbook(
+                            instrument_id=inst_id,
+                            timestamp=timestamp,
+                            bids=bids,
+                            asks=asks,
+                        )
+                    except Exception as exc:  # pragma: no cover - persistence best-effort
+                        logger.debug("Failed to persist orderbook snapshot for %s: %s", inst_id, exc)
+                best_bid = bids[0][0] if bids else None
+                best_ask = asks[0][0] if asks else None
+                spread = (best_ask - best_bid) if (best_bid is not None and best_ask is not None) else None
+                items.append(
+                    {
+                        "instrument_id": inst_id,
+                        "timestamp": timestamp.isoformat(),
+                        "best_bid": best_bid,
+                        "best_ask": best_ask,
+                        "spread": spread,
+                        "total_bid_qty": sum(level[1] for level in bids) if bids else None,
+                        "total_ask_qty": sum(level[1] for level in asks) if asks else None,
+                        "bids": bids[: max(1, levels)],
+                        "asks": asks[: max(1, levels)],
+                    }
+                )
+                if instrument_filter:
+                    break
+    except Exception as exc:
+        logger.debug("Live orderbook fetch failed: %s", exc)
+    return items
+
+
+def _sanitize_book_levels(levels: Sequence[Sequence[object]], depth: int) -> list[list[float]]:
+    sanitized: list[list[float]] = []
+    max_depth = max(1, min(depth, 500))
+    for idx, level in enumerate(levels):
+        if idx >= max_depth:
+            break
+        try:
+            price = float(level[0])
+            size = float(level[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        sanitized.append([price, size])
+    return sanitized
+
+
+def _parse_okx_timestamp(value: object) -> datetime:
+    try:
+        millis = int(value)
+        return datetime.fromtimestamp(millis / 1000.0, tz=timezone.utc)
+    except (TypeError, ValueError):
+        return datetime.now(tz=timezone.utc)
+
+
+def _get_orderbook_writer() -> InfluxWriter | None:
+    global _ORDERBOOK_WRITER
+    if _ORDERBOOK_WRITER is not None:
+        return _ORDERBOOK_WRITER
+    if InfluxWriter is None:  # pragma: no cover - safety when dependency missing
+        return None
+    try:
+        config = InfluxConfig.from_env()
+    except Exception as exc:
+        logger.debug("Unable to load Influx configuration for orderbook cache: %s", exc)
+        return None
+    if not config.token:
+        logger.debug("Influx token missing; orderbook cache persistence disabled.")
+        return None
+    try:
+        _ORDERBOOK_WRITER = InfluxWriter(config)
+    except Exception as exc:
+        logger.debug("Failed to initialise Influx writer for orderbooks: %s", exc)
+        return None
+    return _ORDERBOOK_WRITER
 
 
 def _load_recent_ai_signals(limit: int = 10, *, enabled_model_ids: set[str] | None = None) -> list[dict]:

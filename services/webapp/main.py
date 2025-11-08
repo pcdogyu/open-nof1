@@ -441,13 +441,16 @@ def _render_orderbook_page(snapshot: dict, instruments: Sequence[str], levels: i
     esc = _escape
     instrument_options = _build_instrument_options(instruments, snapshot.get("instrument"))
     level_options = _build_depth_options(levels)
-    cards = _render_orderbook_cards(snapshot.get("items") or [], levels)
+    items = snapshot.get("items") or []
+    cards = _render_orderbook_cards(items, levels)
+    grid_class = "book-grid two-cols" if items and len(items) <= 2 else "book-grid"
     return ORDERBOOK_TEMPLATE.format(
         instrument_options=instrument_options,
         level_options=level_options,
         updated_at=esc(_format_asia_shanghai(snapshot.get("updated_at"))),
         cards=cards,
         levels=levels,
+        book_grid_class=grid_class,
     )
 
 
@@ -1310,7 +1313,7 @@ LIQUIDATION_TEMPLATE = r"""
         }}
         select.addEventListener('change', refresh);
         refresh();
-        setInterval(refresh, 5000);
+        setInterval(refresh, 3000);
       }})();
     </script>
 </body>
@@ -1333,17 +1336,23 @@ ORDERBOOK_TEMPLATE = r"""
         .controls {{ display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 1rem; }}
         .controls label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
         select {{ min-width: 160px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; padding: 8px 10px; }}
-        .book-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 20px; align-items: stretch; }}
-        .orderbook-chart {{ background: #0f1b2d; border-radius: 16px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.15); display: flex; flex-direction: column; gap: 14px; }}
+        .book-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 20px; align-items: stretch; width: 98vw; margin: 0 auto; }}
+        .book-grid.two-cols {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; width: 98vw; }}
+        @media (max-width: 1024px) {{ .book-grid.two-cols {{ grid-template-columns: 1fr; }} }}
+        .orderbook-chart {{ background: #0f1b2d; border-radius: 16px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.15); display: flex; flex-direction: column; gap: 14px; width: 100%; }}
         .orderbook-chart.tone-positive {{ border-color: rgba(74, 222, 128, 0.4); }}
         .orderbook-chart.tone-negative {{ border-color: rgba(248, 113, 113, 0.35); }}
         .orderbook-chart.tone-neutral {{ border-color: rgba(59, 130, 246, 0.25); }}
         .chart-header {{ display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }}
         .chart-header h2 {{ margin: 0; font-size: 1.15rem; }}
         .chart-header small {{ display: block; font-size: 0.8rem; color: #94a3b8; margin-top: 4px; }}
-        .chart-meta {{ display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.9rem; color: #cbd5f5; }}
-        .chart-stats {{ display: flex; gap: 16px; flex-wrap: wrap; font-size: 0.9rem; color: #cbd5f5; }}
-        .chart-stats span {{ background: rgba(148, 163, 184, 0.1); padding: 4px 10px; border-radius: 999px; }}
+        .chart-prices {{ width: 100%; display: flex; flex-direction: column; gap: 12px; font-size: 1rem; color: #f8fafc; }}
+        .chart-price-group {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; width: 100%; }}
+        .chart-prices span {{ background: rgba(248, 250, 252, 0.08); padding: 8px 14px; border-radius: 12px; text-align: center; }}
+        .chart-prices span.mid {{ background: rgba(59, 130, 246, 0.18); color: #bfdbfe; }}
+        .chart-stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; font-size: 0.9rem; color: #cbd5f5; width: 100%; }}
+        .chart-stats .stat-pill {{ background: rgba(148, 163, 184, 0.1); padding: 8px 12px; border-radius: 12px; text-align: center; }}
+        .chart-stats .stat-accent {{ background: rgba(34, 197, 94, 0.28); border: 1px solid rgba(34, 197, 94, 0.45); color: #dcfce7; font-weight: 600; }}
         .chart-canvas {{ width: 100%; height: 220px; }}
         .chart-insight {{ margin: 0; font-size: 0.9rem; color: #e2e8f0; }}
         .chart-insight.positive {{ color: #4ade80; }}
@@ -1378,7 +1387,7 @@ ORDERBOOK_TEMPLATE = r"""
         <span>最后更新：<span class="timestamp" id="orderbook-updated">{updated_at}</span></span>
     </div>
     <h2 class="section-heading">市场深度</h2>
-    <div id="orderbook-container" class="book-grid">
+    <div id="orderbook-container" class="{book_grid_class}">
         {cards}
     </div>
     <script>
@@ -1388,6 +1397,10 @@ ORDERBOOK_TEMPLATE = r"""
         const DEFAULT_PAIRS = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP'];
         const HISTORY_LIMIT = 120;
         const netDepthHistory = new Map();
+        const BASE_GRID_CLASS = 'book-grid';
+        const NET_DEPTH_DELAY_MS = 3000;
+        const pendingNetDepth = new Map();
+        const committedNetDepth = new Map();
 
         const formatNumber = (value, digits = 2) => {{
           if (value === null || value === undefined || value === '') {{ return '--'; }}
@@ -1444,6 +1457,58 @@ ORDERBOOK_TEMPLATE = r"""
           netDepthHistory.set(key, history);
           return history;
         }};
+        const primeHistory = (symbol, series) => {{
+          if (!Array.isArray(series) || !series.length) {{
+            return;
+          }}
+          const key = (symbol || '--').toUpperCase();
+          if (netDepthHistory.has(key)) {{
+            return;
+          }}
+          const history = [];
+          series.forEach((entry) => {{
+            const val = Number(entry?.net_depth);
+            if (!Number.isFinite(val)) {{
+              return;
+            }}
+            const time = entry?.timestamp ? new Date(entry.timestamp) : new Date();
+            history.push({{ time, value: val }});
+          }});
+          if (!history.length) {{
+            return;
+          }}
+          const trimmed = history.slice(-HISTORY_LIMIT);
+          netDepthHistory.set(key, trimmed);
+        }};
+        const queueNetDepthUpdate = (symbol, timestamp, value) => {{
+          if (!symbol) {{
+            return;
+          }}
+          const key = symbol.toUpperCase();
+          pendingNetDepth.set(key, {{
+            value,
+            timestamp: timestamp ? new Date(timestamp) : new Date(),
+            readyAt: Date.now() + NET_DEPTH_DELAY_MS,
+          }});
+        }};
+        const flushNetDepthQueue = () => {{
+          const now = Date.now();
+          pendingNetDepth.forEach((entry, key) => {{
+            if (entry.readyAt <= now) {{
+              committedNetDepth.set(key, {{
+                value: entry.value,
+                timestamp: entry.timestamp,
+              }});
+              pendingNetDepth.delete(key);
+            }}
+          }});
+        }};
+        const getCommittedNetDepth = (symbol) => {{
+          if (!symbol) {{
+            return undefined;
+          }}
+          return committedNetDepth.get(symbol.toUpperCase());
+        }};
         const drawNetDepthChart = (canvas, history) => {{
           const parent = canvas.parentElement;
           const width = Math.max((parent ? parent.clientWidth : 320), 420);
@@ -1466,9 +1531,11 @@ ORDERBOOK_TEMPLATE = r"""
           const values = history.map((pt) => pt.value);
           const maxVal = Math.max(...values);
           const minVal = Math.min(...values);
-          const padding = Math.max(Math.abs(maxVal), Math.abs(minVal), 1) * 0.1;
-          const topVal = maxVal + padding;
-          const bottomVal = minVal - padding;
+          const maxAbs = Math.max(Math.abs(maxVal), Math.abs(minVal), 1);
+          const padding = maxAbs * 0.1;
+          const limit = maxAbs + padding;
+          const topVal = limit;
+          const bottomVal = -limit;
           const range = topVal - bottomVal || 1;
           const left = 50;
           const right = 16;
@@ -1523,6 +1590,14 @@ ORDERBOOK_TEMPLATE = r"""
         function renderBooks(data) {{
           const container = document.getElementById('orderbook-container');
           container.innerHTML = '';
+          flushNetDepthQueue();
+          const applyGridClass = (count) => {{
+            if (count > 0 && count <= 2) {{
+              container.className = `${{BASE_GRID_CLASS}} two-cols`;
+            }} else {{
+              container.className = BASE_GRID_CLASS;
+            }}
+          }};
           const levels = parseInt(levelSelect.value || '{levels}', 10) || {levels};
           const filterValue = (instrumentSelect.value || '').trim();
           let items = Array.isArray(data.items) ? data.items.slice() : [];
@@ -1540,6 +1615,7 @@ ORDERBOOK_TEMPLATE = r"""
               items = prioritized;
             }}
           }}
+          applyGridClass(items.length);
           if (!items.length) {{
             container.innerHTML = '<p class="empty-state">暂无深度数据</p>';
             const updated = document.getElementById('orderbook-updated');
@@ -1547,6 +1623,8 @@ ORDERBOOK_TEMPLATE = r"""
             return;
           }}
           items.forEach((item) => {{
+            const symbol = (item.instrument_id || '--').toUpperCase();
+            primeHistory(symbol, item.history);
             const bids = Array.isArray(item.bids) ? item.bids : [];
             const asks = Array.isArray(item.asks) ? item.asks : [];
             const buyDepth = sumDepth(bids, levels);
@@ -1568,6 +1646,10 @@ ORDERBOOK_TEMPLATE = r"""
             if (Number.isFinite(bestBidNum) && Number.isFinite(bestAskNum)) {{
               midText = formatNumber((bestBidNum + bestAskNum) / 2, 4);
             }}
+            const netDepthValue = buyDepth - sellDepth;
+            queueNetDepthUpdate(symbol, item.timestamp, netDepthValue);
+            const committedSnapshot = getCommittedNetDepth(symbol);
+            const netDepthText = committedSnapshot ? formatNumber(committedSnapshot.value, 2) : '--';
             const analysis = `买盘占比 ${{Math.round(bidShare * 100)}}%，${{guidance}}（点差 ${{spreadText}}）`;
             const card = document.createElement('section');
             card.className = `orderbook-chart tone-${{tone}}`;
@@ -1577,28 +1659,32 @@ ORDERBOOK_TEMPLATE = r"""
                   <h2>${{item.instrument_id || '--'}}</h2>
                   <small>更新时间：${{formatTimestamp(item.timestamp)}}</small>
                 </div>
-                <div class="chart-meta">
+              </div>
+              <div class="chart-prices">
+                <div class="chart-price-group primary">
                   <span>买一 ${{bestBidText}}</span>
                   <span>卖一 ${{bestAskText}}</span>
-                  <span>点差 ${{spreadText}}</span>
-                  <span>中间价 ${{midText}}</span>
+                  <span class="mid">中间价 ${{midText}}</span>
                 </div>
               </div>
               <div class="chart-stats">
-                <span>买盘深度（前${{levels}}档）${{buyDepthText}}</span>
-                <span>卖盘深度（前${{levels}}档）${{sellDepthText}}</span>
-                <span>总深度 ${{totalDepthText}}</span>
-                <span>净深度 ${{totalDepth > 0 ? formatNumber(buyDepth - sellDepth, 2) : '--'}}</span>
+                <span class="stat-pill">买盘深度（前${{levels}}档）${{buyDepthText}}</span>
+                <span class="stat-pill">卖盘深度（前${{levels}}档）${{sellDepthText}}</span>
+                <span class="stat-pill">总深度 ${{totalDepthText}}</span>
+                <span class="stat-pill stat-accent">净深度 ${{netDepthText}}</span>
+                <span class="stat-pill stat-accent">点差 ${{spreadText}}</span>
               </div>
               <canvas class="chart-canvas"></canvas>
               <p class="chart-insight ${{tone}}">${{analysis}}</p>
             `;
             const canvas = card.querySelector('canvas');
-            const symbol = (item.instrument_id || '--').toUpperCase();
-            const history = appendNetDepth(symbol, item.timestamp, buyDepth - sellDepth);
-            canvas.dataset.history = JSON.stringify(history);
-            drawNetDepthChart(canvas, history);
             container.appendChild(card);
+            let history = netDepthHistory.get(symbol) || [];
+            if (committedSnapshot) {{
+              history = appendNetDepth(symbol, committedSnapshot.timestamp, committedSnapshot.value);
+            }}
+            canvas.dataset.history = JSON.stringify(history);
+            requestAnimationFrame(() => drawNetDepthChart(canvas, history));
           }});
           const updated = document.getElementById('orderbook-updated');
           if (updated) {{ updated.textContent = formatTimestamp(data.updated_at); }}
@@ -1629,7 +1715,7 @@ ORDERBOOK_TEMPLATE = r"""
           }});
         }});
         refresh();
-        setInterval(refresh, 5000);
+        setInterval(refresh, 3000);
       }})();
     </script>
 </body>
