@@ -532,7 +532,7 @@ def latest_liquidations_api(limit: int = 30, instrument: Optional[str] = None) -
     "/api/streams/orderbook/latest",
     summary="Fetch recent order book depth snapshots from InfluxDB",
 )
-def latest_orderbook_api(limit: int = 400, instrument: Optional[str] = None) -> dict:
+def latest_orderbook_api(limit: int = 50, instrument: Optional[str] = None) -> dict:
     limit = max(1, min(limit, 500))
     return get_orderbook_snapshot(levels=limit, instrument=instrument)
 
@@ -723,16 +723,17 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
     fetch_limit = max(1, max(levels, len(TRADABLE_INSTRUMENTS)))
     history_cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=1)
     max_history_points = 1200
-    records = _query_influx_measurement(
-        measurement="okx_orderbook_depth",
-        limit=fetch_limit * 2,
+    instrument_count = max(1, len(TRADABLE_INSTRUMENTS))
+    history_fetch_limit = max_history_points * instrument_count
+    micro_records = _query_influx_measurement(
+        measurement="market_microstructure",
+        limit=max(history_fetch_limit, 500),
         instrument=instrument_filter or None,
-        lookback="2h",
+        lookback="1h",
     )
-    seen: set[str] = set()
-    items: list[dict] = []
-    history_map: dict[str, list[dict]] = {}
-    for row in records:
+    cvd_map: dict[str, float | None] = {}
+    cvd_history_map: dict[str, list[dict]] = {}
+    for row in micro_records:
         inst_id = (row.get("instrument_id") or "").upper()
         if not inst_id:
             continue
@@ -745,13 +746,60 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
                 ts = None
         if isinstance(ts, datetime) and ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        bids_raw = row.get("bids_json") or "[]"
-        asks_raw = row.get("asks_json") or "[]"
-        total_bid_qty = _coerce_float(row.get("total_bid_qty"))
-        total_ask_qty = _coerce_float(row.get("total_ask_qty"))
-        net_depth = None
-        if total_bid_qty is not None and total_ask_qty is not None:
-            net_depth = total_bid_qty - total_ask_qty
+        cvd_value = _coerce_float(row.get("cvd"))
+        if inst_id not in cvd_map:
+            cvd_map[inst_id] = cvd_value
+        entry = {
+            "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
+            "cvd": cvd_value,
+        }
+        if isinstance(ts, datetime):
+            entry["_ts"] = ts
+        history_list = cvd_history_map.setdefault(inst_id, [])
+        history_list.append(entry)
+        if isinstance(ts, datetime):
+            history_list[:] = [
+                item
+                for item in history_list
+                if not isinstance(item.get("_ts"), datetime) or item["_ts"] >= history_cutoff
+            ]
+        if len(history_list) > max_history_points:
+            del history_list[: len(history_list) - max_history_points]
+    history_records = _query_influx_measurement(
+        measurement="okx_orderbook_depth",
+        limit=history_fetch_limit,
+        instrument=instrument_filter or None,
+        lookback="1h",
+    )
+    snapshot_records = _query_influx_measurement(
+        measurement="okx_orderbook_depth",
+        limit=fetch_limit * 2,
+        instrument=instrument_filter or None,
+        lookback="2h",
+    )
+    seen: set[str] = set()
+    items: list[dict] = []
+    history_map: dict[str, list[dict]] = {}
+
+    def _append_history_entry(row: dict) -> None:
+        inst_id = (row.get("instrument_id") or "").upper()
+        if not inst_id:
+            return
+        timestamp = row.get("_time")
+        ts = timestamp
+        if isinstance(timestamp, str):
+            try:
+                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                ts = None
+        if isinstance(ts, datetime) and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        net_depth = _coerce_float(row.get("net_depth"))
+        if net_depth is None:
+            total_bid_qty = _coerce_float(row.get("total_bid_qty"))
+            total_ask_qty = _coerce_float(row.get("total_ask_qty"))
+            if total_bid_qty is not None and total_ask_qty is not None:
+                net_depth = total_bid_qty - total_ask_qty
         hist_entry = {
             "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
             "net_depth": net_depth,
@@ -768,6 +816,28 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
             ]
         if len(history_list) > max_history_points:
             del history_list[: len(history_list) - max_history_points]
+
+    for row in history_records:
+        _append_history_entry(row)
+
+    for row in snapshot_records:
+        inst_id = (row.get("instrument_id") or "").upper()
+        if not inst_id:
+            continue
+        timestamp = row.get("_time")
+        ts = timestamp
+        if isinstance(timestamp, str):
+            try:
+                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                ts = None
+        if isinstance(ts, datetime) and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        bids_raw = row.get("bids_json") or "[]"
+        asks_raw = row.get("asks_json") or "[]"
+        total_bid_qty = _coerce_float(row.get("total_bid_qty"))
+        total_ask_qty = _coerce_float(row.get("total_ask_qty"))
+        _append_history_entry(row)
         if instrument_filter and inst_id != instrument_filter:
             continue
         if inst_id in seen:
@@ -786,6 +856,12 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
             {"timestamp": entry["timestamp"], "net_depth": entry["net_depth"]}
             for entry in reversed(raw_history)
         ]
+        cvd_history_raw = cvd_history_map.get(inst_id, [])
+        cvd_history = [
+            {"timestamp": entry["timestamp"], "cvd": entry.get("cvd")}
+            for entry in reversed(cvd_history_raw)
+        ]
+        cvd_value = cvd_map.get(inst_id)
         items.append(
             {
                 "instrument_id": inst_id,
@@ -798,6 +874,8 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
                 "bids": bids[: max(1, levels)],
                 "asks": asks[: max(1, levels)],
                 "history": history,
+                "cvd": cvd_value,
+                "cvd_history": cvd_history,
             }
         )
     if not items:

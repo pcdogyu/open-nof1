@@ -156,11 +156,13 @@ class InfluxWriter:
         spread = None
         if best_bid is not None and best_ask is not None:
             spread = best_ask - best_bid
+        net_depth = total_bid - total_ask
         point = (
             Point("okx_orderbook_depth")
             .tag("instrument_id", instrument_id)
             .field("total_bid_qty", float(total_bid))
             .field("total_ask_qty", float(total_ask))
+            .field("net_depth", float(net_depth))
         )
         if best_bid is not None:
             point = point.field("best_bid", float(best_bid))
