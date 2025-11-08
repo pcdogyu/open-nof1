@@ -532,7 +532,7 @@ def latest_liquidations_api(limit: int = 30, instrument: Optional[str] = None) -
     "/api/streams/orderbook/latest",
     summary="Fetch recent order book depth snapshots from InfluxDB",
 )
-def latest_orderbook_api(limit: int = 10, instrument: Optional[str] = None) -> dict:
+def latest_orderbook_api(limit: int = 400, instrument: Optional[str] = None) -> dict:
     limit = max(1, min(limit, 500))
     return get_orderbook_snapshot(levels=limit, instrument=instrument)
 

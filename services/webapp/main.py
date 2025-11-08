@@ -87,11 +87,11 @@ def liquidation_dashboard(request: Request) -> HTMLResponse:
 @app.get("/orderbook", include_in_schema=False, response_class=HTMLResponse)
 def orderbook_dashboard(request: Request) -> HTMLResponse:
     instrument = request.query_params.get("instrument")
-    levels_param = request.query_params.get("levels", "50")
+    levels_param = request.query_params.get("levels", "400")
     try:
         levels = max(1, min(int(levels_param), 400))
     except ValueError:
-        levels = 10
+        levels = 400
     snapshot = routes.get_orderbook_snapshot(levels=levels, instrument=instrument)
     settings = routes.get_pipeline_settings()
     instruments = settings.get("tradable_instruments", [])
@@ -1398,7 +1398,7 @@ ORDERBOOK_TEMPLATE = r"""
         const HISTORY_LIMIT = 1200;
         const netDepthHistory = new Map();
         const BASE_GRID_CLASS = 'book-grid';
-        const NET_DEPTH_DELAY_MS = 3000;
+        const NET_DEPTH_DELAY_MS = 5000;
         const pendingNetDepth = new Map();
         const committedNetDepth = new Map();
 
