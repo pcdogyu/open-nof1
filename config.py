@@ -10,7 +10,7 @@ INFLUX_ORG = "hy"
 INFLUX_BUCKET = "orderflow"
 
 # Auto-generated InfluxDB token (scope manually configure in Influx UI).
-INFLUX_TOKEN = "kf7vIL3tUMSvGNMS4mbyeFpSG9wmM40Adw-sx_2DicV5CXKuGNJp4pPy1i3cyzilUn9--2VoBOND8uGZovj7vA=="
+INFLUX_TOKEN = "mQZrVdyk13UHvCvzgP7RytIkRbNSqE-rDyqoU2L7cCHTCSw_Px5kLV_u_703oCsFsW5DP1p9TGVA-ty9ns-9uw=="
 
 # Optional: admin credentials if needed for scripts (avoid using in production).
 INFLUX_USERNAME = "admin"

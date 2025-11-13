@@ -1485,10 +1485,19 @@ ORDERBOOK_TEMPLATE = r"""
             return;
           }}
           const key = symbol.toUpperCase();
+          const now = Date.now();
+          const entryTimestamp = timestamp ? new Date(timestamp) : new Date();
+          const existing = pendingNetDepth.get(key);
+          if (existing && existing.readyAt > now) {{
+            existing.value = value;
+            existing.timestamp = entryTimestamp;
+            pendingNetDepth.set(key, existing);
+            return;
+          }}
           pendingNetDepth.set(key, {{
             value,
-            timestamp: timestamp ? new Date(timestamp) : new Date(),
-            readyAt: Date.now() + NET_DEPTH_DELAY_MS,
+            timestamp: entryTimestamp,
+            readyAt: now + NET_DEPTH_DELAY_MS,
           }});
         }};
         const flushNetDepthQueue = () => {{
