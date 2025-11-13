@@ -523,7 +523,7 @@ async def refresh_instruments_api() -> dict:
     "/api/streams/liquidations/latest",
     summary="Fetch recent liquidation aggregates from InfluxDB",
 )
-def latest_liquidations_api(limit: int = 30, instrument: Optional[str] = None) -> dict:
+def latest_liquidations_api(limit: int = 50, instrument: Optional[str] = None) -> dict:
     limit = max(1, min(limit, 200))
     return get_liquidation_snapshot(limit=limit, instrument=instrument)
 
@@ -665,7 +665,7 @@ def get_okx_summary(
     }
 
 
-def get_liquidation_snapshot(limit: int = 30, instrument: Optional[str] = None) -> dict:
+def get_liquidation_snapshot(limit: int = 50, instrument: Optional[str] = None) -> dict:
     """Return recent liquidation aggregates for dashboard/API consumption."""
     instrument_filter = (instrument or "").strip().upper()
     sanitized_limit = max(1, limit)
@@ -694,20 +694,26 @@ def get_liquidation_snapshot(limit: int = 30, instrument: Optional[str] = None) 
                 ts = None
         if isinstance(ts, datetime) and ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
+        net_qty = _coerce_float(row.get("net_qty"))
+        last_price = _coerce_float(row.get("last_price"))
+        notional_value = None
+        if net_qty is not None and last_price is not None:
+            notional_value = abs(net_qty) * last_price
         record_payload = {
             "instrument_id": inst_id,
             "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
             "long_qty": _coerce_float(row.get("long_qty")),
             "short_qty": _coerce_float(row.get("short_qty")),
-            "net_qty": _coerce_float(row.get("net_qty")),
-            "last_price": _coerce_float(row.get("last_price")),
+            "net_qty": net_qty,
+            "last_price": last_price,
+            "notional_value": notional_value,
         }
         fallback_items.append(record_payload)
         if isinstance(ts, datetime) and ts < cutoff:
             continue
         items.append(record_payload)
     if not items:
-        items = fallback_items[:limit]
+        items = fallback_items[:sanitized_limit]
     items.sort(key=lambda entry: entry["timestamp"], reverse=True)
     items = items[:sanitized_limit]
     return {

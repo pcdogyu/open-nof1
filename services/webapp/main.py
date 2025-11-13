@@ -78,7 +78,7 @@ def okx_dashboard(request: Request) -> HTMLResponse:
 @app.get("/liquidations", include_in_schema=False, response_class=HTMLResponse)
 def liquidation_dashboard(request: Request) -> HTMLResponse:
     instrument = request.query_params.get("instrument")
-    snapshot = routes.get_liquidation_snapshot(limit=30, instrument=instrument)
+    snapshot = routes.get_liquidation_snapshot(limit=50, instrument=instrument)
     settings = routes.get_pipeline_settings()
     instruments = settings.get("tradable_instruments", [])
     return HTMLResponse(content=_render_liquidation_page(snapshot, instruments))
@@ -681,11 +681,20 @@ def _build_depth_options(selected: int) -> str:
     return "\n".join(rendered)
 
 
+
 def _render_liquidation_rows(items: Sequence[dict]) -> str:
     esc = _escape
     rows: list[str] = []
     for item in items:
         timestamp = _format_asia_shanghai(item.get("timestamp"))
+        net_qty = item.get("net_qty")
+        price = item.get("last_price")
+        notional = item.get("notional_value")
+        if notional is None and net_qty is not None and price is not None:
+            try:
+                notional = abs(float(net_qty)) * float(price)
+            except (TypeError, ValueError):
+                notional = None
         rows.append(
             "<tr>"
             f"<td>{esc(timestamp)}</td>"
@@ -694,10 +703,11 @@ def _render_liquidation_rows(items: Sequence[dict]) -> str:
             f"<td>{_format_number(item.get('short_qty'))}</td>"
             f"<td>{_format_number(item.get('net_qty'))}</td>"
             f"<td>{_format_number(item.get('last_price'))}</td>"
+            f"<td>{_format_number(notional)}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='6' class='empty-state'>暂无爆仓数据</td></tr>")
+        rows.append("<tr><td colspan='7' class='empty-state'>暂无爆仓数据</td></tr>")
     return "\n".join(rows)
 
 
@@ -1218,6 +1228,7 @@ LIQUIDATION_TEMPLATE = r"""
         .controls {{ display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 1rem; }}
         .controls label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
         select {{ min-width: 200px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; padding: 8px 10px; }}
+        input[type="number"] {{ min-width: 160px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; padding: 8px 10px; }}
         table {{ width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 12px; overflow: hidden; }}
         th, td {{ padding: 10px 14px; border-bottom: 1px solid #334155; text-align: left; }}
         th {{ background: rgba(15, 23, 42, 0.6); font-size: 0.9rem; }}
@@ -1243,6 +1254,12 @@ LIQUIDATION_TEMPLATE = r"""
                 {instrument_options}
             </select>
         </label>
+        <label>最小爆仓数量
+            <input type="number" id="min-size" min="0" step="0.01" placeholder="如 10">
+        </label>
+        <label>最小爆仓金额（USDT）
+            <input type="number" id="min-notional" min="0" step="10" placeholder="如 100000">
+        </label>
         <span>最后更新：<span class="timestamp" id="liquidations-updated">{updated_at}</span></span>
     </div>
     <table>
@@ -1254,6 +1271,7 @@ LIQUIDATION_TEMPLATE = r"""
                 <th>空单爆仓</th>
                 <th>净爆仓</th>
                 <th>最新价</th>
+                <th>爆仓金额</th>
             </tr>
         </thead>
         <tbody id="liquidations-body">
@@ -1263,6 +1281,10 @@ LIQUIDATION_TEMPLATE = r"""
     <script>
       (function() {{
         const select = document.getElementById('instrument-select');
+        const minSizeInput = document.getElementById('min-size');
+        const minNotionalInput = document.getElementById('min-notional');
+        const DEFAULT_LIMIT = 50;
+        let latestItems = [];
         const fmtNumber = (value, digits) => {{
           if (value === null || value === undefined || value === '') {{ return '-'; }}
           const num = Number(value);
@@ -1284,34 +1306,73 @@ LIQUIDATION_TEMPLATE = r"""
             hour12: false
           }}).format(date);
         }};
+        const computeNotional = (item) => {{
+          if (!item) {{ return null; }}
+          const provided = Number(item.notional_value);
+          if (Number.isFinite(provided)) {{
+            return provided;
+          }}
+          const qty = Math.abs(Number(item.net_qty));
+          const price = Number(item.last_price);
+          if (Number.isFinite(qty) && Number.isFinite(price)) {{
+            return qty * price;
+          }}
+          return null;
+        }};
+        const applyFilters = (items) => {{
+          const minQty = Math.max(0, Number(minSizeInput.value) || 0);
+          const minNotional = Math.max(0, Number(minNotionalInput.value) || 0);
+          return items.filter((item) => {{
+            const qty = Math.abs(Number(item.net_qty)) || 0;
+            const notional = computeNotional(item) || 0;
+            if (minQty && qty < minQty) {{
+              return false;
+            }}
+            if (minNotional && notional < minNotional) {{
+              return false;
+            }}
+            return true;
+          }});
+        }};
+        const renderRows = () => {{
+          const body = document.getElementById('liquidations-body');
+          body.innerHTML = '';
+          const filtered = applyFilters(latestItems);
+          if (!filtered.length) {{
+            body.innerHTML = '<tr><td colspan="7" class="empty-state">暂无爆仓数据</td></tr>';
+            return;
+          }}
+          filtered.forEach((item) => {{
+            const tr = document.createElement('tr');
+            const notional = computeNotional(item);
+            tr.innerHTML = `
+              <td>${{fmtTimestamp(item.timestamp)}}</td>
+              <td>${{item.instrument_id || '--'}}</td>
+              <td>${{fmtNumber(item.long_qty, 2)}}</td>
+              <td>${{fmtNumber(item.short_qty, 2)}}</td>
+              <td>${{fmtNumber(item.net_qty, 2)}}</td>
+              <td>${{fmtNumber(item.last_price, 4)}}</td>
+              <td>${{notional === null ? '-' : fmtNumber(notional, 2)}}</td>`;
+            body.appendChild(tr);
+          }});
+        }};
         function refresh() {{
-          const params = new URLSearchParams({{ limit: '30' }});
+          const params = new URLSearchParams({{ limit: DEFAULT_LIMIT.toString() }});
           if (select.value) {{ params.set('instrument', select.value); }}
           fetch('/api/streams/liquidations/latest?' + params.toString())
             .then((res) => res.json())
             .then((data) => {{
-              const body = document.getElementById('liquidations-body');
-              body.innerHTML = '';
-              (data.items || []).forEach((item) => {{
-                const tr = document.createElement('tr');
-                tr.innerHTML = `
-                  <td>${{fmtTimestamp(item.timestamp)}}</td>
-                  <td>${{item.instrument_id || '--'}}</td>
-                  <td>${{fmtNumber(item.long_qty, 2)}}</td>
-                  <td>${{fmtNumber(item.short_qty, 2)}}</td>
-                  <td>${{fmtNumber(item.net_qty, 2)}}</td>
-                  <td>${{fmtNumber(item.last_price, 4)}}</td>`;
-                body.appendChild(tr);
-              }});
-              if ((data.items || []).length === 0) {{
-                body.innerHTML = '<tr><td colspan="6" class="empty-state">暂无爆仓数据</td></tr>';
-              }}
+              latestItems = Array.isArray(data.items) ? data.items : [];
+              renderRows();
               const updated = document.getElementById('liquidations-updated');
               if (updated) {{ updated.textContent = fmtTimestamp(data.updated_at); }}
             }})
             .catch((err) => console.error(err));
         }}
         select.addEventListener('change', refresh);
+        [minSizeInput, minNotionalInput].forEach((input) => {{
+          input.addEventListener('input', () => renderRows());
+        }});
         refresh();
         setInterval(refresh, 3000);
       }})();

@@ -44,6 +44,25 @@ from data_pipeline.pipeline import (
 )
 
 
+def _should_block_buy(decision: str, settings: PipelineSettings) -> tuple[bool, str]:
+    """
+    Simple risk guard: if we already hold exposure, skip additional buys.
+
+    Returns:
+        blocked flag + a human-readable reason.
+    """
+    side = decision_to_side(decision)
+    if side != "buy":
+        return False, ""
+    current = float(settings.current_position or 0.0)
+    max_position = float(settings.max_position or 0.0)
+    if current <= 0:
+        return False, ""
+    if max_position > 0 and current >= max_position:
+        return True, "position limit reached"
+    return True, "existing position exposure"
+
+
 async def async_main(args: argparse.Namespace) -> None:
     poll_interval = max(1, int(args.interval))
     selected_instruments = [inst.strip() for inst in (args.instrument or DEFAULT_INSTRUMENTS)]
@@ -69,14 +88,25 @@ async def async_main(args: argparse.Namespace) -> None:
 
             for record in result.signals:
                 order_side = decision_to_side(record.decision)
-                action_en, action_zh = ACTION_TEXT.get(order_side, ACTION_TEXT[None])
+                blocked, blocked_reason = _should_block_buy(record.decision, settings)
+                effective_side = None if blocked else order_side
+                action_en, action_zh = ACTION_TEXT.get(effective_side, ACTION_TEXT[None])
                 reason_en = record.reasoning or ""
                 reason_zh = translate_reason(reason_en)
                 order_en, order_zh = format_order_bilingual(record.suggested_order)
+                if blocked:
+                    order_en = "n/a (blocked by risk guard)"
+                    order_zh = "无操作（风险控制拦截）"
                 print(
                     f"[{record.instrument_id}] {record.model_id} -> {record.decision} "
                     f"(confidence={record.confidence:.2f}) => {action_en} / {action_zh}"
                 )
+                if blocked:
+                    print(
+                        f"Risk guard: skip buy because {blocked_reason}; "
+                        f"current_position={settings.current_position}, max_position={settings.max_position}"
+                    )
+                    print("风控提示：检测到已有持仓，跳过新的买入信号。")
                 print(f"Reason (EN): {reason_en}")
                 print(f"原因 (中文): {reason_zh}")
                 print(f"Suggested order (EN): {order_en}")
@@ -112,8 +142,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--current-position",
         type=float,
-        default=1.0,
-        help="Risk context: current exposure (default 1).",
+        default=0.0,
+        help="Risk context: current exposure (default 0, set >0 when already holding a position).",
     )
     parser.add_argument(
         "--cash-available",
