@@ -680,7 +680,7 @@ def get_liquidation_snapshot(limit: int = 50, instrument: Optional[str] = None) 
         instrument=instrument_filter or None,
         lookback=lookback,
     )
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=5)
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=120)
     items: list[dict] = []
     fallback_items: list[dict] = []
     for row in records:
