@@ -29,6 +29,7 @@ async def main() -> None:
                 current_position=0.3,
                 cash_available=5000.0,
             ),
+            positions=[],
             strategy_hint="Swing trading with emphasis on momentum and risk parity.",
         ),
         SignalRequest(
@@ -43,6 +44,7 @@ async def main() -> None:
                 current_position=8.5,
                 cash_available=2000.0,
             ),
+            positions=[],
             strategy_hint="Reduce exposure if drawdown risk exceeds limits.",
         ),
     ]

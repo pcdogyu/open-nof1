@@ -9,7 +9,7 @@ import logging
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from apscheduler.jobstores.base import JobLookupError
@@ -504,8 +504,29 @@ def _build_signal_request(
         model_id=model_id,
         market=market_snapshot,
         risk=risk_context,
+        positions=_summarize_positions_for_ai(positions),
         strategy_hint=meta.get("strategy_hint"),
+        metadata={"account_id": account.account_id},
     )
+
+
+def _summarize_positions_for_ai(positions: Sequence[Position]) -> List[Dict[str, Any]]:
+    """Convert full position models into lightweight dicts for model prompts."""
+    summaries: List[Dict[str, Any]] = []
+    for position in positions:
+        summaries.append(
+            {
+                "instrument_id": position.instrument_id,
+                "side": position.side,
+                "quantity": position.quantity,
+                "entry_price": position.entry_price,
+                "mark_price": position.mark_price,
+                "unrealized_pnl": position.unrealized_pnl,
+                "leverage": position.leverage,
+                "updated_at": position.updated_at.isoformat(),
+            }
+        )
+    return summaries
 
 
 def _place_order(meta: Dict[str, str], intent: OrderIntent) -> Optional[Dict[str, object]]:

@@ -216,6 +216,7 @@ class MarketDataPipeline:
                             "cvd": cvd,
                         },
                     ),
+                    positions=[],
                     strategy_hint=(
                         "Evaluate whether conditions warrant open_long or open_short entries. "
                         "If no trade is required, return hold/reduce/close with justification."

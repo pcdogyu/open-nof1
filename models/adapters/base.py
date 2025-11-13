@@ -5,7 +5,7 @@ Abstract base class for LLM-driven signal adapters.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, Sequence
 
 from models.schemas import SignalRequest, SignalResponse
 
@@ -32,12 +32,15 @@ class BaseModelAdapter(ABC):
 
     def _build_prompt(self, request: SignalRequest) -> str:
         """Construct prompt string from request (override for custom logic)."""
+        positions_text = self._format_positions_for_prompt(request.positions)
         return (
             f"Model: {self.model_id}\n"
             f"Instrument: {request.market.instrument_id}\n"
             f"Price: {request.market.price}\n"
             f"Current position: {request.risk.current_position}\n"
             f"Max position: {request.risk.max_position}\n"
+            "Open positions:\n"
+            f"{positions_text}\n"
             f"Strategy hint: {request.strategy_hint or 'N/A'}\n"
             "Respond with JSON including decision, confidence, reasoning, order.\n"
         )
@@ -55,3 +58,22 @@ class BaseModelAdapter(ABC):
     async def aclose(self) -> None:
         """Optional hook to release resources in async context."""
         return None
+
+    def _format_positions_for_prompt(self, positions: Sequence[Dict[str, Any]]) -> str:
+        """Return a compact, human-readable summary of open positions for prompts."""
+        if not positions:
+            return "None"
+        lines: list[str] = []
+        for position in positions[:10]:
+            instrument = position.get("instrument_id", "N/A")
+            side = str(position.get("side", "n/a")).upper()
+            quantity = position.get("quantity", "n/a")
+            entry = position.get("entry_price", "n/a")
+            mark = position.get("mark_price", "n/a")
+            pnl = position.get("unrealized_pnl", "n/a")
+            lines.append(
+                f"- {instrument} {side} qty={quantity} entry={entry} mark={mark} pnl={pnl}"
+            )
+        if len(positions) > 10:
+            lines.append(f"... and {len(positions) - 10} more positions.")
+        return "\n".join(lines)
