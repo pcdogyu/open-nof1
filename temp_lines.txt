@@ -1,0 +1,66 @@
+          if (imbalance <= -0.2) {{
+            return {{ tone: 'negative', text: '卖盘压制增强，谨防价格回落。' }};
+          }}
+          return {{ tone: 'neutral', text: '买卖力量接近平衡，关注成交突破信号。' }};
+        }};
+        const appendNetDepth = (symbol, timestamp, value) => {{
+          const key = (symbol || '--').toUpperCase();
+          const history = netDepthHistory.get(key) || [];
+          const point = {{
+            time: timestamp ? new Date(timestamp) : new Date(),
+            value,
+          }};
+          history.push(point);
+          while (history.length > HISTORY_LIMIT) {{
+            history.shift();
+          }}
+          netDepthHistory.set(key, history);
+          return history;
+        }};
+        const primeHistory = (symbol, series) => {{
+          if (!Array.isArray(series) || !series.length) {{
+            return;
+          }}
+          const key = (symbol || '--').toUpperCase();
+          if (netDepthHistory.has(key)) {{
+            return;
+          }}
+          const history = [];
+          series.forEach((entry) => {{
+            const val = Number(entry?.net_depth);
+            if (!Number.isFinite(val)) {{
+              return;
+            }}
+            const time = entry?.timestamp ? new Date(entry.timestamp) : new Date();
+            history.push({{ time, value: val }});
+          }});
+          if (!history.length) {{
+            return;
+          }}
+          const trimmed = history.slice(-HISTORY_LIMIT);
+          netDepthHistory.set(key, trimmed);
+        }};
+        const queueNetDepthUpdate = (symbol, timestamp, value) => {{
+          if (!symbol) {{
+            return;
+          }}
+          const key = symbol.toUpperCase();
+          const now = Date.now();
+          const entryTimestamp = timestamp ? new Date(timestamp) : new Date();
+          const existing = pendingNetDepth.get(key);
+          if (existing && existing.readyAt > now) {{
+            existing.value = value;
+            existing.timestamp = entryTimestamp;
+            pendingNetDepth.set(key, existing);
+            return;
+          }}
+          pendingNetDepth.set(key, {{
+            value,
+            timestamp: entryTimestamp,
+            readyAt: now + NET_DEPTH_DELAY_MS,
+          }});
+        }};
+        const flushNetDepthQueue = () => {{
+          const now = Date.now();
+          pendingNetDepth.forEach((entry, key) => {{
+            if (entry.readyAt <= now) {{

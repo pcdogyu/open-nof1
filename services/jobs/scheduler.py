@@ -7,9 +7,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from apscheduler.jobstores.base import JobLookupError
@@ -44,11 +45,12 @@ from services.webapp.dependencies import (
 from data_pipeline.pipeline import MarketDataPipeline, PipelineSettings
 
 try:  # pragma: no cover - optional dependency
-    from data_pipeline.influx import InfluxConfig
+    from data_pipeline.influx import InfluxConfig, InfluxWriter
     from influxdb_client import InfluxDBClient
     from influxdb_client.client.flux_table import FluxRecord
 except ImportError:  # pragma: no cover
     InfluxConfig = None  # type: ignore
+    InfluxWriter = None  # type: ignore
     InfluxDBClient = None  # type: ignore
     FluxRecord = None  # type: ignore
 
@@ -87,6 +89,8 @@ _PIPELINE_SETTINGS = PipelineSettings(
     signal_log_path=Path("data/logs/ai_signals_scheduler.jsonl"),
 )
 _PIPELINE: Optional[MarketDataPipeline] = None
+_EXECUTION_LOG = deque(maxlen=100)
+_EXEC_LOG_WRITER: Optional["InfluxWriter"] = None
 
 
 def _get_pipeline() -> MarketDataPipeline:
@@ -111,6 +115,102 @@ def _close_pipeline() -> None:
     except RuntimeError:
         asyncio.run(pipeline.aclose())
 
+
+def _append_execution_log(job: str, status: str, detail: str | None = None) -> None:
+    now = datetime.now(tz=timezone.utc)
+    entry = {
+        "timestamp": now.isoformat(),
+        "job": job,
+        "status": status,
+        "detail": detail or "",
+    }
+    _EXECUTION_LOG.appendleft(entry)
+    writer = _get_execution_log_writer()
+    if writer is not None:
+        try:
+            timestamp_ns = int(now.timestamp() * 1e9)
+            writer.write_indicator_set(
+                measurement="scheduler_execution_log",
+                tags={"job": job},
+                fields={"status": status, "detail": detail or ""},
+                timestamp_ns=timestamp_ns,
+            )
+        except Exception:
+            pass
+
+
+def get_execution_log(limit: int = 20) -> List[dict]:
+    """Return a snapshot of recent scheduler job executions."""
+    return list(_EXECUTION_LOG)[:limit]
+
+
+def _get_execution_log_writer() -> Optional["InfluxWriter"]:
+    global _EXEC_LOG_WRITER
+    if InfluxWriter is None:
+        return None
+    if _EXEC_LOG_WRITER is not None:
+        return _EXEC_LOG_WRITER
+    try:
+        cfg = InfluxConfig.from_env()
+    except Exception:
+        return None
+    if not getattr(cfg, "token", None):
+        return None
+    try:
+        _EXEC_LOG_WRITER = InfluxWriter(cfg)
+    except Exception:
+        _EXEC_LOG_WRITER = None
+    return _EXEC_LOG_WRITER
+
+
+def _hydrate_execution_log_from_influx(limit: int = 20) -> None:
+    if InfluxDBClient is None or InfluxConfig is None:
+        return
+    try:
+        cfg = InfluxConfig.from_env()
+    except Exception:
+        return
+    if not getattr(cfg, "token", None):
+        return
+    flux = f"""
+from(bucket: "{cfg.bucket}")
+  |> range(start: -30d)
+  |> filter(fn: (r) => r["_measurement"] == "scheduler_execution_log")
+  |> pivot(rowKey:["_time","job"], columnKey:["_field"], valueColumn:"_value")
+  |> sort(columns: ["_time"], desc: true)
+  |> limit(n: {limit})
+"""
+    try:
+        with InfluxDBClient(url=cfg.url, token=cfg.token, org=cfg.org) as client:
+            tables = client.query_api().query(flux)
+    except Exception:
+        return
+    entries: list[dict] = []
+    for table in tables:
+        for record in getattr(table, "records", []):
+            values = getattr(record, "values", {})
+            ts = values.get("_time")
+            timestamp = (
+                ts.isoformat()
+                if isinstance(ts, datetime)
+                else str(ts)
+            )
+            entries.append(
+                {
+                    "timestamp": timestamp,
+                    "job": values.get("job", ""),
+                    "status": values.get("status", ""),
+                    "detail": values.get("detail", ""),
+                }
+            )
+    if not entries:
+        return
+    entries.sort(key=lambda item: item.get("timestamp"), reverse=True)
+    _EXECUTION_LOG.clear()
+    _EXECUTION_LOG.extend(entries)
+
+
+_hydrate_execution_log_from_influx()
 
 def refresh_pipeline(instruments: Sequence[str]) -> None:
     """
@@ -212,7 +312,7 @@ def update_task_intervals(*, market_interval: Optional[int] = None, ai_interval:
 
 def shutdown_scheduler() -> None:
     """Stop the scheduler when the application shuts down."""
-    global _SCHEDULER, _FEATURE_CLIENT, _FEATURE_CONFIG
+    global _SCHEDULER, _FEATURE_CLIENT, _FEATURE_CONFIG, _EXEC_LOG_WRITER
     if _SCHEDULER is not None:
         _SCHEDULER.shutdown(wait=False)
         _SCHEDULER = None
@@ -224,6 +324,12 @@ def shutdown_scheduler() -> None:
             pass
         _FEATURE_CLIENT = None
     _FEATURE_CONFIG = None
+    if _EXEC_LOG_WRITER is not None:
+        try:
+            _EXEC_LOG_WRITER.close()
+        except Exception:
+            pass
+        _EXEC_LOG_WRITER = None
 
 
 def _refresh_metrics_job() -> None:
@@ -236,6 +342,7 @@ def _refresh_metrics_job() -> None:
 async def _market_data_ingestion_job() -> None:
     if not TRADABLE_INSTRUMENTS:
         logger.debug("No tradable instruments configured; skipping market ingestion job.")
+        _append_execution_log("market", "skipped", "未配置可交易合约")
         return
     pipeline = _get_pipeline()
     try:
@@ -247,16 +354,20 @@ async def _market_data_ingestion_job() -> None:
             len(result.feature_snapshots),
             len(result.signals),
         )
+        detail = f"{len(result.feature_snapshots)} 条币对，{len(result.signals)} 条信号"
+        _append_execution_log("market", "success", detail)
     except Exception as exc:
         logger.warning("Market ingestion job failed: %s", exc)
+        _append_execution_log("market", "error", str(exc))
 
 
 async def _execute_model_workflow_job() -> None:
     """
-    Drive the signal → routing → risk → execution loop for configured accounts.
+    Drive the signal �� routing �� risk �� execution loop for configured accounts.
     """
     if not OKX_ACCOUNTS:
         logger.debug("No OKX accounts configured; skipping execution job.")
+        _append_execution_log("ai", "skipped", "未配置 OKX 账户")
         return
 
     repository = get_account_repository()
@@ -270,31 +381,45 @@ async def _execute_model_workflow_job() -> None:
     validator = BasicOrderValidator(
         instrument_allowlist=set(TRADABLE_INSTRUMENTS) if TRADABLE_INSTRUMENTS else None
     )
+    processed_accounts = 0
+    submitted_orders = 0
+    errors = 0
 
-    async with SignalRuntime() as runtime:
-        for account_key, meta in OKX_ACCOUNTS.items():
-            if not meta.get("enabled", True):
-                logger.debug("Account %s disabled via config; skipping", account_key)
-                continue
-            model_id = meta.get("model_id")
-            if not model_id:
-                logger.warning("OKX account %s missing model_id; skipping", account_key)
-                continue
-            try:
-                await _process_account_signal(
-                    account_key=account_key,
-                    meta=meta,
-                    runtime=runtime,
-                    router=router,
-                    validator=validator,
-                    risk_engine=risk_engine,
-                    repository=repository,
-                )
-            except OrderValidationError as exc:
-                logger.info("Order validation failed for %s: %s", account_key, exc)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.exception("Execution pipeline failed for %s: %s", account_key, exc)
-
+    try:
+        async with SignalRuntime() as runtime:
+            for account_key, meta in OKX_ACCOUNTS.items():
+                if not meta.get("enabled", True):
+                    logger.debug("Account %s disabled via config; skipping", account_key)
+                    continue
+                model_id = meta.get("model_id")
+                if not model_id:
+                    logger.warning("OKX account %s missing model_id; skipping", account_key)
+                    continue
+                processed_accounts += 1
+                try:
+                    order_submitted = await _process_account_signal(
+                        account_key=account_key,
+                        meta=meta,
+                        runtime=runtime,
+                        router=router,
+                        validator=validator,
+                        risk_engine=risk_engine,
+                        repository=repository,
+                    )
+                    if order_submitted:
+                        submitted_orders += 1
+                except OrderValidationError as exc:
+                    errors += 1
+                    logger.info("Order validation failed for %s: %s", account_key, exc)
+                except Exception as exc:  # pragma: no cover - defensive
+                    errors += 1
+                    logger.exception("Execution pipeline failed for %s: %s", account_key, exc)
+        status = "success" if errors == 0 else "warning"
+        detail = f"处理 {processed_accounts} 个账户，提交 {submitted_orders} 个订单，错误 {errors} 次"
+        _append_execution_log("ai", status, detail)
+    except Exception as exc:
+        logger.exception("Execution job fatal error: %s", exc)
+        _append_execution_log("ai", "error", str(exc))
 
 async def _process_account_signal(
     *,
@@ -305,10 +430,10 @@ async def _process_account_signal(
     validator: BasicOrderValidator,
     risk_engine: RiskEngine,
     repository: AccountRepository,
-) -> None:
+) -> bool:
     snapshot = await asyncio.to_thread(_collect_okx_snapshot, account_key, meta)
     if snapshot is None:
-        return
+        return False
     account, balances, positions, trades, open_orders, market_price = snapshot
 
     _persist_snapshot(
@@ -329,7 +454,7 @@ async def _process_account_signal(
     )
     if request is None:
         logger.debug("Unable to build signal request for %s; skipping", account_key)
-        return
+        return False
 
     response = await runtime.generate_signal(request)
     routed = router.route(
@@ -341,7 +466,7 @@ async def _process_account_signal(
     )
     if not routed:
         logger.debug("Router did not produce executable order for %s", account_key)
-        return
+        return False
 
     ensure_valid_order(routed.intent, [validator])
 
@@ -352,11 +477,11 @@ async def _process_account_signal(
             account_key,
             [violation.message for violation in evaluation.violations],
         )
-        return
+        return False
 
     execution_result = await asyncio.to_thread(_place_order, meta, routed.intent)
     if execution_result is None:
-        return
+        return False
 
     _record_submitted_order(repository, routed, execution_result)
     logger.info(
@@ -367,6 +492,7 @@ async def _process_account_signal(
         routed.intent.size,
         routed.intent.price or "MKT",
     )
+    return True
 
 
 def _collect_okx_snapshot(
@@ -487,6 +613,14 @@ def _build_signal_request(
     for key in ("funding_rate", "orderbook_imbalance", "cvd"):
         if key in features:
             risk_context.notes[key] = features[key]
+    if features.get("liq_net_qty") is not None:
+        risk_context.notes["liquidation_net_qty"] = features["liq_net_qty"]
+    if features.get("orderbook_net_depth") is not None:
+        risk_context.notes["orderbook_net_depth"] = features["orderbook_net_depth"]
+    if features.get("15m_close_price") is not None:
+        risk_context.notes["recent_close_price"] = features["15m_close_price"]
+    if features.get("15m_volume_sum") is not None:
+        risk_context.notes["recent_volume_sum"] = features["15m_volume_sum"]
 
     market_snapshot = MarketSnapshot(
         instrument_id=instrument,
@@ -496,6 +630,7 @@ def _build_signal_request(
         metadata={
             "source": "scheduler",
             "account_id": account.account_id,
+            "ai_cycle_seconds": _AI_INTERVAL,
             **{k: v for k, v in features.items() if v is not None},
         },
     )
@@ -504,8 +639,32 @@ def _build_signal_request(
         model_id=model_id,
         market=market_snapshot,
         risk=risk_context,
+        positions=_summarize_positions_for_ai(positions),
         strategy_hint=meta.get("strategy_hint"),
+        metadata={
+            "account_id": account.account_id,
+            "ai_cycle_seconds": _AI_INTERVAL,
+        },
     )
+
+
+def _summarize_positions_for_ai(positions: Sequence[Position]) -> List[Dict[str, Any]]:
+    """Convert full position models into lightweight dicts for model prompts."""
+    summaries: List[Dict[str, Any]] = []
+    for position in positions:
+        summaries.append(
+            {
+                "instrument_id": position.instrument_id,
+                "side": position.side,
+                "quantity": position.quantity,
+                "entry_price": position.entry_price,
+                "mark_price": position.mark_price,
+                "unrealized_pnl": position.unrealized_pnl,
+                "leverage": position.leverage,
+                "updated_at": position.updated_at.isoformat(),
+            }
+        )
+    return summaries
 
 
 def _place_order(meta: Dict[str, str], intent: OrderIntent) -> Optional[Dict[str, object]]:
@@ -586,10 +745,36 @@ from(bucket: "{config.bucket}")
   |> filter(fn: (r) => r["timeframe"] == "15m")
   |> last()
 """
+        liquidation_query = f"""
+from(bucket: "{config.bucket}")
+  |> range(start: -30m)
+  |> filter(fn: (r) => r["_measurement"] == "okx_liquidations")
+  |> filter(fn: (r) => r["instrument_id"] == "{instrument_id}")
+  |> last()
+"""
+        orderbook_query = f"""
+from(bucket: "{config.bucket}")
+  |> range(start: -10m)
+  |> filter(fn: (r) => r["_measurement"] == "okx_orderbook_depth")
+  |> filter(fn: (r) => r["instrument_id"] == "{instrument_id}")
+  |> last()
+"""
         features = _flux_tables_to_dict(query_api.query(micro_query))
         indicator_vals = _flux_tables_to_dict(query_api.query(indicator_query))
         for key, value in indicator_vals.items():
             features[f"15m_{key}"] = value
+        features.update(_flux_tables_to_dict(query_api.query(liquidation_query), prefix="liq_"))
+        features.update(_flux_tables_to_dict(query_api.query(orderbook_query), prefix="orderbook_"))
+
+        bid_depth = features.get("orderbook_total_bid_qty")
+        ask_depth = features.get("orderbook_total_ask_qty")
+        if features.get("orderbook_net_depth") is None and bid_depth is not None and ask_depth is not None:
+            features["orderbook_net_depth"] = bid_depth - ask_depth
+
+        net_liq = features.get("liq_net_qty")
+        liq_price = features.get("liq_last_price")
+        if net_liq is not None and liq_price is not None:
+            features.setdefault("liq_notional", abs(net_liq) * liq_price)
         return features
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Failed to load market features for %s: %s", instrument_id, exc)
@@ -614,7 +799,7 @@ def _get_feature_query_api() -> Tuple[Optional[object], Optional["InfluxConfig"]
     return _FEATURE_CLIENT.query_api(), _FEATURE_CONFIG
 
 
-def _flux_tables_to_dict(tables: Iterable[object]) -> Dict[str, float]:
+def _flux_tables_to_dict(tables: Iterable[object], *, prefix: str = "") -> Dict[str, float]:
     values: Dict[str, float] = {}
     if tables is None:
         return values
@@ -629,7 +814,8 @@ def _flux_tables_to_dict(tables: Iterable[object]) -> Dict[str, float]:
                 continue
             numeric = _try_float(value)
             if numeric is not None:
-                values[field] = numeric
+                key = f"{prefix}{field}" if prefix else field
+                values[key] = numeric
     return values
 
 

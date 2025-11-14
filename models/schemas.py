@@ -42,6 +42,7 @@ class SignalRequest:
     model_id: str
     market: MarketSnapshot
     risk: RiskContext
+    positions: list[Dict[str, Any]] = field(default_factory=list)
     strategy_hint: str | None = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -59,4 +60,3 @@ class SignalResponse:
         default_factory=lambda: datetime.now(tz=timezone.utc)
     )
     raw_output: Dict[str, Any] = field(default_factory=dict)
-

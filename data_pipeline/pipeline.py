@@ -142,6 +142,7 @@ class MarketDataPipeline:
                     "macd_hist": indicator.macd_hist,
                     "rsi": indicator.rsi,
                     "realized_vol": indicator.realized_volatility,
+                    "close_price": indicator.close_price,
                     **volume_stats,
                 }
                 self.influx_writer.write_indicator_set(
@@ -216,6 +217,7 @@ class MarketDataPipeline:
                             "cvd": cvd,
                         },
                     ),
+                    positions=[],
                     strategy_hint=(
                         "Evaluate whether conditions warrant open_long or open_short entries. "
                         "If no trade is required, return hold/reduce/close with justification."

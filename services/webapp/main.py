@@ -78,7 +78,7 @@ def okx_dashboard(request: Request) -> HTMLResponse:
 @app.get("/liquidations", include_in_schema=False, response_class=HTMLResponse)
 def liquidation_dashboard(request: Request) -> HTMLResponse:
     instrument = request.query_params.get("instrument")
-    snapshot = routes.get_liquidation_snapshot(limit=30, instrument=instrument)
+    snapshot = routes.get_liquidation_snapshot(limit=50, instrument=instrument)
     settings = routes.get_pipeline_settings()
     instruments = settings.get("tradable_instruments", [])
     return HTMLResponse(content=_render_liquidation_page(snapshot, instruments))
@@ -142,6 +142,28 @@ def submit_scheduler_settings(
 ) -> RedirectResponse:
     routes.update_scheduler_settings(market_interval, ai_interval)
     return RedirectResponse(url="/scheduler", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.get("/prompts", include_in_schema=False, response_class=HTMLResponse)
+def prompt_template_page(request: Request) -> HTMLResponse:
+    template = routes.get_prompt_template_text()
+    saved_flag = str(request.query_params.get("saved", "")).lower() in ("1", "true", "yes")
+    settings = routes.get_pipeline_settings()
+    instruments = settings.get("tradable_instruments") or []
+    models = routes.get_model_catalog()
+    content = _render_prompt_editor(
+        template,
+        instruments=instruments,
+        models=models,
+        saved=saved_flag,
+    )
+    return HTMLResponse(content=content)
+
+
+@app.post("/prompts/update", include_in_schema=False)
+def update_prompt_template(prompt_template: str = Form(...)) -> RedirectResponse:
+    routes.update_prompt_template_text(prompt_template)
+    return RedirectResponse(url="/prompts?saved=1", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @app.post("/models/update", include_in_schema=False)
@@ -442,6 +464,115 @@ def _render_liquidation_map_page(attachments: Sequence[dict], instruments: Seque
     )
 
 
+def _render_prompt_editor(
+    template: str,
+    *,
+    instruments: Sequence[str] | None = None,
+    models: Sequence[dict] | None = None,
+    saved: bool = False,
+) -> str:
+    esc = _escape
+    placeholder_entries = [
+        ("{model_id}", "当前触发的模型 ID"),
+        ("{instrument_id}", "标的/合约 ID"),
+        ("{price}", "最新价格"),
+        ("{spread}", "盘口价差"),
+        ("{current_position}", "目标合约当前仓位"),
+        ("{max_position}", "允许的最大仓位"),
+        ("{cash_available}", "可用资金"),
+        ("{positions}", "格式化的多笔仓位摘要"),
+        ("{risk_notes}", "RiskContext 附加备注"),
+        ("{market_metadata}", "行情与指标元数据"),
+        ("{strategy_hint}", "策略提示或约束"),
+    ]
+    placeholder_list = "".join(
+        f"<li><code>{esc(token)}</code><span>{esc(description)}</span></li>"
+        for token, description in placeholder_entries
+    )
+    notice_block = "<div class='notice success'>提示词模板已保存。</div>" if saved else ""
+    normalized_instruments = [
+        esc(str(inst).upper())
+        for inst in (instruments or [])
+        if str(inst).strip()
+    ]
+    if normalized_instruments:
+        chips = "".join(
+            f"<span class='instrument-chip'>{inst}</span>"
+            for inst in normalized_instruments
+        )
+        instrument_block = (
+            "<div class='instrument-chips'>"
+            f"{chips}"
+            "</div>"
+        )
+    else:
+        instrument_block = (
+            "<div class='instrument-chips empty'>"
+            "当前未设置可交易币对，请在“币对配置”页维护“需要交易的币对”列表。"
+            "</div>"
+        )
+    normalized_models: list[dict] = []
+    for entry in models or []:
+        raw_model_id = str(entry.get("model_id") or entry.get("id") or "未知模型")
+        raw_display = entry.get("display_name") or raw_model_id
+        raw_provider = entry.get("provider") or "未知提供方"
+        model_id = esc(raw_model_id)
+        display_name = esc(raw_display)
+        provider = esc(raw_provider)
+        enabled = bool(entry.get("enabled"))
+        normalized_models.append(
+            {
+                "raw_display": raw_display,
+                "model_id": model_id,
+                "display_name": display_name,
+                "provider": provider,
+                "enabled": enabled,
+            }
+        )
+    enabled_models = [record for record in normalized_models if record["enabled"]]
+    disabled_models = [record for record in normalized_models if not record["enabled"]]
+    if normalized_models:
+        cards: list[str] = []
+        for record in normalized_models:
+            status_text = "已启用" if record["enabled"] else "未启用"
+            status_class = "status enabled" if record["enabled"] else "status disabled"
+            cards.append(
+                (
+                    "<article class='model-card {status_class}'>"
+                    "<header>"
+                    "<h3>{display}</h3>"
+                    "<span>{provider}</span>"
+                    "</header>"
+                    "<p class='status-label'>{status}</p>"
+                    "</article>"
+                ).format(
+                    status_class=status_class,
+                    display=record["display_name"],
+                    provider=record["provider"],
+                    status=status_text,
+                )
+            )
+        model_block = "<div class='model-grid'>{cards}</div>".format(cards="".join(cards))
+    else:
+        model_block = (
+            "<div class='model-grid empty'>"
+            "暂无模型配置，请先在“模型管理”页开启可用模型。"
+            "</div>"
+        )
+    if enabled_models:
+        enabled_names = "、".join(rec["raw_display"] for rec in enabled_models)
+        enabled_hint = f"以下模型已允许联机推理：{enabled_names}"
+    else:
+        enabled_hint = "当前没有启用的模型，请在“模型管理”页打开至少一个模型。"
+    return PROMPT_EDITOR_TEMPLATE.format(
+        prompt_text=esc(template),
+        notice_block=notice_block,
+        placeholder_list=placeholder_list,
+        instrument_block=instrument_block,
+        model_block=model_block,
+        model_hint=esc(enabled_hint),
+    )
+
 def _render_settings_page(settings: dict, catalog: Sequence[dict]) -> str:
     """Render the pipeline settings management UI."""
     esc = _escape
@@ -657,11 +788,30 @@ def _build_instrument_options(instruments: Sequence[str], selected: Optional[str
     return "\n".join(options)
 
 
+def _build_depth_options(selected: int) -> str:
+    choices = (20, 50, 100, 200, 400)
+    sanitized = max(1, selected)
+    rendered: list[str] = []
+    for value in choices:
+        selected_attr = " selected" if value == sanitized else ""
+        rendered.append(f'<option value="{value}"{selected_attr}>{value} 档</option>')
+    if sanitized not in choices:
+        rendered.append(f'<option value="{sanitized}" selected>{sanitized} 档</option>')
+    return "\n".join(rendered)
+
 def _render_liquidation_rows(items: Sequence[dict]) -> str:
     esc = _escape
     rows: list[str] = []
     for item in items:
         timestamp = _format_asia_shanghai(item.get("timestamp"))
+        net_qty = item.get("net_qty")
+        price = item.get("last_price")
+        notional = item.get("notional_value")
+        if notional is None and net_qty is not None and price is not None:
+            try:
+                notional = abs(float(net_qty)) * float(price)
+            except (TypeError, ValueError):
+                notional = None
         rows.append(
             "<tr>"
             f"<td>{esc(timestamp)}</td>"
@@ -670,10 +820,11 @@ def _render_liquidation_rows(items: Sequence[dict]) -> str:
             f"<td>{_format_number(item.get('short_qty'))}</td>"
             f"<td>{_format_number(item.get('net_qty'))}</td>"
             f"<td>{_format_number(item.get('last_price'))}</td>"
+            f"<td>{_format_number(notional)}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='6' class='empty-state'>暂无爆仓数据</td></tr>")
+        rows.append("<tr><td colspan='7' class='empty-state'>暂无爆仓数据</td></tr>")
     return "\n".join(rows)
 
 
@@ -798,6 +949,8 @@ HTML_TEMPLATE = r"""
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
     </style>
 </head>
 <body>
@@ -805,8 +958,8 @@ HTML_TEMPLATE = r"""
         <a href="/" class="nav-link active">首页</a>
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/liquidation-map" class="nav-link">清算地图</a>
+        <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
@@ -887,6 +1040,8 @@ MODEL_MANAGER_TEMPLATE = r"""
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
         .models-grid {{ display: grid; grid-template-columns: repeat(3, minmax(280px, 1fr)); gap: 20px; }}
         @media (max-width: 1200px) {{ .models-grid {{ grid-template-columns: repeat(2, minmax(280px, 1fr)); }} }}
         @media (max-width: 768px) {{ .models-grid {{ grid-template-columns: 1fr; }} }}
@@ -909,8 +1064,8 @@ MODEL_MANAGER_TEMPLATE = r"""
         <a href="/" class="nav-link">首页</a>
         <a href="/models" class="nav-link active">模型管理</a>
         <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/liquidation-map" class="nav-link">清算地图</a>
+        <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
@@ -938,6 +1093,8 @@ SETTINGS_TEMPLATE = r"""
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
         .settings-card {{ background-color: #1e293b; border-radius: 12px; padding: 20px 24px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); margin-top: 20px; }}
         .settings-card form {{ display: flex; flex-direction: column; gap: 14px; }}
         label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
@@ -984,44 +1141,46 @@ SETTINGS_TEMPLATE = r"""
         <a href="/" class="nav-link">首页</a>
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/liquidation-map" class="nav-link">清算地图</a>
+        <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link active">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
 
     <h1>币对与刷新频率</h1>
     <p class="updated">最近保存：<span class="timestamp">{updated_at}</span></p>
-    <section class="settings-card">
-        <h2>运行参数</h2>
-        <form method="post" action="/settings/update">
-            <label for="poll-interval">刷新间隔（秒）</label>
-            <input id="poll-interval" type="number" name="poll_interval" min="30" max="3600" value="{poll_interval}" required>
-            <label for="instrument-list">当前合约列表（每行一个）</label>
-            <textarea id="instrument-list" name="instruments" spellcheck="false">{instruments_text}</textarea>
-            <div class="chip-row">{chips_html}</div>
-            <button type="submit">保存配置</button>
-        </form>
-    </section>
-    <section class="settings-card">
-        <h2>添加合约</h2>
-        <p class="hint">{catalog_hint}</p>
-        <form method="post" action="/settings/add" class="control-row" id="add-instrument-form">
-            <input type="hidden" name="poll_interval" value="{poll_interval}">
-            <input type="hidden" name="current_instruments" value="{current_instruments_value}">
-            <label for="instrument-select-usdt" class="control-label">USDT</label>
-            <div class="control-field">
-                <select id="instrument-select-usdt" name="new_instrument" size="12">
-                    <option value="">请选择合约...</option>
-{datalist_options_usdt}
-                </select>
-            </div>
-            <button type="submit">添加到列表</button>
-        </form>
-        <form method="post" action="/settings/refresh-catalog" class="inline-form">
-            <button type="submit" class="secondary">刷新合约库</button>
-        </form>
-    </section>
+    <div class="pair-grid">
+        <section class="settings-card">
+            <h2>运行参数</h2>
+            <form method="post" action="/settings/update">
+                <label for="poll-interval">刷新间隔（秒）</label>
+                <input id="poll-interval" type="number" name="poll_interval" min="30" max="3600" value="{poll_interval}" required>
+                <label for="instrument-list">当前合约列表（每行一个）</label>
+                <textarea id="instrument-list" name="instruments" spellcheck="false">{instruments_text}</textarea>
+                <div class="chip-row">{chips_html}</div>
+                <button type="submit">保存配置</button>
+            </form>
+        </section>
+        <section class="settings-card">
+            <h2>添加合约</h2>
+            <p class="hint">{catalog_hint}</p>
+            <form method="post" action="/settings/add" class="control-row" id="add-instrument-form">
+                <input type="hidden" name="poll_interval" value="{poll_interval}">
+                <input type="hidden" name="current_instruments" value="{current_instruments_value}">
+                <label for="instrument-select-usdt" class="control-label">USDT</label>
+                <div class="control-field">
+                    <select id="instrument-select-usdt" name="new_instrument" size="12">
+                        <option value="">请选择合约...</option>
+    {datalist_options_usdt}
+                    </select>
+                </div>
+                <button type="submit">添加到列表</button>
+            </form>
+            <form method="post" action="/settings/refresh-catalog" class="inline-form">
+                <button type="submit" class="secondary">刷新合约库</button>
+            </form>
+        </section>
+    </div>
 </body>
 </html>
 """
@@ -1040,6 +1199,8 @@ OKX_TEMPLATE = r"""
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
         .error-card {{ background-color: #3f1d45; border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.45); }}
         .error-card h2 {{ margin: 0 0 10px 0; color: #f87171; }}
         .error-card ul {{ margin: 0; padding-left: 20px; }}
@@ -1065,8 +1226,8 @@ OKX_TEMPLATE = r"""
         <a href="/" class="nav-link">首页</a>
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link active">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/liquidation-map" class="nav-link">清算地图</a>
+        <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
@@ -1113,6 +1274,8 @@ SCHEDULER_TEMPLATE = r"""
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
         .card {{ background-color: #1e293b; border-radius: 12px; padding: 22px 26px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); max-width: 620px; }}
         form {{ display: grid; gap: 18px; }}
         label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
@@ -1123,6 +1286,21 @@ SCHEDULER_TEMPLATE = r"""
         .hint {{ color: #94a3b8; font-size: 0.85rem; margin-top: -6px; }}
         .meta {{ margin-top: 20px; font-size: 0.85rem; color: #64748b; }}
         .timestamp {{ color: #38bdf8; }}
+        .log-card {{ width: 100%; max-width: 620px; margin-top: 26px; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+        th, td {{ padding: 10px 14px; border-bottom: 1px solid rgba(226, 232, 240, 0.08); text-align: left; font-size: 0.9rem; word-break: break-word; }}
+        .log-card table {{ table-layout: fixed; }}
+        .log-card th:nth-child(1), .log-card td:nth-child(1) {{ width: 140px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+        .log-card th:nth-child(2), .log-card td:nth-child(2) {{ width: 110px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+        .log-card th:nth-child(3), .log-card td:nth-child(3) {{ width: 100px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+        th {{ color: #a5b4fc; font-weight: 600; background-color: rgba(15, 23, 42, 0.6); }}
+        tr:nth-child(even) {{ background-color: rgba(15, 23, 42, 0.35); }}
+        .status-pill {{ padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; }}
+        .status-success {{ background: rgba(34, 197, 94, 0.2); color: #4ade80; }}
+        .status-warning {{ background: rgba(251, 191, 36, 0.2); color: #facc15; }}
+        .status-error {{ background: rgba(248, 113, 113, 0.2); color: #f87171; }}
+        .status-skipped {{ background: rgba(148, 163, 184, 0.2); color: #cbd5f5; }}
+        .empty-state {{ text-align: center; color: #94a3b8; padding: 14px 0; }}
         @media (max-width: 600px) {{
             .card {{ width: 100%; padding: 18px; }}
             button {{ width: 100%; }}
@@ -1134,8 +1312,8 @@ SCHEDULER_TEMPLATE = r"""
         <a href="/" class="nav-link">首页</a>
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/liquidation-map" class="nav-link">清算地图</a>
+        <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link active">调度器</a>
     </nav>
@@ -1160,6 +1338,121 @@ SCHEDULER_TEMPLATE = r"""
             最近更新：<span class="timestamp">{updated_at}</span>
         </div>
     </section>
+    <section class="card log-card">
+        <h2>最近执行记录</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>任务</th>
+                    <th>状态</th>
+                    <th>描述信息</th>
+                </tr>
+            </thead>
+            <tbody>
+                {log_rows}
+            </tbody>
+        </table>
+    </section>
+</body>
+</html>
+"""
+
+PROMPT_EDITOR_TEMPLATE = r"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>open-nof1.ai 提示词模板</title>
+    <style>
+        body {{ font-family: "Segoe UI", "PingFang SC", Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
+        h1 {{ margin-bottom: 0.5rem; }}
+        h2 {{ margin-top: 0; }}
+        .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; flex-wrap: wrap; }}
+        .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
+        .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
+        .prompt-layout {{ max-width: 960px; margin: 0 auto; display: grid; gap: 24px; }}
+        .card {{ background-color: #1e293b; border-radius: 12px; padding: 24px 28px; box-shadow: 0 15px 45px rgba(15, 23, 42, 0.55); }}
+        .card.helper {{ background-color: rgba(15, 23, 42, 0.8); }}
+        label {{ display: block; margin-bottom: 8px; color: #94a3b8; font-size: 0.95rem; }}
+        textarea {{ width: 100%; min-height: 320px; border-radius: 10px; border: 1px solid #334155; background-color: #0f172a; color: #e2e8f0; padding: 14px; font-size: 0.95rem; line-height: 1.5; resize: vertical; }}
+        textarea:focus {{ outline: none; border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2); }}
+        button {{ background-color: #38bdf8; color: #0f172a; border: none; padding: 10px 20px; border-radius: 10px; cursor: pointer; font-weight: 600; margin-top: 16px; }}
+        button:hover {{ background-color: #0ea5e9; }}
+        .hint {{ color: #94a3b8; font-size: 0.9rem; margin-top: 8px; }}
+        .notice {{ padding: 12px 16px; border-radius: 10px; margin: 12px 0 0; font-size: 0.9rem; }}
+        .notice.success {{ background: rgba(16, 185, 129, 0.18); color: #bbf7d0; border: 1px solid rgba(16, 185, 129, 0.4); }}
+        .placeholder-list {{ list-style: none; padding-left: 0; margin: 0; display: grid; gap: 10px; }}
+        .placeholder-list li {{ background-color: rgba(15, 23, 42, 0.65); border-radius: 8px; padding: 10px 12px; display: flex; gap: 12px; align-items: center; }}
+        .model-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }}
+        .model-grid.empty {{ color: #94a3b8; padding: 12px 0; }}
+        .model-card {{ border-radius: 12px; padding: 14px; border: 1px solid rgba(148, 163, 184, 0.25); background: rgba(15, 23, 42, 0.65); }}
+        .model-card header {{ display: flex; flex-direction: column; gap: 4px; }}
+        .model-card h3 {{ margin: 0; font-size: 1rem; }}
+        .model-card span {{ color: #94a3b8; font-size: 0.85rem; }}
+        .model-card .status-label {{ margin-top: 10px; font-size: 0.85rem; font-weight: 600; }}
+        .model-card.status.enabled {{ border-color: rgba(74, 222, 128, 0.5); background: rgba(22, 163, 74, 0.18); }}
+        .model-card.status.enabled .status-label {{ color: #4ade80; }}
+        .model-card.status.disabled {{ opacity: 0.6; }}
+        .model-card.status.disabled .status-label {{ color: #f87171; }}
+        .instrument-chips {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 8px; }}
+        .instrument-chips.empty {{ color: #94a3b8; }}
+        .instrument-chip {{ background-color: rgba(56, 189, 248, 0.15); color: #bae6fd; padding: 6px 12px; border-radius: 999px; font-size: 0.85rem; border: 1px solid rgba(56, 189, 248, 0.4); }}
+        .divider {{ border: none; border-top: 1px solid rgba(148, 163, 184, 0.3); margin: 18px 0; }}
+        code {{ background-color: rgba(56, 189, 248, 0.15); padding: 2px 8px; border-radius: 6px; font-family: "JetBrains Mono", "Fira Code", Consolas, monospace; font-size: 0.85rem; color: #38bdf8; }}
+        @media (max-width: 720px) {{
+            body {{ padding: 18px 14px; }}
+            .card {{ padding: 20px; }}
+            .prompt-layout {{ gap: 18px; }}
+        }}
+    </style>
+</head>
+<body>
+    <nav class="top-nav">
+        <a href="/" class="nav-link">首页</a>
+        <a href="/models" class="nav-link">模型管理</a>
+        <a href="/okx" class="nav-link">OKX 模拟</a>
+        <a href="/liquidations" class="nav-link">爆仓监控</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
+        <a href="/prompts" class="nav-link active">提示词</a>
+        <a href="/settings" class="nav-link">策略配置</a>
+        <a href="/scheduler" class="nav-link">调度器</a>
+    </nav>
+
+    <div class="prompt-layout">
+        <header>
+            <h1>提示词模板</h1>
+            <p class="hint">模板中可以自由编排说明，让 LLM 在下单前参考实时仓位与风控上下文。使用 <code>{{{{</code> 与 <code>}}}}</code> 输出字面花括号。</p>
+            {notice_block}
+        </header>
+        <section class="card">
+            <form method="post" action="/prompts/update">
+                <label for="prompt-template">当前模板</label>
+                <textarea id="prompt-template" name="prompt_template" spellcheck="false">{prompt_text}</textarea>
+                <p class="hint">保存后立即生效，新的信号请求都会使用最新提示词。</p>
+                <button type="submit">保存模板</button>
+            </form>
+        </section>
+        <section class="card helper">
+            <h2>启用模型</h2>
+            <p class="hint">{model_hint}</p>
+            {model_block}
+            <p class="hint">各模型独立思考、互不影响。仅“已启用”的模型会被提示词引用。</p>
+            <hr class="divider">
+            <h2>默认交易币对</h2>
+            {instrument_block}
+            <p class="hint">提示词中的 <code>{{model_id}}</code> 会与下方币对组合，按启用的模型 ID 独立替换。</p>
+            <p class="hint">数据来源：“币对配置”页中的“需要交易的币对”列表，并会自动保持同步。</p>
+            <hr class="divider">
+            <h2>可用占位符</h2>
+            <ul class="placeholder-list">
+                {placeholder_list}
+            </ul>
+            <p class="hint">缺失的占位符会被自动替换为空字符串，以避免影响模板渲染。</p>
+        </section>
+    </div>
 </body>
 </html>
 """
@@ -1168,10 +1461,40 @@ SCHEDULER_TEMPLATE = r"""
 def _render_scheduler_page(settings: dict) -> str:
     esc = _escape
     updated_at = _format_asia_shanghai(settings.get("updated_at"))
+    job_labels = {
+        "market": "行情采集",
+        "ai": "AI 交互",
+        "analytics": "指标刷新",
+    }
+    status_labels = {
+        "success": "成功",
+        "warning": "部分成功",
+        "error": "失败",
+        "skipped": "跳过",
+    }
+    log_rows: list[str] = []
+    for entry in settings.get("execution_log") or []:
+        timestamp = esc(_format_asia_shanghai(entry.get("timestamp")))
+        job = esc(job_labels.get(entry.get("job"), entry.get("job") or "--"))
+        status_key = str(entry.get("status") or "unknown")
+        status_text = esc(status_labels.get(status_key, status_key))
+        status_class = f"status-{status_key}"
+        detail = esc(entry.get("detail") or "--")
+        log_rows.append(
+            "<tr>"
+            f"<td>{timestamp}</td>"
+            f"<td>{job}</td>"
+            f"<td><span class=\"status-pill {status_class}\">{status_text}</span></td>"
+            f"<td>{detail}</td>"
+            "</tr>"
+        )
+    if not log_rows:
+        log_rows.append("<tr><td colspan='4' class='empty-state'>暂无执行记录</td></tr>")
     return SCHEDULER_TEMPLATE.format(
         market_interval=esc(settings.get("market_interval")),
         ai_interval=esc(settings.get("ai_interval")),
         updated_at=esc(updated_at),
+        log_rows="\n".join(log_rows),
     )
 
 
@@ -1198,6 +1521,7 @@ LIQUIDATION_TEMPLATE = r"""
         .controls {{ display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 1rem; }}
         .controls label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
         select {{ min-width: 200px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; padding: 8px 10px; }}
+        input[type="number"] {{ min-width: 160px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; padding: 8px 10px; }}
         table {{ width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 12px; overflow: hidden; }}
         th, td {{ padding: 10px 14px; border-bottom: 1px solid #334155; text-align: left; }}
         th {{ background: rgba(15, 23, 42, 0.6); font-size: 0.9rem; }}
@@ -1211,8 +1535,8 @@ LIQUIDATION_TEMPLATE = r"""
         <a href="/" class="nav-link">首页</a>
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link">OKX 模拟</a>
-        <a href="/liquidations" class="nav-link active">爆仓监控</a>
         <a href="/liquidation-map" class="nav-link">清算地图</a>
+        <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
@@ -1222,6 +1546,12 @@ LIQUIDATION_TEMPLATE = r"""
             <select id="instrument-select">
                 {instrument_options}
             </select>
+        </label>
+        <label>最小爆仓数量
+            <input type="number" id="min-size" min="0" step="0.01" placeholder="如 10">
+        </label>
+        <label>最小爆仓金额（USDT）
+            <input type="number" id="min-notional" min="0" step="10" placeholder="如 100000">
         </label>
         <span>最后更新：<span class="timestamp" id="liquidations-updated">{updated_at}</span></span>
     </div>
@@ -1234,6 +1564,7 @@ LIQUIDATION_TEMPLATE = r"""
                 <th>空单爆仓</th>
                 <th>净爆仓</th>
                 <th>最新价</th>
+                <th>爆仓金额</th>
             </tr>
         </thead>
         <tbody id="liquidations-body">
@@ -1243,6 +1574,10 @@ LIQUIDATION_TEMPLATE = r"""
     <script>
       (function() {{
         const select = document.getElementById('instrument-select');
+        const minSizeInput = document.getElementById('min-size');
+        const minNotionalInput = document.getElementById('min-notional');
+        const DEFAULT_LIMIT = 50;
+        let latestItems = [];
         const fmtNumber = (value, digits) => {{
           if (value === null || value === undefined || value === '') {{ return '-'; }}
           const num = Number(value);
@@ -1264,34 +1599,73 @@ LIQUIDATION_TEMPLATE = r"""
             hour12: false
           }}).format(date);
         }};
+        const computeNotional = (item) => {{
+          if (!item) {{ return null; }}
+          const provided = Number(item.notional_value);
+          if (Number.isFinite(provided)) {{
+            return provided;
+          }}
+          const qty = Math.abs(Number(item.net_qty));
+          const price = Number(item.last_price);
+          if (Number.isFinite(qty) && Number.isFinite(price)) {{
+            return qty * price;
+          }}
+          return null;
+        }};
+        const applyFilters = (items) => {{
+          const minQty = Math.max(0, Number(minSizeInput.value) || 0);
+          const minNotional = Math.max(0, Number(minNotionalInput.value) || 0);
+          return items.filter((item) => {{
+            const qty = Math.abs(Number(item.net_qty)) || 0;
+            const notional = computeNotional(item) || 0;
+            if (minQty && qty < minQty) {{
+              return false;
+            }}
+            if (minNotional && notional < minNotional) {{
+              return false;
+            }}
+            return true;
+          }});
+        }};
+        const renderRows = () => {{
+          const body = document.getElementById('liquidations-body');
+          body.innerHTML = '';
+          const filtered = applyFilters(latestItems);
+          if (!filtered.length) {{
+            body.innerHTML = '<tr><td colspan="7" class="empty-state">暂无爆仓数据</td></tr>';
+            return;
+          }}
+          filtered.forEach((item) => {{
+            const tr = document.createElement('tr');
+            const notional = computeNotional(item);
+            tr.innerHTML = `
+              <td>${{fmtTimestamp(item.timestamp)}}</td>
+              <td>${{item.instrument_id || '--'}}</td>
+              <td>${{fmtNumber(item.long_qty, 2)}}</td>
+              <td>${{fmtNumber(item.short_qty, 2)}}</td>
+              <td>${{fmtNumber(item.net_qty, 2)}}</td>
+              <td>${{fmtNumber(item.last_price, 4)}}</td>
+              <td>${{notional === null ? '-' : fmtNumber(notional, 2)}}</td>`;
+            body.appendChild(tr);
+          }});
+        }};
         function refresh() {{
-          const params = new URLSearchParams({{ limit: '30' }});
+          const params = new URLSearchParams({{ limit: DEFAULT_LIMIT.toString() }});
           if (select.value) {{ params.set('instrument', select.value); }}
           fetch('/api/streams/liquidations/latest?' + params.toString())
             .then((res) => res.json())
             .then((data) => {{
-              const body = document.getElementById('liquidations-body');
-              body.innerHTML = '';
-              (data.items || []).forEach((item) => {{
-                const tr = document.createElement('tr');
-                tr.innerHTML = `
-                  <td>${{fmtTimestamp(item.timestamp)}}</td>
-                  <td>${{item.instrument_id || '--'}}</td>
-                  <td>${{fmtNumber(item.long_qty, 2)}}</td>
-                  <td>${{fmtNumber(item.short_qty, 2)}}</td>
-                  <td>${{fmtNumber(item.net_qty, 2)}}</td>
-                  <td>${{fmtNumber(item.last_price, 4)}}</td>`;
-                body.appendChild(tr);
-              }});
-              if ((data.items || []).length === 0) {{
-                body.innerHTML = '<tr><td colspan="6" class="empty-state">暂无爆仓数据</td></tr>';
-              }}
+              latestItems = Array.isArray(data.items) ? data.items : [];
+              renderRows();
               const updated = document.getElementById('liquidations-updated');
               if (updated) {{ updated.textContent = fmtTimestamp(data.updated_at); }}
             }})
             .catch((err) => console.error(err));
         }}
         select.addEventListener('change', refresh);
+        [minSizeInput, minNotionalInput].forEach((input) => {{
+          input.addEventListener('input', () => renderRows());
+        }});
         refresh();
         setInterval(refresh, 3000);
       }})();
@@ -1343,6 +1717,7 @@ LIQUIDATION_MAP_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/liquidation-map" class="nav-link active">清算地图</a>
+        <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
@@ -1421,12 +1796,29 @@ LIQUIDATION_MAP_TEMPLATE = r"""
           return '买卖相对均衡';
         }};
 
-        const drawBars = (levels, color, minPrice, range, maxSize, padding, width, height) => {{
+        const formatTimestamp = (value) => {{
+          if (!value) {{ return '--'; }}
+          const date = new Date(value);
+          if (!isFinite(date)) {{ return value; }}
+          return new Intl.DateTimeFormat('zh-CN', {{
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+          }}).format(date);
+        }};
+
+        const drawBars = (entries, color, minPrice, range, maxSize, padding, width, height) => {{
+          if (!Array.isArray(entries) || entries.length === 0) {{ return; }}
           ctx.fillStyle = color;
-          const total = Math.max(levels.length, 1);
-          levels.forEach(([price, size]) => {{
+          entries.forEach(([price, size]) => {{
+            if (!Number.isFinite(price) || !Number.isFinite(size)) {{ return; }}
             const x = padding + ((price - minPrice) / range) * width;
-            const barWidth = Math.max(width / (total * 2), 2);
+            const barWidth = Math.max(width / (entries.length * 1.6), 2);
             const barHeight = (size / maxSize) * height;
             ctx.fillRect(x - barWidth / 2, padding + height - barHeight, barWidth, barHeight);
           }});
@@ -1464,7 +1856,7 @@ LIQUIDATION_MAP_TEMPLATE = r"""
           askDepthEl.textContent = formatNumber(sellDepth, 2);
           netDepthEl.textContent = formatNumber(buyDepth - sellDepth, 2) + ' · ' + describeImbalance(imbalance);
           spreadEl.textContent = formatNumber(spread, 4);
-          updatedLabel.textContent = target.timestamp ? new Date(target.timestamp).toLocaleTimeString('zh-CN', {{ hour12: false }}) : '--';
+          updatedLabel.textContent = formatTimestamp(target.timestamp);
           titleEl.textContent = (target.instrument_id || '--') + ' 深度分布';
 
           ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -1509,13 +1901,4 @@ LIQUIDATION_MAP_TEMPLATE = r"""
 </html>
 """
 
-def _build_depth_options(selected: int) -> str:
-    choices = (20, 50, 100, 200, 400)
-    sanitized = max(1, selected)
-    rendered: list[str] = []
-    for value in choices:
-        selected_attr = " selected" if value == sanitized else ""
-        rendered.append(f'<option value="{value}"{selected_attr}>{value} 档</option>')
-    if sanitized not in choices:
-        rendered.append(f'<option value="{sanitized}" selected>{sanitized} 档</option>')
-    return "\n".join(rendered)
+

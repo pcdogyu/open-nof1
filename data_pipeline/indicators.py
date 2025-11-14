@@ -19,6 +19,7 @@ class IndicatorResult:
     macd_hist: float | None
     rsi: float | None
     realized_volatility: float | None
+    close_price: float | None = None
 
 
 class IndicatorCalculator:
@@ -29,8 +30,9 @@ class IndicatorCalculator:
     ) -> IndicatorResult:
         df = self._candles_to_df(candles)
         if df.empty:
-            return IndicatorResult(timeframe, None, None, None, None, None)
+            return IndicatorResult(timeframe, None, None, None, None, None, None)
         close = df["close"]
+        latest_close = float(close.iloc[-1]) if not close.empty else None
 
         exp12 = close.ewm(span=12, adjust=False).mean()
         exp26 = close.ewm(span=26, adjust=False).mean()
@@ -56,6 +58,7 @@ class IndicatorCalculator:
             macd_hist=hist.iloc[-1] if not hist.empty else None,
             rsi=rsi.iloc[-1] if not rsi.empty else None,
             realized_volatility=realized_vol,
+            close_price=latest_close,
         )
 
     @staticmethod

@@ -10,6 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from models.runtime import SignalRuntime
 from models.schemas import MarketSnapshot, RiskContext, SignalRequest
 
@@ -29,6 +36,7 @@ async def main() -> None:
                 current_position=0.3,
                 cash_available=5000.0,
             ),
+            positions=[],
             strategy_hint="Swing trading with emphasis on momentum and risk parity.",
         ),
         SignalRequest(
@@ -43,6 +51,7 @@ async def main() -> None:
                 current_position=8.5,
                 cash_available=2000.0,
             ),
+            positions=[],
             strategy_hint="Reduce exposure if drawdown risk exceeds limits.",
         ),
     ]
