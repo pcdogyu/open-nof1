@@ -150,6 +150,28 @@ def submit_scheduler_settings(
     return RedirectResponse(url="/scheduler", status_code=status.HTTP_303_SEE_OTHER)
 
 
+@app.get("/prompts", include_in_schema=False, response_class=HTMLResponse)
+def prompt_template_page(request: Request) -> HTMLResponse:
+    template = routes.get_prompt_template_text()
+    saved_flag = str(request.query_params.get("saved", "")).lower() in ("1", "true", "yes")
+    settings = routes.get_pipeline_settings()
+    instruments = settings.get("tradable_instruments") or []
+    models = routes.get_model_catalog()
+    content = _render_prompt_editor(
+        template,
+        instruments=instruments,
+        models=models,
+        saved=saved_flag,
+    )
+    return HTMLResponse(content=content)
+
+
+@app.post("/prompts/update", include_in_schema=False)
+def update_prompt_template(prompt_template: str = Form(...)) -> RedirectResponse:
+    routes.update_prompt_template_text(prompt_template)
+    return RedirectResponse(url="/prompts?saved=1", status_code=status.HTTP_303_SEE_OTHER)
+
+
 @app.post("/models/update", include_in_schema=False)
 def update_model_settings(
     model_id: str = Form(...),
@@ -453,6 +475,115 @@ def _render_orderbook_page(snapshot: dict, instruments: Sequence[str], levels: i
         book_grid_class=grid_class,
     )
 
+
+def _render_prompt_editor(
+    template: str,
+    *,
+    instruments: Sequence[str] | None = None,
+    models: Sequence[dict] | None = None,
+    saved: bool = False,
+) -> str:
+    esc = _escape
+    placeholder_entries = [
+        ("{model_id}", "当前触发的模型 ID"),
+        ("{instrument_id}", "标的/合约 ID"),
+        ("{price}", "最新价格"),
+        ("{spread}", "盘口价差"),
+        ("{current_position}", "目标合约当前仓位"),
+        ("{max_position}", "允许的最大仓位"),
+        ("{cash_available}", "可用资金"),
+        ("{positions}", "格式化的多笔仓位摘要"),
+        ("{risk_notes}", "RiskContext 附加备注"),
+        ("{market_metadata}", "行情与指标元数据"),
+        ("{strategy_hint}", "策略提示或约束"),
+    ]
+    placeholder_list = "".join(
+        f"<li><code>{esc(token)}</code><span>{esc(description)}</span></li>"
+        for token, description in placeholder_entries
+    )
+    notice_block = "<div class='notice success'>提示词模板已保存。</div>" if saved else ""
+    normalized_instruments = [
+        esc(str(inst).upper())
+        for inst in (instruments or [])
+        if str(inst).strip()
+    ]
+    if normalized_instruments:
+        chips = "".join(
+            f"<span class='instrument-chip'>{inst}</span>"
+            for inst in normalized_instruments
+        )
+        instrument_block = (
+            "<div class='instrument-chips'>"
+            f"{chips}"
+            "</div>"
+        )
+    else:
+        instrument_block = (
+            "<div class='instrument-chips empty'>"
+            "当前未设置可交易币对，请在“币对配置”页维护“需要交易的币对”列表。"
+            "</div>"
+        )
+    normalized_models: list[dict] = []
+    for entry in models or []:
+        raw_model_id = str(entry.get("model_id") or entry.get("id") or "未知模型")
+        raw_display = entry.get("display_name") or raw_model_id
+        raw_provider = entry.get("provider") or "未知提供方"
+        model_id = esc(raw_model_id)
+        display_name = esc(raw_display)
+        provider = esc(raw_provider)
+        enabled = bool(entry.get("enabled"))
+        normalized_models.append(
+            {
+                "raw_display": raw_display,
+                "model_id": model_id,
+                "display_name": display_name,
+                "provider": provider,
+                "enabled": enabled,
+            }
+        )
+    enabled_models = [record for record in normalized_models if record["enabled"]]
+    disabled_models = [record for record in normalized_models if not record["enabled"]]
+    if normalized_models:
+        cards: list[str] = []
+        for record in normalized_models:
+            status_text = "已启用" if record["enabled"] else "未启用"
+            status_class = "status enabled" if record["enabled"] else "status disabled"
+            cards.append(
+                (
+                    "<article class='model-card {status_class}'>"
+                    "<header>"
+                    "<h3>{display}</h3>"
+                    "<span>{provider}</span>"
+                    "</header>"
+                    "<p class='status-label'>{status}</p>"
+                    "</article>"
+                ).format(
+                    status_class=status_class,
+                    display=record["display_name"],
+                    provider=record["provider"],
+                    status=status_text,
+                )
+            )
+        model_block = "<div class='model-grid'>{cards}</div>".format(cards="".join(cards))
+    else:
+        model_block = (
+            "<div class='model-grid empty'>"
+            "暂无模型配置，请先在“模型管理”页开启可用模型。"
+            "</div>"
+        )
+    if enabled_models:
+        enabled_names = "、".join(rec["raw_display"] for rec in enabled_models)
+        enabled_hint = f"以下模型已允许联机推理：{enabled_names}"
+    else:
+        enabled_hint = "当前没有启用的模型，请在“模型管理”页打开至少一个模型。"
+    return PROMPT_EDITOR_TEMPLATE.format(
+        prompt_text=esc(template),
+        notice_block=notice_block,
+        placeholder_list=placeholder_list,
+        instrument_block=instrument_block,
+        model_block=model_block,
+        model_hint=esc(enabled_hint),
+    )
 
 def _render_settings_page(settings: dict, catalog: Sequence[dict]) -> str:
     """Render the pipeline settings management UI."""
@@ -837,7 +968,8 @@ HTML_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link">策略配置</a>
+        <a href="/prompts" class="nav-link">提示词</a>
+        <a href="/settings" class="nav-link">币对配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
 
@@ -941,7 +1073,8 @@ MODEL_MANAGER_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link">策略配置</a>
+        <a href="/prompts" class="nav-link">提示词</a>
+        <a href="/settings" class="nav-link">币对配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
 
@@ -1016,42 +1149,45 @@ SETTINGS_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link active">策略配置</a>
+        <a href="/prompts" class="nav-link">提示词</a>
+        <a href="/settings" class="nav-link active">币对配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
 
     <h1>币对与刷新频率</h1>
     <p class="updated">最近保存：<span class="timestamp">{updated_at}</span></p>
-    <section class="settings-card">
-        <h2>运行参数</h2>
-        <form method="post" action="/settings/update">
-            <label for="poll-interval">刷新间隔（秒）</label>
-            <input id="poll-interval" type="number" name="poll_interval" min="30" max="3600" value="{poll_interval}" required>
-            <label for="instrument-list">当前合约列表（每行一个）</label>
-            <textarea id="instrument-list" name="instruments" spellcheck="false">{instruments_text}</textarea>
-            <div class="chip-row">{chips_html}</div>
-            <button type="submit">保存配置</button>
-        </form>
-    </section>
-    <section class="settings-card">
-        <h2>添加合约</h2>
-        <p class="hint">{catalog_hint}</p>
-        <form method="post" action="/settings/add" class="control-row" id="add-instrument-form">
-            <input type="hidden" name="poll_interval" value="{poll_interval}">
-            <input type="hidden" name="current_instruments" value="{current_instruments_value}">
-            <label for="instrument-select-usdt" class="control-label">USDT</label>
-            <div class="control-field">
-                <select id="instrument-select-usdt" name="new_instrument" size="12">
-                    <option value="">请选择合约...</option>
-{datalist_options_usdt}
-                </select>
-            </div>
-            <button type="submit">添加到列表</button>
-        </form>
-        <form method="post" action="/settings/refresh-catalog" class="inline-form">
-            <button type="submit" class="secondary">刷新合约库</button>
-        </form>
-    </section>
+    <div class="pair-grid">
+        <section class="settings-card">
+            <h2>运行参数</h2>
+            <form method="post" action="/settings/update">
+                <label for="poll-interval">刷新间隔（秒）</label>
+                <input id="poll-interval" type="number" name="poll_interval" min="30" max="3600" value="{poll_interval}" required>
+                <label for="instrument-list">当前合约列表（每行一个）</label>
+                <textarea id="instrument-list" name="instruments" spellcheck="false">{instruments_text}</textarea>
+                <div class="chip-row">{chips_html}</div>
+                <button type="submit">保存配置</button>
+            </form>
+        </section>
+        <section class="settings-card">
+            <h2>添加合约</h2>
+            <p class="hint">{catalog_hint}</p>
+            <form method="post" action="/settings/add" class="control-row" id="add-instrument-form">
+                <input type="hidden" name="poll_interval" value="{poll_interval}">
+                <input type="hidden" name="current_instruments" value="{current_instruments_value}">
+                <label for="instrument-select-usdt" class="control-label">USDT</label>
+                <div class="control-field">
+                    <select id="instrument-select-usdt" name="new_instrument" size="12">
+                        <option value="">请选择合约...</option>
+    {datalist_options_usdt}
+                    </select>
+                </div>
+                <button type="submit">添加到列表</button>
+            </form>
+            <form method="post" action="/settings/refresh-catalog" class="inline-form">
+                <button type="submit" class="secondary">刷新合约库</button>
+            </form>
+        </section>
+    </div>
 </body>
 </html>
 """
@@ -1097,7 +1233,8 @@ OKX_TEMPLATE = r"""
         <a href="/okx" class="nav-link active">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link">策略配置</a>
+        <a href="/prompts" class="nav-link">提示词</a>
+        <a href="/settings" class="nav-link">币对配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
 
@@ -1166,7 +1303,8 @@ SCHEDULER_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link">策略配置</a>
+        <a href="/prompts" class="nav-link">提示词</a>
+        <a href="/settings" class="nav-link">币对配置</a>
         <a href="/scheduler" class="nav-link active">调度器</a>
     </nav>
 
@@ -1190,6 +1328,103 @@ SCHEDULER_TEMPLATE = r"""
             最近更新：<span class="timestamp">{updated_at}</span>
         </div>
     </section>
+</body>
+</html>
+"""
+
+PROMPT_EDITOR_TEMPLATE = r"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>open-nof1.ai 提示词模板</title>
+    <style>
+        body {{ font-family: "Segoe UI", "PingFang SC", Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
+        h1 {{ margin-bottom: 0.5rem; }}
+        h2 {{ margin-top: 0; }}
+        .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; flex-wrap: wrap; }}
+        .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
+        .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .prompt-layout {{ max-width: 960px; margin: 0 auto; display: grid; gap: 24px; }}
+        .card {{ background-color: #1e293b; border-radius: 12px; padding: 24px 28px; box-shadow: 0 15px 45px rgba(15, 23, 42, 0.55); }}
+        .card.helper {{ background-color: rgba(15, 23, 42, 0.8); }}
+        label {{ display: block; margin-bottom: 8px; color: #94a3b8; font-size: 0.95rem; }}
+        textarea {{ width: 100%; min-height: 320px; border-radius: 10px; border: 1px solid #334155; background-color: #0f172a; color: #e2e8f0; padding: 14px; font-size: 0.95rem; line-height: 1.5; resize: vertical; }}
+        textarea:focus {{ outline: none; border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2); }}
+        button {{ background-color: #38bdf8; color: #0f172a; border: none; padding: 10px 20px; border-radius: 10px; cursor: pointer; font-weight: 600; margin-top: 16px; }}
+        button:hover {{ background-color: #0ea5e9; }}
+        .hint {{ color: #94a3b8; font-size: 0.9rem; margin-top: 8px; }}
+        .notice {{ padding: 12px 16px; border-radius: 10px; margin: 12px 0 0; font-size: 0.9rem; }}
+        .notice.success {{ background: rgba(16, 185, 129, 0.18); color: #bbf7d0; border: 1px solid rgba(16, 185, 129, 0.4); }}
+        .placeholder-list {{ list-style: none; padding-left: 0; margin: 0; display: grid; gap: 10px; }}
+        .placeholder-list li {{ background-color: rgba(15, 23, 42, 0.65); border-radius: 8px; padding: 10px 12px; display: flex; gap: 12px; align-items: center; }}
+        .model-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }}
+        .model-grid.empty {{ color: #94a3b8; padding: 12px 0; }}
+        .model-card {{ border-radius: 12px; padding: 14px; border: 1px solid rgba(148, 163, 184, 0.25); background: rgba(15, 23, 42, 0.65); }}
+        .model-card header {{ display: flex; flex-direction: column; gap: 4px; }}
+        .model-card h3 {{ margin: 0; font-size: 1rem; }}
+        .model-card span {{ color: #94a3b8; font-size: 0.85rem; }}
+        .model-card .status-label {{ margin-top: 10px; font-size: 0.85rem; font-weight: 600; }}
+        .model-card.status.enabled {{ border-color: rgba(74, 222, 128, 0.5); background: rgba(22, 163, 74, 0.18); }}
+        .model-card.status.enabled .status-label {{ color: #4ade80; }}
+        .model-card.status.disabled {{ opacity: 0.6; }}
+        .model-card.status.disabled .status-label {{ color: #f87171; }}
+        .instrument-chips {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 8px; }}
+        .instrument-chips.empty {{ color: #94a3b8; }}
+        .instrument-chip {{ background-color: rgba(56, 189, 248, 0.15); color: #bae6fd; padding: 6px 12px; border-radius: 999px; font-size: 0.85rem; border: 1px solid rgba(56, 189, 248, 0.4); }}
+        .divider {{ border: none; border-top: 1px solid rgba(148, 163, 184, 0.3); margin: 18px 0; }}
+        code {{ background-color: rgba(56, 189, 248, 0.15); padding: 2px 8px; border-radius: 6px; font-family: "JetBrains Mono", "Fira Code", Consolas, monospace; font-size: 0.85rem; color: #38bdf8; }}
+        @media (max-width: 720px) {{
+            body {{ padding: 18px 14px; }}
+            .card {{ padding: 20px; }}
+            .prompt-layout {{ gap: 18px; }}
+        }}
+    </style>
+</head>
+<body>
+    <nav class="top-nav">
+        <a href="/" class="nav-link">首页</a>
+        <a href="/models" class="nav-link">模型管理</a>
+        <a href="/okx" class="nav-link">OKX 模拟</a>
+        <a href="/liquidations" class="nav-link">爆仓监控</a>
+        <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/prompts" class="nav-link active">提示词</a>
+        <a href="/settings" class="nav-link">币对配置</a>
+        <a href="/scheduler" class="nav-link">调度器</a>
+    </nav>
+
+    <div class="prompt-layout">
+        <header>
+            <h1>提示词模板</h1>
+            <p class="hint">模板中可以自由编排说明，让 LLM 在下单前参考实时仓位与风控上下文。使用 <code>{{{{</code> 与 <code>}}}}</code> 输出字面花括号。</p>
+            {notice_block}
+        </header>
+        <section class="card">
+            <form method="post" action="/prompts/update">
+                <label for="prompt-template">当前模板</label>
+                <textarea id="prompt-template" name="prompt_template" spellcheck="false">{prompt_text}</textarea>
+                <p class="hint">保存后立即生效，新的信号请求都会使用最新提示词。</p>
+                <button type="submit">保存模板</button>
+            </form>
+        </section>
+        <section class="card helper">
+            <h2>启用模型</h2>
+            <p class="hint">{model_hint}</p>
+            {model_block}
+            <p class="hint">各模型独立思考、互不影响。仅“已启用”的模型会被提示词引用。</p>
+            <hr class="divider">
+            <h2>默认交易币对</h2>
+            {instrument_block}
+            <p class="hint">提示词中的 <code>{{model_id}}</code> 会与下方币对组合，按启用的模型 ID 独立替换。</p>
+            <p class="hint">数据来源：“币对配置”页中的“需要交易的币对”列表，并会自动保持同步。</p>
+            <hr class="divider">
+            <h2>可用占位符</h2>
+            <ul class="placeholder-list">
+                {placeholder_list}
+            </ul>
+            <p class="hint">缺失的占位符会被自动替换为空字符串，以避免影响模板渲染。</p>
+        </section>
+    </div>
 </body>
 </html>
 """
@@ -1244,7 +1479,8 @@ LIQUIDATION_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link active">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
-        <a href="/settings" class="nav-link">策略配置</a>
+        <a href="/prompts" class="nav-link">提示词</a>
+        <a href="/settings" class="nav-link">币对配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
     <h1>OKX 爆仓监控</h1>
@@ -1397,6 +1633,11 @@ ORDERBOOK_TEMPLATE = r"""
         .controls {{ display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 1rem; }}
         .controls label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
         select {{ min-width: 160px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; padding: 8px 10px; }}
+        .timeframe-toggle {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
+        .timeframe-buttons {{ display: flex; gap: 8px; }}
+        .timeframe-buttons button {{ background: rgba(51, 65, 85, 0.6); border: 1px solid rgba(148, 163, 184, 0.35); color: #e2e8f0; padding: 6px 16px; border-radius: 999px; cursor: pointer; font-size: 0.9rem; transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease; }}
+        .timeframe-buttons button.active {{ background: #38bdf8; border-color: #38bdf8; color: #0f172a; }}
+        .timeframe-buttons button:hover {{ border-color: rgba(148, 163, 184, 0.8); }}
         .book-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 20px; align-items: stretch; width: 98vw; margin: 0 auto; }}
         .book-grid.two-cols {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; width: 98vw; }}
         @media (max-width: 1024px) {{ .book-grid.two-cols {{ grid-template-columns: 1fr; }} }}
@@ -1430,7 +1671,8 @@ ORDERBOOK_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link active">市场深度</a>
-        <a href="/settings" class="nav-link">策略配置</a>
+        <a href="/prompts" class="nav-link">提示词</a>
+        <a href="/settings" class="nav-link">币对配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
     <h1>OKX 市场深度</h1>
@@ -1445,6 +1687,15 @@ ORDERBOOK_TEMPLATE = r"""
                 {level_options}
             </select>
         </label>
+        <div class="timeframe-toggle">
+            <span>净深度周期</span>
+            <div class="timeframe-buttons">
+                <button type="button" data-timeframe="5m">5m</button>
+                <button type="button" data-timeframe="15m" class="active">15m</button>
+                <button type="button" data-timeframe="1h">1h</button>
+                <button type="button" data-timeframe="4h">4h</button>
+            </div>
+        </div>
         <span>最后更新：<span class="timestamp" id="orderbook-updated">{updated_at}</span></span>
     </div>
     <h2 class="section-heading">市场深度</h2>
@@ -1455,18 +1706,46 @@ ORDERBOOK_TEMPLATE = r"""
       (function() {{
         const instrumentSelect = document.getElementById('orderbook-instrument');
         const levelSelect = document.getElementById('depth-levels');
+        const timeframeButtons = document.querySelectorAll('.timeframe-buttons button');
         const DEFAULT_PAIRS = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP'];
-        const HISTORY_LIMIT = 1200;
+        const TIMEFRAMES_MS = {{
+          '5m': 5 * 60 * 1000,
+          '15m': 15 * 60 * 1000,
+          '1h': 60 * 60 * 1000,
+          '4h': 4 * 60 * 60 * 1000,
+        }};
+        const DEFAULT_TIMEFRAME = '15m';
+        let activeTimeframe = DEFAULT_TIMEFRAME;
+        const HISTORY_LIMIT = 4800;
         const netDepthHistory = new Map();
         const BASE_GRID_CLASS = 'book-grid';
         const NET_DEPTH_DELAY_MS = 5000;
         const pendingNetDepth = new Map();
         const committedNetDepth = new Map();
+        timeframeButtons.forEach((button) => {{
+          if (button.classList.contains('active') && button.dataset.timeframe) {{
+            activeTimeframe = button.dataset.timeframe;
+          }}
+        }});
 
         const formatNumber = (value, digits = 2) => {{
           if (value === null || value === undefined || value === '') {{ return '--'; }}
           const num = Number(value);
           if (!Number.isFinite(num)) {{ return '--'; }}
+          return num.toFixed(digits);
+        }};
+        const formatSignedNumber = (value, digits = 2) => {{
+          const formatted = formatNumber(value, digits);
+          if (formatted === '--') {{
+            return formatted;
+          }}
+          const num = Number(value);
+          if (num > 0) {{
+            return `+${{num.toFixed(digits)}}`;
+          }}
+          if (num < 0) {{
+            return num.toFixed(digits);
+          }}
           return num.toFixed(digits);
         }};
         const formatTimestamp = (value) => {{
@@ -1579,26 +1858,106 @@ ORDERBOOK_TEMPLATE = r"""
           }}
           return committedNetDepth.get(symbol.toUpperCase());
         }};
-        const drawNetDepthChart = (canvas, history) => {{
+        const normalizeHistoryPoints = (series) => {{
+          if (!Array.isArray(series)) {{
+            return [];
+          }}
+          const normalized = [];
+          series.forEach((entry) => {{
+            if (!entry) {{
+              return;
+            }}
+            const rawValue = entry.value ?? entry.net_depth;
+            const value = Number(rawValue);
+            if (!Number.isFinite(value)) {{
+              return;
+            }}
+            let time = entry.time instanceof Date ? entry.time : undefined;
+            const fallbackStamp = entry.timestamp ?? entry.time;
+            if (!(time instanceof Date) || Number.isNaN(time?.getTime?.())) {{
+              if (fallbackStamp) {{
+                const parsed = new Date(fallbackStamp);
+                if (!Number.isNaN(parsed.getTime())) {{
+                  time = parsed;
+                }}
+              }}
+            }}
+            if (!(time instanceof Date) || Number.isNaN(time.getTime())) {{
+              time = new Date();
+            }}
+            normalized.push({{ time, value }});
+          }});
+          return normalized;
+        }};
+        const filterSeriesByTimeframe = (series, timeframeKey) => {{
+          const windowMs = TIMEFRAMES_MS[timeframeKey] || TIMEFRAMES_MS[DEFAULT_TIMEFRAME];
+          if (!Array.isArray(series) || !series.length || !windowMs) {{
+            return Array.isArray(series) ? series : [];
+          }}
+          const latest = series[series.length - 1].time?.getTime?.();
+          if (!Number.isFinite(latest)) {{
+            return series;
+          }}
+          const cutoff = latest - windowMs;
+          return series.filter((pt) => {{
+            const ts = pt.time?.getTime?.();
+            return Number.isFinite(ts) && ts >= cutoff;
+          }});
+        }};
+        const serializeHistory = (series) => {{
+          if (!Array.isArray(series)) {{
+            return '[]';
+          }}
+          const payload = series.map((pt) => {{
+            const time = pt.time instanceof Date && !Number.isNaN(pt.time.getTime())
+              ? pt.time.toISOString()
+              : pt.time;
+            return {{ value: pt.value, time }};
+          }});
+          return JSON.stringify(payload);
+        }};
+        const getStoredHistory = (canvas) => {{
+          if (!canvas || !canvas.dataset) {{
+            return [];
+          }}
+          const raw = canvas.dataset.history || '[]';
+          try {{
+            const parsed = JSON.parse(raw);
+            return normalizeHistoryPoints(parsed);
+          }} catch (err) {{
+            console.error('Failed to parse stored history', err);
+            return [];
+          }}
+        }};
+        function repaintCharts() {{
+          document.querySelectorAll('.chart-canvas').forEach((canvas) => {{
+            const history = getStoredHistory(canvas);
+            drawNetDepthChart(canvas, history, activeTimeframe);
+          }});
+        }}
+        const drawNetDepthChart = (canvas, history, timeframeKey = activeTimeframe) => {{
           const parent = canvas.parentElement;
           const width = Math.max((parent ? parent.clientWidth : 320), 420);
           const height = 260;
           const dpr = window.devicePixelRatio || 1;
           canvas.width = width * dpr;
           canvas.height = height * dpr;
-          canvas.style.width = width + 'px';
-          canvas.style.height = height + 'px';
-          const ctx = canvas.getContext('2d');
+          canvas.style.width = width + "px";
+          canvas.style.height = height + "px";
+          const ctx = canvas.getContext("2d");
           ctx.setTransform(1, 0, 0, 1, 0, 0);
           ctx.scale(dpr, dpr);
           ctx.clearRect(0, 0, width, height);
-          if (!history.length) {{
-            ctx.fillStyle = '#94a3b8';
-            ctx.font = '14px Arial';
-            ctx.fillText('暂无净深度数据', 20, height / 2);
+          const normalized = normalizeHistoryPoints(history);
+          const filtered = filterSeriesByTimeframe(normalized, timeframeKey);
+          const series = filtered.length ? filtered : normalized;
+          if (!series.length) {{
+            ctx.fillStyle = "#94a3b8";
+            ctx.font = "14px Arial";
+            ctx.fillText("暂无历史数据", 20, height / 2);
             return;
           }}
-          const values = history.map((pt) => pt.value);
+          const values = series.map((pt) => pt.value);
           const maxVal = Math.max(...values);
           const minVal = Math.min(...values);
           const maxAbs = Math.max(Math.abs(maxVal), Math.abs(minVal), 1);
@@ -1614,17 +1973,17 @@ ORDERBOOK_TEMPLATE = r"""
           const chartWidth = width - left - right;
           const chartHeight = height - top - bottom;
           const zeroY = top + chartHeight - ((0 - bottomVal) / range) * chartHeight;
-          ctx.strokeStyle = '#475569';
+          ctx.strokeStyle = "#475569";
           ctx.lineWidth = 1;
           ctx.beginPath();
           ctx.moveTo(left, zeroY);
           ctx.lineTo(width - right, zeroY);
           ctx.stroke();
-          ctx.strokeStyle = '#38bdf8';
+          ctx.strokeStyle = "#38bdf8";
           ctx.lineWidth = 2;
           ctx.beginPath();
-          history.forEach((pt, idx) => {{
-            const x = left + (chartWidth * idx) / Math.max(1, history.length - 1);
+          series.forEach((pt, idx) => {{
+            const x = left + (chartWidth * idx) / Math.max(1, series.length - 1);
             const y = top + chartHeight - ((pt.value - bottomVal) / range) * chartHeight;
             if (idx === 0) {{
               ctx.moveTo(x, y);
@@ -1633,28 +1992,37 @@ ORDERBOOK_TEMPLATE = r"""
             }}
           }});
           ctx.stroke();
-          ctx.fillStyle = '#94a3b8';
-          ctx.font = '12px Arial';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
-          const tickCount = Math.min(history.length, 8);
+          ctx.fillStyle = "#94a3b8";
+          ctx.font = "12px Arial";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "top";
+          const tickCount = Math.min(series.length, 8);
           for (let i = 0; i < tickCount; i += 1) {{
-            const idx = Math.round((history.length - 1) * (i / Math.max(1, tickCount - 1)));
-            const pt = history[idx];
-            const x = left + (chartWidth * idx) / Math.max(1, history.length - 1);
-            const label = pt.time instanceof Date && !Number.isNaN(pt.time)
-              ? `${{String(pt.time.getHours()).padStart(2, '0')}}:${{String(pt.time.getMinutes()).padStart(2, '0')}}:${{String(pt.time.getSeconds()).padStart(2, '0')}}`
-              : '';
+            const idx = Math.round((series.length - 1) * (i / Math.max(1, tickCount - 1)));
+            const pt = series[idx];
+            const x = left + (chartWidth * idx) / Math.max(1, series.length - 1);
+            const label = pt.time instanceof Date && !Number.isNaN(pt.time.getTime())
+              ? `${{String(pt.time.getHours()).padStart(2, "0")}}:${{String(pt.time.getMinutes()).padStart(2, "0")}}:${{String(pt.time.getSeconds()).padStart(2, "0")}}`
+              : "";
             ctx.fillText(label, x, height - bottom + 6);
           }}
-          ctx.textAlign = 'right';
-          ctx.textBaseline = 'middle';
-          const yTicks = 5;
-          for (let i = 0; i <= yTicks; i += 1) {{
-            const value = bottomVal + (range * i) / yTicks;
-            const y = top + chartHeight - (chartHeight * i) / yTicks;
-            ctx.fillText(formatNumber(value, 2), left - 6, y);
+          ctx.textAlign = "right";
+          ctx.textBaseline = "middle";
+          const ticksPerSide = 3;
+          const tickStep = limit / ticksPerSide;
+          const tickValues = [];
+          // Force symmetric ticks so everything above the zero line is positive and below is negative.
+          for (let i = ticksPerSide; i > 0; i -= 1) {{
+            tickValues.push(tickStep * i);
           }}
+          tickValues.push(0);
+          for (let i = 1; i <= ticksPerSide; i += 1) {{
+            tickValues.push(-tickStep * i);
+          }}
+          tickValues.forEach((value) => {{
+            const y = top + chartHeight - ((value - bottomVal) / range) * chartHeight;
+            ctx.fillText(formatSignedNumber(value, 2), left - 6, y);
+          }});
         }};
 
         function renderBooks(data) {{
@@ -1753,8 +2121,9 @@ ORDERBOOK_TEMPLATE = r"""
             if (committedSnapshot) {{
               history = appendNetDepth(symbol, committedSnapshot.timestamp, committedSnapshot.value);
             }}
-            canvas.dataset.history = JSON.stringify(history);
-            requestAnimationFrame(() => drawNetDepthChart(canvas, history));
+            const normalizedHistory = normalizeHistoryPoints(history);
+            canvas.dataset.history = serializeHistory(normalizedHistory);
+            requestAnimationFrame(() => drawNetDepthChart(canvas, normalizedHistory, activeTimeframe));
           }});
           const updated = document.getElementById('orderbook-updated');
           if (updated) {{ updated.textContent = formatTimestamp(data.updated_at); }}
@@ -1774,16 +2143,18 @@ ORDERBOOK_TEMPLATE = r"""
 
         instrumentSelect.addEventListener('change', refresh);
         levelSelect.addEventListener('change', refresh);
-        window.addEventListener('resize', () => {{
-          document.querySelectorAll('.chart-canvas').forEach((canvas) => {{
-            try {{
-              const history = JSON.parse(canvas.dataset.history || '[]');
-              drawNetDepthChart(canvas, history);
-            }} catch (err) {{
-              console.error(err);
+        timeframeButtons.forEach((button) => {{
+          button.addEventListener('click', () => {{
+            const timeframe = button.dataset.timeframe;
+            if (!timeframe || timeframe === activeTimeframe) {{
+              return;
             }}
+            activeTimeframe = timeframe;
+            timeframeButtons.forEach((btn) => btn.classList.toggle('active', btn === button));
+            repaintCharts();
           }});
         }});
+        window.addEventListener('resize', repaintCharts);
         refresh();
         setInterval(refresh, 3000);
       }})();

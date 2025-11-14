@@ -31,6 +31,7 @@ from services.okx.catalog import (
     search_instrument_catalog,
 )
 from services.okx.live import fetch_account_snapshot
+from services.webapp import prompt_templates
 from services.webapp.dependencies import get_account_repository, get_portfolio_registry
 
 try:  # optional during tests
@@ -474,6 +475,16 @@ def update_model_config(model_id: str, *, enabled: bool, api_key: str | None) ->
         return dict(record)
 
 
+def get_prompt_template_text() -> str:
+    """Fetch the current AI prompt template."""
+    return prompt_templates.get_prompt_template()
+
+
+def update_prompt_template_text(new_text: str) -> str:
+    """Persist a new AI prompt template."""
+    return prompt_templates.save_prompt_template(new_text)
+
+
 @router.get(
     "/api/settings/pipeline",
     summary="Retrieve current pipeline configuration (interval + instruments)",
@@ -727,53 +738,67 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
     """Return latest order book snapshots for configured instruments."""
     instrument_filter = (instrument or "").strip().upper()
     fetch_limit = max(1, max(levels, len(TRADABLE_INSTRUMENTS)))
-    history_cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=1)
-    max_history_points = 1200
+    history_window_hours = 4
+    history_cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=history_window_hours)
+    max_history_points = history_window_hours * 1200
+    lookback_hours = max(history_window_hours + 1, 2)
+
+    def _normalize_timestamp(value: object) -> tuple[datetime | None, str]:
+        ts = value
+        if isinstance(value, str):
+            try:
+                ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                ts = None
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return ts, ts.isoformat()
+        if isinstance(value, datetime) and value.tzinfo is not None:
+            return value, value.isoformat()
+        if value is None:
+            return None, ""
+        return None, str(value)
+
+    def _prune_history(entries: list[dict]) -> None:
+        entries[:] = [
+            entry
+            for entry in entries
+            if not isinstance(entry.get("_ts"), datetime) or entry["_ts"] >= history_cutoff
+        ]
+        if len(entries) > max_history_points:
+            del entries[: len(entries) - max_history_points]
+
     records = _query_influx_measurement(
         measurement="okx_orderbook_depth",
         limit=fetch_limit * 2,
         instrument=instrument_filter or None,
-        lookback="2h",
+        lookback=f"{lookback_hours}h",
     )
     seen: set[str] = set()
-    items: list[dict] = []
     history_map: dict[str, list[dict]] = {}
+    items_by_symbol: dict[str, dict] = {}
     for row in records:
         inst_id = (row.get("instrument_id") or "").upper()
         if not inst_id:
             continue
-        timestamp = row.get("_time")
-        ts = timestamp
-        if isinstance(timestamp, str):
-            try:
-                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            except ValueError:
-                ts = None
-        if isinstance(ts, datetime) and ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+        ts, ts_iso = _normalize_timestamp(row.get("_time"))
         bids_raw = row.get("bids_json") or "[]"
         asks_raw = row.get("asks_json") or "[]"
         total_bid_qty = _coerce_float(row.get("total_bid_qty"))
         total_ask_qty = _coerce_float(row.get("total_ask_qty"))
-        net_depth = None
+        net_depth = _coerce_float(row.get("net_depth"))
         if total_bid_qty is not None and total_ask_qty is not None:
-            net_depth = total_bid_qty - total_ask_qty
+            net_depth = net_depth if net_depth is not None else total_bid_qty - total_ask_qty
         hist_entry = {
-            "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
+            "timestamp": ts_iso,
             "net_depth": net_depth,
         }
         if isinstance(ts, datetime):
             hist_entry["_ts"] = ts
         history_list = history_map.setdefault(inst_id, [])
-        history_list.append(hist_entry)
-        if isinstance(ts, datetime):
-            history_list[:] = [
-                entry
-                for entry in history_list
-                if not isinstance(entry.get("_ts"), datetime) or entry["_ts"] >= history_cutoff
-            ]
-        if len(history_list) > max_history_points:
-            del history_list[: len(history_list) - max_history_points]
+        history_list.insert(0, hist_entry)
+        _prune_history(history_list)
         if instrument_filter and inst_id != instrument_filter:
             continue
         if inst_id in seen:
@@ -790,25 +815,83 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
         raw_history = history_map.get(inst_id, [])
         history = [
             {"timestamp": entry["timestamp"], "net_depth": entry["net_depth"]}
-            for entry in reversed(raw_history)
+            for entry in raw_history
         ]
-        items.append(
-            {
-                "instrument_id": inst_id,
-                "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
-                "best_bid": _coerce_float(row.get("best_bid")),
-                "best_ask": _coerce_float(row.get("best_ask")),
-                "spread": _coerce_float(row.get("spread")),
-                "total_bid_qty": _coerce_float(row.get("total_bid_qty")),
-                "total_ask_qty": _coerce_float(row.get("total_ask_qty")),
-                "bids": bids[: max(1, levels)],
-                "asks": asks[: max(1, levels)],
+        items_by_symbol[inst_id] = {
+            "instrument_id": inst_id,
+            "timestamp": ts_iso,
+            "best_bid": _coerce_float(row.get("best_bid")),
+            "best_ask": _coerce_float(row.get("best_ask")),
+            "spread": _coerce_float(row.get("spread")),
+            "total_bid_qty": _coerce_float(row.get("total_bid_qty")),
+            "total_ask_qty": _coerce_float(row.get("total_ask_qty")),
+            "bids": bids[: max(1, levels)],
+            "asks": asks[: max(1, levels)],
+            "history": history,
+        }
+
+    missing_instruments: list[str] = []
+    if instrument_filter:
+        if instrument_filter not in items_by_symbol:
+            missing_instruments = [instrument_filter]
+    else:
+        desired = TRADABLE_INSTRUMENTS[: fetch_limit * 2]
+        missing_instruments = [inst for inst in desired if inst not in items_by_symbol]
+
+    for inst_id in missing_instruments:
+        live_items = _fetch_live_orderbooks(levels=levels, instrument_filter=inst_id)
+        for live in live_items:
+            symbol = (live.get("instrument_id") or inst_id or "").upper()
+            if not symbol:
+                continue
+            ts, ts_iso = _normalize_timestamp(live.get("timestamp"))
+            total_bid_qty = _coerce_float(live.get("total_bid_qty"))
+            total_ask_qty = _coerce_float(live.get("total_ask_qty"))
+            net_depth = _coerce_float(live.get("net_depth"))
+            if net_depth is None and total_bid_qty is not None and total_ask_qty is not None:
+                net_depth = total_bid_qty - total_ask_qty
+            history_list = history_map.setdefault(symbol, [])
+            hist_entry = {"timestamp": ts_iso, "net_depth": net_depth}
+            if isinstance(ts, datetime):
+                hist_entry["_ts"] = ts
+            history_list.append(hist_entry)
+            _prune_history(history_list)
+            history = [
+                {"timestamp": entry["timestamp"], "net_depth": entry["net_depth"]}
+                for entry in history_list
+            ]
+            items_by_symbol[symbol] = {
+                "instrument_id": symbol,
+                "timestamp": ts_iso,
+                "best_bid": _coerce_float(live.get("best_bid")),
+                "best_ask": _coerce_float(live.get("best_ask")),
+                "spread": _coerce_float(live.get("spread")),
+                "total_bid_qty": total_bid_qty,
+                "total_ask_qty": total_ask_qty,
+                "bids": live.get("bids", [])[: max(1, levels)],
+                "asks": live.get("asks", [])[: max(1, levels)],
                 "history": history,
             }
-        )
+
+    items = sorted(items_by_symbol.values(), key=lambda entry: entry["instrument_id"])
     if not items:
         items = _fetch_live_orderbooks(levels=levels, instrument_filter=instrument_filter)
-    items.sort(key=lambda entry: entry["instrument_id"])
+        for item in items:
+            symbol = (item.get("instrument_id") or "").upper()
+            if not symbol:
+                continue
+            ts, ts_iso = _normalize_timestamp(item.get("timestamp"))
+            total_bid_qty = _coerce_float(item.get("total_bid_qty"))
+            total_ask_qty = _coerce_float(item.get("total_ask_qty"))
+            net_depth = None
+            if total_bid_qty is not None and total_ask_qty is not None:
+                net_depth = total_bid_qty - total_ask_qty
+            history = []
+            if net_depth is not None:
+                history = [{"timestamp": ts_iso, "net_depth": net_depth}]
+            item["timestamp"] = ts_iso
+            item["history"] = history
+
     return {
         "instrument": instrument_filter,
         "levels": max(1, levels),

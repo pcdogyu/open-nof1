@@ -153,6 +153,7 @@ class InfluxWriter:
         best_ask = asks_list[0][0] if asks_list else None
         total_bid = sum(level[1] for level in bids_list) if bids_list else 0.0
         total_ask = sum(level[1] for level in asks_list) if asks_list else 0.0
+        net_depth = total_bid - total_ask
         spread = None
         if best_bid is not None and best_ask is not None:
             spread = best_ask - best_bid
@@ -161,6 +162,7 @@ class InfluxWriter:
             .tag("instrument_id", instrument_id)
             .field("total_bid_qty", float(total_bid))
             .field("total_ask_qty", float(total_ask))
+            .field("net_depth", float(net_depth))
         )
         if best_bid is not None:
             point = point.field("best_bid", float(best_bid))

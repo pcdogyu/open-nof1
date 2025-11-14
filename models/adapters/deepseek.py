@@ -1,6 +1,9 @@
 """
 DeepSeek model adapter for trading signal generation.
 
+Implements the JSON response workflow described in the official docs:
+https://api-docs.deepseek.com/zh-cn/
+
 Supports both offline heuristic mode (no API key) and live mode using the
 DeepSeek API when `DEEPSEEK_API_KEY` is set.
 """
@@ -19,6 +22,7 @@ from models.schemas import SignalRequest, SignalResponse
 from models.utils import clamp_confidence, deterministic_decision
 
 DEEPSEEK_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v3.2-exp"
 
 
 class DeepSeekAdapter(BaseModelAdapter):
@@ -27,7 +31,7 @@ class DeepSeekAdapter(BaseModelAdapter):
     def __init__(
         self,
         *,
-        model: str = "deepseek-trading-001",
+        model: str = DEFAULT_DEEPSEEK_MODEL,
         temperature: float = 0.2,
         api_key: str | None = None,
         timeout: float = 30.0,
@@ -59,6 +63,7 @@ class DeepSeekAdapter(BaseModelAdapter):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
         }
         response = await self._client.post(
             DEEPSEEK_ENDPOINT, headers=headers, json=payload

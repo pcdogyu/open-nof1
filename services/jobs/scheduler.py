@@ -487,6 +487,14 @@ def _build_signal_request(
     for key in ("funding_rate", "orderbook_imbalance", "cvd"):
         if key in features:
             risk_context.notes[key] = features[key]
+    if features.get("liq_net_qty") is not None:
+        risk_context.notes["liquidation_net_qty"] = features["liq_net_qty"]
+    if features.get("orderbook_net_depth") is not None:
+        risk_context.notes["orderbook_net_depth"] = features["orderbook_net_depth"]
+    if features.get("15m_close_price") is not None:
+        risk_context.notes["recent_close_price"] = features["15m_close_price"]
+    if features.get("15m_volume_sum") is not None:
+        risk_context.notes["recent_volume_sum"] = features["15m_volume_sum"]
 
     market_snapshot = MarketSnapshot(
         instrument_id=instrument,
@@ -496,6 +504,7 @@ def _build_signal_request(
         metadata={
             "source": "scheduler",
             "account_id": account.account_id,
+            "ai_cycle_seconds": _AI_INTERVAL,
             **{k: v for k, v in features.items() if v is not None},
         },
     )
@@ -506,7 +515,10 @@ def _build_signal_request(
         risk=risk_context,
         positions=_summarize_positions_for_ai(positions),
         strategy_hint=meta.get("strategy_hint"),
-        metadata={"account_id": account.account_id},
+        metadata={
+            "account_id": account.account_id,
+            "ai_cycle_seconds": _AI_INTERVAL,
+        },
     )
 
 
@@ -607,10 +619,36 @@ from(bucket: "{config.bucket}")
   |> filter(fn: (r) => r["timeframe"] == "15m")
   |> last()
 """
+        liquidation_query = f"""
+from(bucket: "{config.bucket}")
+  |> range(start: -30m)
+  |> filter(fn: (r) => r["_measurement"] == "okx_liquidations")
+  |> filter(fn: (r) => r["instrument_id"] == "{instrument_id}")
+  |> last()
+"""
+        orderbook_query = f"""
+from(bucket: "{config.bucket}")
+  |> range(start: -10m)
+  |> filter(fn: (r) => r["_measurement"] == "okx_orderbook_depth")
+  |> filter(fn: (r) => r["instrument_id"] == "{instrument_id}")
+  |> last()
+"""
         features = _flux_tables_to_dict(query_api.query(micro_query))
         indicator_vals = _flux_tables_to_dict(query_api.query(indicator_query))
         for key, value in indicator_vals.items():
             features[f"15m_{key}"] = value
+        features.update(_flux_tables_to_dict(query_api.query(liquidation_query), prefix="liq_"))
+        features.update(_flux_tables_to_dict(query_api.query(orderbook_query), prefix="orderbook_"))
+
+        bid_depth = features.get("orderbook_total_bid_qty")
+        ask_depth = features.get("orderbook_total_ask_qty")
+        if features.get("orderbook_net_depth") is None and bid_depth is not None and ask_depth is not None:
+            features["orderbook_net_depth"] = bid_depth - ask_depth
+
+        net_liq = features.get("liq_net_qty")
+        liq_price = features.get("liq_last_price")
+        if net_liq is not None and liq_price is not None:
+            features.setdefault("liq_notional", abs(net_liq) * liq_price)
         return features
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Failed to load market features for %s: %s", instrument_id, exc)
@@ -635,7 +673,7 @@ def _get_feature_query_api() -> Tuple[Optional[object], Optional["InfluxConfig"]
     return _FEATURE_CLIENT.query_api(), _FEATURE_CONFIG
 
 
-def _flux_tables_to_dict(tables: Iterable[object]) -> Dict[str, float]:
+def _flux_tables_to_dict(tables: Iterable[object], *, prefix: str = "") -> Dict[str, float]:
     values: Dict[str, float] = {}
     if tables is None:
         return values
@@ -650,7 +688,8 @@ def _flux_tables_to_dict(tables: Iterable[object]) -> Dict[str, float]:
                 continue
             numeric = _try_float(value)
             if numeric is not None:
-                values[field] = numeric
+                key = f"{prefix}{field}" if prefix else field
+                values[key] = numeric
     return values
 
 

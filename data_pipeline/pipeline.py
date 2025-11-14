@@ -142,6 +142,7 @@ class MarketDataPipeline:
                     "macd_hist": indicator.macd_hist,
                     "rsi": indicator.rsi,
                     "realized_vol": indicator.realized_volatility,
+                    "close_price": indicator.close_price,
                     **volume_stats,
                 }
                 self.influx_writer.write_indicator_set(

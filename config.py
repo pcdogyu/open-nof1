@@ -18,7 +18,6 @@ INFLUX_PASSWORD = "Admin123"
 
 # Supported OKX swap instruments for the default pipeline run.
 TRADABLE_INSTRUMENTS = [   'XRP-USDT-SWAP',
-    'BNB-USDT-SWAP',
     'BTC-USDT-SWAP',
     'ETH-USDT-SWAP',
     'SOL-USDT-SWAP',
@@ -34,7 +33,7 @@ OKX_CACHE_TTL_SECONDS = 600
 
 # Scheduler defaults (seconds)
 MARKET_SYNC_INTERVAL = 60
-AI_INTERACTION_INTERVAL = 300
+AI_INTERACTION_INTERVAL = 900
 
 # OKX demo accounts (API keys / secrets / passphrases).
 # Populate secrets/passphrases when available.
@@ -56,7 +55,7 @@ DEEPSEEK_API_KEY = "sk-1234567890"
 QWEN_API_KEY = "QW-1234567890"
 
 # Default model management metadata used by the web dashboard.
-MODEL_DEFAULTS = {   'deepseek-v1': {   'display_name': 'DeepSeek 交易模型',
+MODEL_DEFAULTS = {   'deepseek-v1': {   'display_name': 'DeepSeek V3.2-Exp',
                        'provider': 'DeepSeek',
                        'enabled': True,
                        'api_key': 'sk-1234567890'},
