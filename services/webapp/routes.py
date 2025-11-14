@@ -203,6 +203,7 @@ def get_scheduler_settings() -> dict:
             "market_interval": int(_SCHEDULER_SETTINGS["market_interval"]),
             "ai_interval": int(_SCHEDULER_SETTINGS["ai_interval"]),
             "updated_at": _SCHEDULER_SETTINGS["updated_at"],
+            "execution_log": scheduler_module.get_execution_log(limit=25),
         }
 
 

@@ -1290,6 +1290,17 @@ SCHEDULER_TEMPLATE = r"""
         .hint {{ color: #94a3b8; font-size: 0.85rem; margin-top: -6px; }}
         .meta {{ margin-top: 20px; font-size: 0.85rem; color: #64748b; }}
         .timestamp {{ color: #38bdf8; }}
+        .log-card {{ max-width: 960px; margin-top: 26px; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+        th, td {{ padding: 10px 14px; border-bottom: 1px solid rgba(226, 232, 240, 0.08); text-align: left; font-size: 0.9rem; }}
+        th {{ color: #a5b4fc; font-weight: 600; background-color: rgba(15, 23, 42, 0.6); }}
+        tr:nth-child(even) {{ background-color: rgba(15, 23, 42, 0.35); }}
+        .status-pill {{ padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; }}
+        .status-success {{ background: rgba(34, 197, 94, 0.2); color: #4ade80; }}
+        .status-warning {{ background: rgba(251, 191, 36, 0.2); color: #facc15; }}
+        .status-error {{ background: rgba(248, 113, 113, 0.2); color: #f87171; }}
+        .status-skipped {{ background: rgba(148, 163, 184, 0.2); color: #cbd5f5; }}
+        .empty-state {{ text-align: center; color: #94a3b8; padding: 14px 0; }}
         @media (max-width: 600px) {{
             .card {{ width: 100%; padding: 18px; }}
             button {{ width: 100%; }}
@@ -1327,6 +1338,22 @@ SCHEDULER_TEMPLATE = r"""
         <div class="meta">
             最近更新：<span class="timestamp">{updated_at}</span>
         </div>
+    </section>
+    <section class="card log-card">
+        <h2>最近执行记录</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>任务</th>
+                    <th>状态</th>
+                    <th>描述信息</th>
+                </tr>
+            </thead>
+            <tbody>
+                {log_rows}
+            </tbody>
+        </table>
     </section>
 </body>
 </html>
@@ -1433,10 +1460,40 @@ PROMPT_EDITOR_TEMPLATE = r"""
 def _render_scheduler_page(settings: dict) -> str:
     esc = _escape
     updated_at = _format_asia_shanghai(settings.get("updated_at"))
+    job_labels = {
+        "market": "行情采集",
+        "ai": "AI 交互",
+        "analytics": "指标刷新",
+    }
+    status_labels = {
+        "success": "成功",
+        "warning": "部分成功",
+        "error": "失败",
+        "skipped": "跳过",
+    }
+    log_rows: list[str] = []
+    for entry in settings.get("execution_log") or []:
+        timestamp = esc(_format_asia_shanghai(entry.get("timestamp")))
+        job = esc(job_labels.get(entry.get("job"), entry.get("job") or "--"))
+        status_key = str(entry.get("status") or "unknown")
+        status_text = esc(status_labels.get(status_key, status_key))
+        status_class = f"status-{status_key}"
+        detail = esc(entry.get("detail") or "--")
+        log_rows.append(
+            "<tr>"
+            f"<td>{timestamp}</td>"
+            f"<td>{job}</td>"
+            f"<td><span class=\"status-pill {status_class}\">{status_text}</span></td>"
+            f"<td>{detail}</td>"
+            "</tr>"
+        )
+    if not log_rows:
+        log_rows.append("<tr><td colspan='4' class='empty-state'>暂无执行记录</td></tr>")
     return SCHEDULER_TEMPLATE.format(
         market_interval=esc(settings.get("market_interval")),
         ai_interval=esc(settings.get("ai_interval")),
         updated_at=esc(updated_at),
+        log_rows="\n".join(log_rows),
     )
 
 

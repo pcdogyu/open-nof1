@@ -22,7 +22,9 @@ from models.schemas import SignalRequest, SignalResponse
 from models.utils import clamp_confidence, deterministic_decision
 
 DEEPSEEK_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v3.2-exp"
+# Use the DeepSeek-V3.2-Exp reasoning mode as exposed through the `deepseek-reasoner` model.
+DEFAULT_DEEPSEEK_MODEL = "deepseek-reasoner"
+_REASONING_BUDGET_TOKENS = 1024
 
 
 class DeepSeekAdapter(BaseModelAdapter):
@@ -60,6 +62,8 @@ class DeepSeekAdapter(BaseModelAdapter):
             ],
             "response_format": {"type": "json_object"},
         }
+        if self.remote_model.endswith("reasoner"):
+            payload["reasoning"] = {"budget_tokens": _REASONING_BUDGET_TOKENS}
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -71,10 +75,14 @@ class DeepSeekAdapter(BaseModelAdapter):
         response.raise_for_status()
         data = response.json()
         try:
-            content = data["choices"][0]["message"]["content"]
+            message = data["choices"][0]["message"]
+            content = message["content"]
             raw = json.loads(content)
         except (KeyError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"DeepSeek response parse error: {exc}") from exc
+        reasoning_content = message.get("reasoning_content")
+        if reasoning_content:
+            raw.setdefault("reasoning_details", reasoning_content)
         raw["provider"] = "deepseek"
         raw["model"] = self.remote_model
         raw["usage"] = data.get("usage", {})

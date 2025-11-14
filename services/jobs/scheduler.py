@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -87,6 +88,7 @@ _PIPELINE_SETTINGS = PipelineSettings(
     signal_log_path=Path("data/logs/ai_signals_scheduler.jsonl"),
 )
 _PIPELINE: Optional[MarketDataPipeline] = None
+_EXECUTION_LOG = deque(maxlen=100)
 
 
 def _get_pipeline() -> MarketDataPipeline:
@@ -110,6 +112,22 @@ def _close_pipeline() -> None:
             loop.run_until_complete(pipeline.aclose())
     except RuntimeError:
         asyncio.run(pipeline.aclose())
+
+
+def _append_execution_log(job: str, status: str, detail: str | None = None) -> None:
+    _EXECUTION_LOG.appendleft(
+        {
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "job": job,
+            "status": status,
+            "detail": detail or "",
+        }
+    )
+
+
+def get_execution_log(limit: int = 20) -> List[dict]:
+    """Return a snapshot of recent scheduler job executions."""
+    return list(_EXECUTION_LOG)[:limit]
 
 
 def refresh_pipeline(instruments: Sequence[str]) -> None:
@@ -236,6 +254,7 @@ def _refresh_metrics_job() -> None:
 async def _market_data_ingestion_job() -> None:
     if not TRADABLE_INSTRUMENTS:
         logger.debug("No tradable instruments configured; skipping market ingestion job.")
+        _append_execution_log("market", "skipped", "未配置可交易合约")
         return
     pipeline = _get_pipeline()
     try:
@@ -247,16 +266,31 @@ async def _market_data_ingestion_job() -> None:
             len(result.feature_snapshots),
             len(result.signals),
         )
+        instruments = ", ".join(sorted(result.feature_snapshots.keys()))
+        signal_snippets: list[str] = []
+        for record in result.signals[:10]:
+            snippet = f"{record.instrument_id}:{record.model_id}={record.decision}"
+            signal_snippets.append(snippet)
+        if len(result.signals) > 10:
+            signal_snippets.append("...")
+        signal_desc = "；".join(signal_snippets) if signal_snippets else "未生成信号"
+        detail = (
+            f"{len(result.feature_snapshots)} 个合约（{instruments or 'n/a'}），"
+            f"{len(result.signals)} 条信号（{signal_desc}）"
+        )
+        _append_execution_log("market", "success", detail)
     except Exception as exc:
         logger.warning("Market ingestion job failed: %s", exc)
+        _append_execution_log("market", "error", str(exc))
 
 
 async def _execute_model_workflow_job() -> None:
     """
-    Drive the signal → routing → risk → execution loop for configured accounts.
+    Drive the signal �� routing �� risk �� execution loop for configured accounts.
     """
     if not OKX_ACCOUNTS:
         logger.debug("No OKX accounts configured; skipping execution job.")
+        _append_execution_log("ai", "skipped", "未配置 OKX 账户")
         return
 
     repository = get_account_repository()
@@ -270,31 +304,45 @@ async def _execute_model_workflow_job() -> None:
     validator = BasicOrderValidator(
         instrument_allowlist=set(TRADABLE_INSTRUMENTS) if TRADABLE_INSTRUMENTS else None
     )
+    processed_accounts = 0
+    submitted_orders = 0
+    errors = 0
 
-    async with SignalRuntime() as runtime:
-        for account_key, meta in OKX_ACCOUNTS.items():
-            if not meta.get("enabled", True):
-                logger.debug("Account %s disabled via config; skipping", account_key)
-                continue
-            model_id = meta.get("model_id")
-            if not model_id:
-                logger.warning("OKX account %s missing model_id; skipping", account_key)
-                continue
-            try:
-                await _process_account_signal(
-                    account_key=account_key,
-                    meta=meta,
-                    runtime=runtime,
-                    router=router,
-                    validator=validator,
-                    risk_engine=risk_engine,
-                    repository=repository,
-                )
-            except OrderValidationError as exc:
-                logger.info("Order validation failed for %s: %s", account_key, exc)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.exception("Execution pipeline failed for %s: %s", account_key, exc)
-
+    try:
+        async with SignalRuntime() as runtime:
+            for account_key, meta in OKX_ACCOUNTS.items():
+                if not meta.get("enabled", True):
+                    logger.debug("Account %s disabled via config; skipping", account_key)
+                    continue
+                model_id = meta.get("model_id")
+                if not model_id:
+                    logger.warning("OKX account %s missing model_id; skipping", account_key)
+                    continue
+                processed_accounts += 1
+                try:
+                    order_submitted = await _process_account_signal(
+                        account_key=account_key,
+                        meta=meta,
+                        runtime=runtime,
+                        router=router,
+                        validator=validator,
+                        risk_engine=risk_engine,
+                        repository=repository,
+                    )
+                    if order_submitted:
+                        submitted_orders += 1
+                except OrderValidationError as exc:
+                    errors += 1
+                    logger.info("Order validation failed for %s: %s", account_key, exc)
+                except Exception as exc:  # pragma: no cover - defensive
+                    errors += 1
+                    logger.exception("Execution pipeline failed for %s: %s", account_key, exc)
+        status = "success" if errors == 0 else "warning"
+        detail = f"处理 {processed_accounts} 个账户，提交 {submitted_orders} 个订单，错误 {errors} 次"
+        _append_execution_log("ai", status, detail)
+    except Exception as exc:
+        logger.exception("Execution job fatal error: %s", exc)
+        _append_execution_log("ai", "error", str(exc))
 
 async def _process_account_signal(
     *,
@@ -305,10 +353,10 @@ async def _process_account_signal(
     validator: BasicOrderValidator,
     risk_engine: RiskEngine,
     repository: AccountRepository,
-) -> None:
+) -> bool:
     snapshot = await asyncio.to_thread(_collect_okx_snapshot, account_key, meta)
     if snapshot is None:
-        return
+        return False
     account, balances, positions, trades, open_orders, market_price = snapshot
 
     _persist_snapshot(
@@ -329,7 +377,7 @@ async def _process_account_signal(
     )
     if request is None:
         logger.debug("Unable to build signal request for %s; skipping", account_key)
-        return
+        return False
 
     response = await runtime.generate_signal(request)
     routed = router.route(
@@ -341,7 +389,7 @@ async def _process_account_signal(
     )
     if not routed:
         logger.debug("Router did not produce executable order for %s", account_key)
-        return
+        return False
 
     ensure_valid_order(routed.intent, [validator])
 
@@ -352,11 +400,11 @@ async def _process_account_signal(
             account_key,
             [violation.message for violation in evaluation.violations],
         )
-        return
+        return False
 
     execution_result = await asyncio.to_thread(_place_order, meta, routed.intent)
     if execution_result is None:
-        return
+        return False
 
     _record_submitted_order(repository, routed, execution_result)
     logger.info(
@@ -367,6 +415,7 @@ async def _process_account_signal(
         routed.intent.size,
         routed.intent.price or "MKT",
     )
+    return True
 
 
 def _collect_okx_snapshot(
