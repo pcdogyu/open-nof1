@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import pprint
+import base64
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,6 +46,7 @@ except ImportError:  # pragma: no cover
         logger.debug("websocket instrumentation unavailable; skipping stream update.")
 
 CONFIG_PATH = Path("config.py")
+MARKET_DEPTH_ATTACHMENT_DIR = Path("data/attachments/market_depth")
 
 try:
     from config import (
@@ -889,6 +891,43 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
     }
 
 
+def get_market_depth_attachments(limit: int = 6) -> list[dict]:
+    """Return recent market depth screenshot attachments as data URLs."""
+    directory = MARKET_DEPTH_ATTACHMENT_DIR
+    if not directory.exists():
+        return []
+    allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    entries: list[dict] = []
+    try:
+        files = sorted(
+            [path for path in directory.iterdir() if path.is_file()],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return []
+    for path in files:
+        if path.suffix.lower() not in allowed:
+            continue
+        try:
+            data = path.read_bytes()
+            stat = path.stat()
+        except OSError:
+            continue
+        mime = _guess_mime_from_suffix(path.suffix.lower())
+        encoded = base64.b64encode(data).decode("ascii")
+        entries.append(
+            {
+                "filename": path.name,
+                "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                "data_url": f"data:{mime};base64,{encoded}",
+            }
+        )
+        if len(entries) >= max(1, limit):
+            break
+    return entries
+
+
 def _persist_live_snapshot(
     repo: AccountRepository,
     live: dict,
@@ -1412,3 +1451,14 @@ def _replace_config_assignment(var_name: str, value: object) -> None:
     replacement_lines = formatted.splitlines()
     lines[start:end] = replacement_lines
     CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _guess_mime_from_suffix(suffix: str) -> str:
+    lookup = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }
+    return lookup.get(suffix.lower(), "image/png")

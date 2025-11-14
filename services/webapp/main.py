@@ -84,18 +84,12 @@ def liquidation_dashboard(request: Request) -> HTMLResponse:
     return HTMLResponse(content=_render_liquidation_page(snapshot, instruments))
 
 
-@app.get("/orderbook", include_in_schema=False, response_class=HTMLResponse)
-def orderbook_dashboard(request: Request) -> HTMLResponse:
-    instrument = request.query_params.get("instrument")
-    levels_param = request.query_params.get("levels", "50")
-    try:
-        levels = max(1, min(int(levels_param), 400))
-    except ValueError:
-        levels = 50
-    snapshot = routes.get_orderbook_snapshot(levels=levels, instrument=instrument)
+@app.get("/liquidation-map", include_in_schema=False, response_class=HTMLResponse)
+def liquidation_map_dashboard() -> HTMLResponse:
+    attachments = routes.get_market_depth_attachments(limit=12)
     settings = routes.get_pipeline_settings()
     instruments = settings.get("tradable_instruments", [])
-    return HTMLResponse(content=_render_orderbook_page(snapshot, instruments, levels))
+    return HTMLResponse(content=_render_liquidation_map_page(attachments, instruments))
 
 
 @app.get("/settings", include_in_schema=False, response_class=HTMLResponse)
@@ -437,22 +431,14 @@ def _render_liquidation_page(snapshot: dict, instruments: Sequence[str]) -> str:
     )
 
 
-def _render_orderbook_page(snapshot: dict, instruments: Sequence[str], levels: int) -> str:
-    esc = _escape
-    instrument_options = _build_instrument_options(instruments, snapshot.get("instrument"))
-    level_options = _build_depth_options(levels)
-    items = snapshot.get("items") or []
-    cards = _render_orderbook_cards(items, levels)
-    grid_class = "book-grid two-cols" if items and len(items) <= 2 else "book-grid"
-    default_smoothing = 2
-    return ORDERBOOK_TEMPLATE.format(
+def _render_liquidation_map_page(attachments: Sequence[dict], instruments: Sequence[str]) -> str:
+    gallery = _render_market_depth_attachments(attachments)
+    instrument_options = _build_instrument_options(instruments, None)
+    level_options = _build_depth_options(50)
+    return LIQUIDATION_MAP_TEMPLATE.format(
+        attachment_gallery=gallery,
         instrument_options=instrument_options,
         level_options=level_options,
-        updated_at=esc(_format_asia_shanghai(snapshot.get("updated_at"))),
-        cards=cards,
-        levels=levels,
-        book_grid_class=grid_class,
-        smooth_seconds=default_smoothing,
     )
 
 
@@ -671,18 +657,6 @@ def _build_instrument_options(instruments: Sequence[str], selected: Optional[str
     return "\n".join(options)
 
 
-def _build_depth_options(selected: int) -> str:
-    choices = (5, 10, 20, 50, 400)
-    sanitized = max(1, selected)
-    rendered: list[str] = []
-    for value in choices:
-        selected_attr = " selected" if value == sanitized else ""
-        rendered.append(f'<option value="{value}"{selected_attr}>{value} 档</option>')
-    if sanitized not in choices:
-        rendered.append(f'<option value="{sanitized}" selected>{sanitized} 档</option>')
-    return "\n".join(rendered)
-
-
 def _render_liquidation_rows(items: Sequence[dict]) -> str:
     esc = _escape
     rows: list[str] = []
@@ -703,20 +677,24 @@ def _render_liquidation_rows(items: Sequence[dict]) -> str:
     return "\n".join(rows)
 
 
-def _render_orderbook_cards(items: Sequence[dict], levels: int) -> str:
-    _ = items, levels
-    return "<p class='empty-state'>加载市场深度...</p>"
-
-    return "\n".join(cards)
-
-    return "\n".join(cards)
-
-    return "\n".join(cards)
-
-    return "\n".join(cards)
-
-    return "\n".join(cards)
-
+def _render_market_depth_attachments(attachments: Sequence[dict]) -> str:
+    esc = _escape
+    if not attachments:
+        return "<p class='empty-state attachment-empty'>暂无市场深度截图，可将 PNG/JPG 文件放入 data/attachments/market_depth 目录。</p>"
+    cards: list[str] = []
+    for entry in attachments:
+        data_url = entry.get("data_url") or ""
+        filename = esc(entry.get("filename") or "--")
+        updated = esc(_format_asia_shanghai(entry.get("updated_at")))
+        if not data_url:
+            continue
+        cards.append(
+            "<figure class='attachment-card'>"
+            f"<img src=\"{data_url}\" alt=\"{filename}\" />"
+            f"<figcaption><strong>{filename}</strong><span>{updated}</span></figcaption>"
+            "</figure>"
+        )
+    return "<div class='attachment-gallery'>{}</div>".format("".join(cards))
 
 
 def _format_order(order: dict | None, *, hold_action: bool = False) -> str:
@@ -828,7 +806,7 @@ HTML_TEMPLATE = r"""
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
@@ -932,7 +910,7 @@ MODEL_MANAGER_TEMPLATE = r"""
         <a href="/models" class="nav-link active">模型管理</a>
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
@@ -1007,7 +985,7 @@ SETTINGS_TEMPLATE = r"""
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/settings" class="nav-link active">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
@@ -1088,7 +1066,7 @@ OKX_TEMPLATE = r"""
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link active">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
@@ -1157,7 +1135,7 @@ SCHEDULER_TEMPLATE = r"""
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link active">调度器</a>
     </nav>
@@ -1234,7 +1212,7 @@ LIQUIDATION_TEMPLATE = r"""
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link active">爆仓监控</a>
-        <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
@@ -1323,49 +1301,39 @@ LIQUIDATION_TEMPLATE = r"""
 """
 
 
-ORDERBOOK_TEMPLATE = r"""
+LIQUIDATION_MAP_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 市场深度</title>
+    <title>open-nof1.ai 清算地图</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background: #38bdf8; color: #0f172a; }}
-        h1 {{ margin-bottom: 1rem; }}
-        .controls {{ display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 1rem; }}
+        h1 {{ margin-bottom: 0.5rem; }}
+        .intro {{ margin: 0 0 1rem; color: #94a3b8; line-height: 1.6; max-width: 960px; }}
+        .controls {{ display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 1rem; }}
         .controls label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
         select {{ min-width: 160px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; padding: 8px 10px; }}
-        .controls input[type="number"] {{ min-width: 120px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; padding: 8px 10px; }}
-        .book-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 20px; align-items: stretch; width: 98vw; margin: 0 auto; }}
-        .book-grid.two-cols {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; width: 98vw; }}
-        @media (max-width: 1024px) {{ .book-grid.two-cols {{ grid-template-columns: 1fr; }} }}
-        .orderbook-chart {{ background: #0f1b2d; border-radius: 16px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.15); display: flex; flex-direction: column; gap: 14px; width: 100%; }}
-        .orderbook-chart.tone-positive {{ border-color: rgba(74, 222, 128, 0.4); }}
-        .orderbook-chart.tone-negative {{ border-color: rgba(248, 113, 113, 0.35); }}
-        .orderbook-chart.tone-neutral {{ border-color: rgba(59, 130, 246, 0.25); }}
-        .chart-header {{ display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }}
-        .chart-header h2 {{ margin: 0; font-size: 1.15rem; }}
-        .chart-header small {{ display: block; font-size: 0.8rem; color: #94a3b8; margin-top: 4px; }}
-        .chart-prices {{ width: 100%; display: flex; flex-direction: column; gap: 12px; font-size: 1rem; color: #f8fafc; }}
-        .chart-price-group {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; width: 100%; }}
-        .chart-prices span {{ background: rgba(248, 250, 252, 0.08); padding: 8px 14px; border-radius: 12px; text-align: center; }}
-        .chart-prices span.mid {{ background: rgba(59, 130, 246, 0.18); color: #bfdbfe; }}
-        .chart-stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; font-size: 0.9rem; color: #cbd5f5; width: 100%; }}
-        .chart-stats .stat-pill {{ background: rgba(148, 163, 184, 0.1); padding: 8px 12px; border-radius: 12px; text-align: center; }}
-        .chart-stats .stat-accent {{ background: rgba(34, 197, 94, 0.28); border: 1px solid rgba(34, 197, 94, 0.45); color: #dcfce7; font-weight: 600; }}
-        .chart-canvases {{ display: flex; flex-direction: column; gap: 16px; width: 100%; }}
-        .chart-block {{ background: rgba(15, 23, 42, 0.55); border: 1px solid rgba(148, 163, 184, 0.12); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }}
-        .chart-block h3 {{ margin: 0; font-size: 0.9rem; color: #cbd5f5; }}
-        .chart-canvas {{ width: 100%; height: 220px; }}
-        .chart-insight {{ margin: 0; font-size: 0.9rem; color: #e2e8f0; }}
-        .chart-insight.positive {{ color: #4ade80; }}
-        .chart-insight.negative {{ color: #f87171; }}
-        .chart-insight.neutral {{ color: #94a3b8; }}
-        .section-heading {{ margin: 0 0 1rem; font-size: 1.25rem; color: #e2e8f0; }}
-        .empty-state {{ color: #94a3b8; padding: 16px; text-align: center; }}
+        .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 1rem; }}
+        .stat-card {{ background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 4px; }}
+        .stat-card span.label {{ color: #94a3b8; font-size: 0.85rem; }}
+        .stat-card strong {{ font-size: 1.1rem; }}
+        .chart-shell {{ background: #0b1526; border-radius: 16px; border: 1px solid rgba(148, 163, 184, 0.25); padding: 16px; margin-bottom: 1.5rem; }}
+        .chart-shell header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }}
+        .chart-shell canvas {{ width: 100%; height: 360px; background: rgba(15, 23, 42, 0.75); border-radius: 12px; }}
+        .chart-shell small {{ color: #94a3b8; }}
+        .attachment-section {{ background: rgba(15, 23, 42, 0.55); border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 18px; padding: 18px 20px; margin-bottom: 1.5rem; }}
+        .attachment-section h2 {{ margin: 0 0 0.5rem; font-size: 1.15rem; }}
+        .attachment-section p.helper {{ margin: 0 0 1rem; color: #94a3b8; font-size: 0.85rem; }}
+        .attachment-gallery {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }}
+        .attachment-card {{ margin: 0; background: #0b1526; border-radius: 12px; overflow: hidden; border: 1px solid rgba(148, 163, 184, 0.25); display: flex; flex-direction: column; }}
+        .attachment-card img {{ width: 100%; height: auto; display: block; }}
+        .attachment-card figcaption {{ padding: 10px 12px; font-size: 0.85rem; color: #e2e8f0; display: flex; flex-direction: column; gap: 4px; }}
+        .attachment-card figcaption span {{ color: #94a3b8; font-size: 0.75rem; }}
+        .attachment-empty {{ color: #94a3b8; padding: 20px; border: 1px dashed rgba(148, 163, 184, 0.4); border-radius: 12px; background: rgba(15, 23, 42, 0.4); }}
     </style>
 </head>
 <body>
@@ -1374,44 +1342,71 @@ ORDERBOOK_TEMPLATE = r"""
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
-        <a href="/orderbook" class="nav-link active">市场深度</a>
+        <a href="/liquidation-map" class="nav-link active">清算地图</a>
         <a href="/settings" class="nav-link">策略配置</a>
         <a href="/scheduler" class="nav-link">调度器</a>
     </nav>
-    <h1>OKX 市场深度</h1>
+    <h1>OKX 清算地图</h1>
+    <p class="intro">
+        实时订阅 OKX 市场深度，横轴为价格（由左至右递增），纵轴为数量（由下至上递增），以柱状图展示未成交买卖挂单堆积情况。
+    </p>
     <div class="controls">
         <label>选择合约
-            <select id="orderbook-instrument">
+            <select id="instrument-select">
                 {instrument_options}
             </select>
         </label>
         <label>分析档位
-            <select id="depth-levels">
+            <select id="level-select">
                 {level_options}
             </select>
         </label>
-        <label>净深度平滑（秒）
-            <input id="smooth-seconds" type="number" min="0" max="30" value="{smooth_seconds}">
-        </label>
-        <span>最后更新：<span class="timestamp" id="orderbook-updated">{updated_at}</span></span>
+        <div>
+            <span>最后更新：<strong id="map-updated">--</strong></span>
+        </div>
     </div>
-    <div id="orderbook-container" class="{book_grid_class}">
-        {cards}
+    <div class="stats">
+        <div class="stat-card">
+            <span class="label">买盘深度</span>
+            <strong id="stat-bid-depth">--</strong>
+        </div>
+        <div class="stat-card">
+            <span class="label">卖盘深度</span>
+            <strong id="stat-ask-depth">--</strong>
+        </div>
+        <div class="stat-card">
+            <span class="label">净深度</span>
+            <strong id="stat-net-depth">--</strong>
+        </div>
+        <div class="stat-card">
+            <span class="label">点差</span>
+            <strong id="stat-spread">--</strong>
+        </div>
     </div>
+    <div class="chart-shell">
+        <header>
+            <strong id="chart-title">深度分布</strong>
+            <small>绿色为买盘、红色为卖盘；柱越高表示该价位挂单越多。</small>
+        </header>
+        <canvas id="depth-canvas" width="1200" height="360"></canvas>
+    </div>
+    <section class="attachment-section">
+        <h2>历史截图附件</h2>
+        <p class="helper">可将交易界面截屏（PNG / JPG / WebP / GIF）放入 <code>data/attachments/market_depth</code> 目录以便回顾。</p>
+        {attachment_gallery}
+    </section>
     <script>
       (function() {{
-        const instrumentSelect = document.getElementById('orderbook-instrument');
-        const levelSelect = document.getElementById('depth-levels');
-        const smoothInput = document.getElementById('smooth-seconds');
-        const DEFAULT_PAIRS = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP'];
-        const HISTORY_LIMIT = 1200;
-        const netDepthHistory = new Map();
-        const cvdHistory = new Map();
-        const BASE_GRID_CLASS = 'book-grid';
-        const DEFAULT_SMOOTH_SECONDS = Number(smoothInput?.value) || {smooth_seconds};
-        let netDepthDelayMs = DEFAULT_SMOOTH_SECONDS * 1000;
-        const pendingNetDepth = new Map();
-        const committedNetDepth = new Map();
+        const instrumentSelect = document.getElementById('instrument-select');
+        const levelSelect = document.getElementById('level-select');
+        const updatedLabel = document.getElementById('map-updated');
+        const bidDepthEl = document.getElementById('stat-bid-depth');
+        const askDepthEl = document.getElementById('stat-ask-depth');
+        const netDepthEl = document.getElementById('stat-net-depth');
+        const spreadEl = document.getElementById('stat-spread');
+        const titleEl = document.getElementById('chart-title');
+        const canvas = document.getElementById('depth-canvas');
+        const ctx = canvas.getContext('2d');
 
         const formatNumber = (value, digits = 2) => {{
           if (value === null || value === undefined || value === '') {{ return '--'; }}
@@ -1419,513 +1414,108 @@ ORDERBOOK_TEMPLATE = r"""
           if (!Number.isFinite(num)) {{ return '--'; }}
           return num.toFixed(digits);
         }};
-        const formatTimestamp = (value) => {{
-          if (!value) {{ return '--'; }}
-          const date = new Date(value);
-          if (!isFinite(date)) {{ return value; }}
-          return new Intl.DateTimeFormat('zh-CN', {{
-            timeZone: 'Asia/Shanghai',
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-          }}).format(date);
-        }};
-        const sumDepth = (entries, depth) => {{
-          if (!Array.isArray(entries) || entries.length === 0) {{ return 0; }}
-          let total = 0;
-          for (let i = 0; i < depth && i < entries.length; i += 1) {{
-            const size = Number(entries[i]?.[1]);
-            if (Number.isFinite(size)) {{
-              total += size;
-            }}
-          }}
-          return total;
-        }};
-        const describeDepth = (imbalance) => {{
-          if (imbalance >= 0.2) {{
-            return {{ tone: 'positive', text: '买盘深度明显占优，短线动能偏多。' }};
-          }}
-          if (imbalance <= -0.2) {{
-            return {{ tone: 'negative', text: '卖盘压制增强，谨防价格回落。' }};
-          }}
-          return {{ tone: 'neutral', text: '买卖力量接近平衡，关注成交突破信号。' }};
-        }};
-        const describeCvd = (value) => {{
-          const num = Number(value);
-          if (!Number.isFinite(num)) {{
-            return {{ tone: 'neutral', text: 'CVD 暂无有效数据，等待成交量方向确认。' }};
-          }}
-          const abs = Math.abs(num);
-          const strong = 500;
-          const moderate = 150;
-          if (num >= strong) {{
-            return {{ tone: 'positive', text: '主动买单持续累积，资金在吸筹，留意价格上行延续。' }};
-          }}
-          if (num >= moderate) {{
-            return {{ tone: 'positive', text: '买方 CVD 明显为正，短线有承接力量。' }};
-          }}
-          if (num <= -strong) {{
-            return {{ tone: 'negative', text: '卖方抛压集中，CVD 急剧走弱，谨防顺势下行。' }};
-          }}
-          if (num <= -moderate) {{
-            return {{ tone: 'negative', text: '主动卖单占优，需关注支撑是否失守。' }};
-          }}
-          return {{ tone: 'neutral', text: 'CVD 变化不大，暂未出现明显的资金偏向。' }};
-        }};
-        const appendNetDepth = (symbol, timestamp, value) => {{
-          const key = (symbol || '--').toUpperCase();
-          const history = netDepthHistory.get(key) || [];
-          const point = {{
-            time: timestamp ? new Date(timestamp) : new Date(),
-            value,
-          }};
-          history.push(point);
-          while (history.length > HISTORY_LIMIT) {{
-            history.shift();
-          }}
-          netDepthHistory.set(key, history);
-          return history;
-        }};
-        const primeHistory = (symbol, series) => {{
-          if (!Array.isArray(series) || !series.length) {{
-            return;
-          }}
-          const key = (symbol || '--').toUpperCase();
-          if (netDepthHistory.has(key)) {{
-            return;
-          }}
-          const history = [];
-        series.forEach((entry) => {{
-            const val = Number(entry?.net_depth);
-            if (!Number.isFinite(val)) {{
-              return;
-            }}
-            const time = entry?.timestamp ? new Date(entry.timestamp) : new Date();
-            history.push({{ time, value: val }});
-          }});
-          if (!history.length) {{
-            return;
-          }}
-          const trimmed = history.slice(-HISTORY_LIMIT);
-          netDepthHistory.set(key, trimmed);
-        }};
-        const primeCvdHistory = (symbol, series) => {{
-          if (!symbol) {{
-            return [];
-          }}
-          const key = symbol.toUpperCase();
-          const history = [];
-          (series || []).forEach((entry) => {{
-            const val = Number(entry?.cvd);
-            if (!Number.isFinite(val)) {{
-              return;
-            }}
-            const time = entry?.timestamp ? new Date(entry.timestamp) : new Date();
-            history.push({{ time, value: val }});
-          }});
-          if (!history.length) {{
-            return cvdHistory.get(key) || [];
-          }}
-          const trimmed = history.slice(-HISTORY_LIMIT);
-          cvdHistory.set(key, trimmed);
-          return trimmed;
-        }};
-        const queueNetDepthUpdate = (symbol, timestamp, value) => {{
-          if (!symbol) {{
-            return;
-          }}
-          const numericValue = Number(value);
-          if (!Number.isFinite(numericValue)) {{
-            return;
-          }}
-          const key = symbol.toUpperCase();
-          const sampleTime = timestamp ? new Date(timestamp) : new Date();
-          const entry = pendingNetDepth.get(key);
-          if (entry) {{
-            entry.sum += numericValue;
-            entry.count += 1;
-            entry.latestTimestamp = sampleTime;
-            return;
-          }}
-          pendingNetDepth.set(key, {{
-            sum: numericValue,
-            count: 1,
-            latestTimestamp: sampleTime,
-            readyAt: Date.now() + netDepthDelayMs,
-          }});
-        }};
-        const flushNetDepthQueue = () => {{
-          const now = Date.now();
-          pendingNetDepth.forEach((entry, key) => {{
-            if (entry.readyAt <= now && entry.count > 0) {{
-              const average = entry.sum / entry.count;
-              committedNetDepth.set(key, {{
-                value: average,
-                timestamp: entry.latestTimestamp,
-              }});
-              pendingNetDepth.delete(key);
-            }}
-          }});
-        }};
-        const getCommittedNetDepth = (symbol) => {{
-          if (!symbol) {{
-            return undefined;
-          }}
-          return committedNetDepth.get(symbol.toUpperCase());
-        }};
-        const getCvdHistory = (symbol) => {{
-          if (!symbol) {{
-            return [];
-          }}
-          return cvdHistory.get(symbol.toUpperCase()) || [];
-        }};
-        const drawNetDepthChart = (canvas, history) => {{
-          const parent = canvas.parentElement;
-          const width = Math.max((parent ? parent.clientWidth : 320), 420);
-          const height = 260;
-          const dpr = window.devicePixelRatio || 1;
-          canvas.width = width * dpr;
-          canvas.height = height * dpr;
-          canvas.style.width = width + 'px';
-          canvas.style.height = height + 'px';
-          const ctx = canvas.getContext('2d');
-          ctx.setTransform(1, 0, 0, 1, 0, 0);
-          ctx.scale(dpr, dpr);
-          ctx.clearRect(0, 0, width, height);
-          if (!history.length) {{
-            ctx.fillStyle = '#94a3b8';
-            ctx.font = '14px Arial';
-            ctx.fillText('暂无净深度数据', 20, height / 2);
-            return;
-          }}
-          const values = history.map((pt) => pt.value);
-          const maxVal = Math.max(...values);
-          const minVal = Math.min(...values);
-          const maxAbs = Math.max(Math.abs(maxVal), Math.abs(minVal), 1);
-          const padding = maxAbs * 0.1;
-          const limit = maxAbs + padding;
-          const topVal = limit;
-          const bottomVal = -limit;
-          const range = topVal - bottomVal || 1;
-          const left = 50;
-          const right = 16;
-          const top = 18;
-          const bottom = 30;
-          const chartWidth = width - left - right;
-          const chartHeight = height - top - bottom;
-          const zeroY = top + chartHeight - ((0 - bottomVal) / range) * chartHeight;
-          ctx.strokeStyle = '#475569';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(left, zeroY);
-          ctx.lineTo(width - right, zeroY);
-          ctx.stroke();
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          history.forEach((pt, idx) => {{
-            const x = left + (chartWidth * idx) / Math.max(1, history.length - 1);
-            const y = top + chartHeight - ((pt.value - bottomVal) / range) * chartHeight;
-            if (idx === 0) {{
-              ctx.moveTo(x, y);
-            }} else {{
-              ctx.lineTo(x, y);
-            }}
-          }});
-          ctx.stroke();
-          ctx.fillStyle = '#94a3b8';
-          ctx.font = '12px Arial';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
-          const tickCount = Math.min(history.length, 8);
-          for (let i = 0; i < tickCount; i += 1) {{
-            const idx = Math.round((history.length - 1) * (i / Math.max(1, tickCount - 1)));
-            const pt = history[idx];
-            const x = left + (chartWidth * idx) / Math.max(1, history.length - 1);
-            const label = pt.time instanceof Date && !Number.isNaN(pt.time)
-              ? `${{String(pt.time.getHours()).padStart(2, '0')}}:${{String(pt.time.getMinutes()).padStart(2, '0')}}:${{String(pt.time.getSeconds()).padStart(2, '0')}}`
-              : '';
-            ctx.fillText(label, x, height - bottom + 6);
-          }}
-          ctx.textAlign = 'right';
-          ctx.textBaseline = 'middle';
-          const yTicks = 5;
-          for (let i = 0; i <= yTicks; i += 1) {{
-            const value = bottomVal + (range * i) / yTicks;
-            const y = top + chartHeight - (chartHeight * i) / yTicks;
-            ctx.fillText(formatNumber(value, 2), left - 6, y);
-          }}
-        }};
-        const drawCvdChart = (canvas, history) => {{
-          const parent = canvas.parentElement;
-          const width = Math.max((parent ? parent.clientWidth : 320), 420);
-          const height = 260;
-          const dpr = window.devicePixelRatio || 1;
-          canvas.width = width * dpr;
-          canvas.height = height * dpr;
-          canvas.style.width = width + 'px';
-          canvas.style.height = height + 'px';
-          const ctx = canvas.getContext('2d');
-          ctx.setTransform(1, 0, 0, 1, 0, 0);
-          ctx.scale(dpr, dpr);
-          ctx.clearRect(0, 0, width, height);
-          if (!Array.isArray(history) || !history.length) {{
-            ctx.fillStyle = '#94a3b8';
-            ctx.font = '14px Arial';
-            ctx.fillText('暂无CVD数据', 20, height / 2);
-            return;
-          }}
-          const values = history.map((pt) => pt.value);
-          const maxVal = Math.max(...values);
-          const minVal = Math.min(...values);
-          const maxAbs = Math.max(Math.abs(maxVal), Math.abs(minVal), 1);
-          const padding = maxAbs * 0.1;
-          const limit = maxAbs + padding;
-          const topVal = limit;
-          const bottomVal = -limit;
-          const range = topVal - bottomVal || 1;
-          const left = 50;
-          const right = 16;
-          const top = 18;
-          const bottom = 30;
-          const chartWidth = width - left - right;
-          const chartHeight = height - top - bottom;
-          const zeroY = top + chartHeight - ((0 - bottomVal) / range) * chartHeight;
-          ctx.strokeStyle = '#475569';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(left, zeroY);
-          ctx.lineTo(width - right, zeroY);
-          ctx.stroke();
-          ctx.strokeStyle = '#fbbf24';
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          history.forEach((pt, idx) => {{
-            const x = left + (chartWidth * idx) / Math.max(1, history.length - 1);
-            const y = top + chartHeight - ((pt.value - bottomVal) / range) * chartHeight;
-            if (idx === 0) {{
-              ctx.moveTo(x, y);
-            }} else {{
-              ctx.lineTo(x, y);
-            }}
-          }});
-          ctx.stroke();
-          ctx.fillStyle = '#94a3b8';
-          ctx.font = '12px Arial';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
-          const tickCount = Math.min(history.length, 8);
-          for (let i = 0; i < tickCount; i += 1) {{
-            const idx = Math.round((history.length - 1) * (i / Math.max(1, tickCount - 1)));
-            const pt = history[idx];
-            const x = left + (chartWidth * idx) / Math.max(1, history.length - 1);
-            const label = pt.time instanceof Date && !Number.isNaN(pt.time)
-              ? `${{String(pt.time.getHours()).padStart(2, '0')}}:${{String(pt.time.getMinutes()).padStart(2, '0')}}:${{String(pt.time.getSeconds()).padStart(2, '0')}}`
-              : '';
-            ctx.fillText(label, x, height - bottom + 6);
-          }}
-          ctx.textAlign = 'right';
-          ctx.textBaseline = 'middle';
-          const yTicks = 5;
-          for (let i = 0; i <= yTicks; i += 1) {{
-            const value = bottomVal + (range * i) / yTicks;
-            const y = top + chartHeight - (chartHeight * i) / yTicks;
-            ctx.fillText(formatNumber(value, 2), left - 6, y);
-          }}
+
+        const describeImbalance = (imbalance) => {{
+          if (imbalance >= 0.2) {{ return '买盘主导，多头占优'; }}
+          if (imbalance <= -0.2) {{ return '卖盘主导，空头占优'; }}
+          return '买卖相对均衡';
         }};
 
-        const clampSmoothing = (value) => {{
-          if (!Number.isFinite(value)) {{
-            return DEFAULT_SMOOTH_SECONDS;
-          }}
-          return Math.max(0, Math.min(value, 30));
-        }};
-        const attachSmoothingListeners = () => {{
-          if (!smoothInput) {{
-            return;
-          }}
-          const applyValue = (raw) => {{
-            const seconds = clampSmoothing(Number(raw));
-            smoothInput.value = seconds.toString();
-            netDepthDelayMs = seconds * 1000;
-            pendingNetDepth.forEach((entry) => {{
-              entry.readyAt = Date.now() + netDepthDelayMs;
-            }});
-          }};
-          smoothInput.addEventListener('change', (event) => {{
-            applyValue(event.target.value);
-          }});
-          smoothInput.addEventListener('input', (event) => {{
-            applyValue(event.target.value);
+        const drawBars = (levels, color, minPrice, range, maxSize, padding, width, height) => {{
+          ctx.fillStyle = color;
+          const total = Math.max(levels.length, 1);
+          levels.forEach(([price, size]) => {{
+            const x = padding + ((price - minPrice) / range) * width;
+            const barWidth = Math.max(width / (total * 2), 2);
+            const barHeight = (size / maxSize) * height;
+            ctx.fillRect(x - barWidth / 2, padding + height - barHeight, barWidth, barHeight);
           }});
         }};
 
-        function renderBooks(data) {{
-          const container = document.getElementById('orderbook-container');
-          container.innerHTML = '';
-          flushNetDepthQueue();
-          const applyGridClass = (count) => {{
-            if (count > 0 && count <= 2) {{
-              container.className = `${{BASE_GRID_CLASS}} two-cols`;
-            }} else {{
-              container.className = BASE_GRID_CLASS;
-            }}
-          }};
-          const levels = parseInt(levelSelect.value || '{levels}', 10) || {levels};
-          const filterValue = (instrumentSelect.value || '').trim();
-          let items = Array.isArray(data.items) ? data.items.slice() : [];
-          if (!filterValue) {{
-            const prioritized = [];
-            DEFAULT_PAIRS.forEach((pair) => {{
-              const found = items.find(
-                (entry) => (entry.instrument_id || '').toUpperCase() === pair,
-              );
-              if (found) {{
-                prioritized.push(found);
-              }}
-            }});
-            if (prioritized.length) {{
-              items = prioritized;
-            }}
-          }}
-          applyGridClass(items.length);
-          if (!items.length) {{
-            container.innerHTML = '<p class="empty-state">暂无深度数据</p>';
-            const updated = document.getElementById('orderbook-updated');
-            if (updated) {{ updated.textContent = formatTimestamp(data.updated_at); }}
+        const renderDepth = (data) => {{
+          const items = Array.isArray(data.items) ? data.items : [];
+          const target = items[0];
+          if (!target) {{
+            bidDepthEl.textContent = askDepthEl.textContent = netDepthEl.textContent = spreadEl.textContent = '--';
+            updatedLabel.textContent = '--';
+            titleEl.textContent = '深度分布';
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '16px Arial';
+            ctx.fillText('暂无深度数据', 40, canvas.height / 2);
             return;
           }}
-          items.forEach((item) => {{
-            const symbol = (item.instrument_id || '--').toUpperCase();
-            primeHistory(symbol, item.history);
-            const cvdSeries = primeCvdHistory(symbol, item.cvd_history);
-            const bids = Array.isArray(item.bids) ? item.bids : [];
-            const asks = Array.isArray(item.asks) ? item.asks : [];
-            const buyDepth = sumDepth(bids, levels);
-            const sellDepth = sumDepth(asks, levels);
-            const totalDepth = buyDepth + sellDepth;
-            const bidShare = totalDepth > 0 ? buyDepth / totalDepth : 0.5;
-            const askShare = 1 - bidShare;
-            const imbalance = totalDepth > 0 ? (buyDepth - sellDepth) / totalDepth : 0;
-            const spreadText = formatNumber(item.spread, 4);
-            const cvdText = formatNumber(item.cvd, 2);
-            const bestBidText = formatNumber(item.best_bid, 4);
-            const bestAskText = formatNumber(item.best_ask, 4);
-            const buyDepthText = formatNumber(buyDepth, 2);
-            const sellDepthText = formatNumber(sellDepth, 2);
-            const totalDepthText = formatNumber(totalDepth, 2);
-            const {{ tone, text: guidance }} = describeDepth(imbalance);
-            const netDepthInsight = `买盘占比 ${{Math.round(bidShare * 100)}}%，${{guidance}}（点差 ${{spreadText}}）`;
-            const {{ tone: cvdTone, text: cvdInsight }} = describeCvd(item.cvd);
-            const bestBidNum = Number(item.best_bid);
-            const bestAskNum = Number(item.best_ask);
-            let midText = '--';
-            if (Number.isFinite(bestBidNum) && Number.isFinite(bestAskNum)) {{
-              midText = formatNumber((bestBidNum + bestAskNum) / 2, 4);
-            }}
-            const netDepthValue = buyDepth - sellDepth;
-            queueNetDepthUpdate(symbol, item.timestamp, netDepthValue);
-            const committedSnapshot = getCommittedNetDepth(symbol);
-            const netDepthText = committedSnapshot ? formatNumber(committedSnapshot.value, 2) : '--';
-            const card = document.createElement('section');
-            card.className = `orderbook-chart tone-${{tone}}`;
-            card.innerHTML = `
-              <div class="chart-header">
-                <div>
-                  <h2>${{item.instrument_id || '--'}}</h2>
-                  <small>更新时间：${{formatTimestamp(item.timestamp)}}</small>
-                </div>
-              </div>
-              <div class="chart-prices">
-                <div class="chart-price-group primary">
-                  <span>买一 ${{bestBidText}}</span>
-                  <span>卖一 ${{bestAskText}}</span>
-                  <span class="mid">中间价 ${{midText}}</span>
-                </div>
-              </div>
-              <div class="chart-stats">
-                <span class="stat-pill">买盘深度（前${{levels}}档）${{buyDepthText}}</span>
-                <span class="stat-pill">卖盘深度（前${{levels}}档）${{sellDepthText}}</span>
-                <span class="stat-pill">总深度 ${{totalDepthText}}</span>
-                <span class="stat-pill stat-accent">净深度 ${{netDepthText}}</span>
-                <span class="stat-pill">CVD净成交量 ${{cvdText}}</span>
-                <span class="stat-pill stat-accent">点差 ${{spreadText}}</span>
-              </div>
-              <div class="chart-canvases">
-                <div class="chart-block">
-                  <h3>净深度走势</h3>
-                  <canvas class="chart-canvas net-depth-canvas" data-chart="net-depth"></canvas>
-                  <p class="chart-insight ${{tone}}">${{netDepthInsight}}</p>
-                </div>
-                <div class="chart-block">
-                  <h3>CVD 历史</h3>
-                  <canvas class="chart-canvas cvd-canvas" data-chart="cvd"></canvas>
-                  <p class="chart-insight ${{cvdTone}}">${{cvdInsight}}</p>
-                </div>
-              </div>
-            `;
-            container.appendChild(card);
-            let history = netDepthHistory.get(symbol) || [];
-            if (committedSnapshot) {{
-              history = appendNetDepth(symbol, committedSnapshot.timestamp, committedSnapshot.value);
-            }}
-            const netCanvas = card.querySelector('.net-depth-canvas');
-            if (netCanvas) {{
-              netCanvas.dataset.history = JSON.stringify(history);
-              requestAnimationFrame(() => drawNetDepthChart(netCanvas, history));
-            }}
-            const cvdCanvas = card.querySelector('.cvd-canvas');
-            const cvdHistorySeries = Array.isArray(cvdSeries) && cvdSeries.length ? cvdSeries : getCvdHistory(symbol);
-            if (cvdCanvas) {{
-              cvdCanvas.dataset.history = JSON.stringify(cvdHistorySeries);
-              requestAnimationFrame(() => drawCvdChart(cvdCanvas, cvdHistorySeries));
-            }}
-          }});
-          const updated = document.getElementById('orderbook-updated');
-          if (updated) {{ updated.textContent = formatTimestamp(data.updated_at); }}
-        }}
+          const bids = Array.isArray(target.bids) ? target.bids.map(([p, q]) => [Number(p), Number(q)]) : [];
+          const asks = Array.isArray(target.asks) ? target.asks.map(([p, q]) => [Number(p), Number(q)]) : [];
+          const levels = Number(levelSelect.value) || 50;
+          const limitedBids = bids.slice(0, levels).filter(([, q]) => Number.isFinite(q));
+          const limitedAsks = asks.slice(0, levels).filter(([, q]) => Number.isFinite(q));
+          const buyDepth = limitedBids.reduce((sum, [, q]) => sum + (Number.isFinite(q) ? q : 0), 0);
+          const sellDepth = limitedAsks.reduce((sum, [, q]) => sum + (Number.isFinite(q) ? q : 0), 0);
+          const totalDepth = buyDepth + sellDepth;
+          const imbalance = totalDepth > 0 ? (buyDepth - sellDepth) / totalDepth : 0;
+          const spread = Number(target.spread);
+          const prices = [...limitedBids.map(([p]) => p), ...limitedAsks.map(([p]) => p)];
+          const minPrice = Math.min(...prices);
+          const maxPrice = Math.max(...prices);
+          const maxSize = Math.max(...limitedBids.map(([, q]) => q), ...limitedAsks.map(([, q]) => q), 1);
+
+          bidDepthEl.textContent = formatNumber(buyDepth, 2);
+          askDepthEl.textContent = formatNumber(sellDepth, 2);
+          netDepthEl.textContent = formatNumber(buyDepth - sellDepth, 2) + ' · ' + describeImbalance(imbalance);
+          spreadEl.textContent = formatNumber(spread, 4);
+          updatedLabel.textContent = target.timestamp ? new Date(target.timestamp).toLocaleTimeString('zh-CN', {{ hour12: false }}) : '--';
+          titleEl.textContent = (target.instrument_id || '--') + ' 深度分布';
+
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = '#0f172a';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          const padding = 40;
+          const width = canvas.width - padding * 2;
+          const height = canvas.height - padding * 2;
+          const range = Math.max(maxPrice - minPrice, 1e-6);
+          drawBars(limitedBids, '#10b981', minPrice, range, maxSize, padding, width, height);
+          drawBars(limitedAsks, '#f87171', minPrice, range, maxSize, padding, width, height);
+
+          ctx.strokeStyle = '#475569';
+          ctx.beginPath();
+          ctx.moveTo(padding, padding + height);
+          ctx.lineTo(padding + width, padding + height);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(padding, padding);
+          ctx.lineTo(padding, padding + height);
+          ctx.stroke();
+        }};
 
         function refresh() {{
-          const params = new URLSearchParams({{ limit: levelSelect.value || '{levels}' }});
+          const params = new URLSearchParams({{ limit: levelSelect.value || '50' }});
           if (instrumentSelect.value) {{
             params.set('instrument', instrumentSelect.value);
           }}
-          params.set('levels', levelSelect.value || '{levels}');
           fetch('/api/streams/orderbook/latest?' + params.toString())
             .then((res) => res.json())
-            .then(renderBooks)
+            .then(renderDepth)
             .catch((err) => console.error(err));
         }}
 
         instrumentSelect.addEventListener('change', refresh);
         levelSelect.addEventListener('change', refresh);
-        attachSmoothingListeners();
-        window.addEventListener('resize', () => {{
-          document.querySelectorAll('.chart-canvas').forEach((canvas) => {{
-            try {{
-              const history = JSON.parse(canvas.dataset.history || '[]');
-              if (canvas.dataset.chart === 'cvd') {{
-                drawCvdChart(canvas, history);
-              }} else {{
-                drawNetDepthChart(canvas, history);
-              }}
-            }} catch (err) {{
-              console.error(err);
-            }}
-          }});
-        }});
         refresh();
-        setInterval(refresh, 3000);
+        setInterval(refresh, 4000);
       }})();
     </script>
 </body>
 </html>
 """
 
-
-
-
+def _build_depth_options(selected: int) -> str:
+    choices = (20, 50, 100, 200, 400)
+    sanitized = max(1, selected)
+    rendered: list[str] = []
+    for value in choices:
+        selected_attr = " selected" if value == sanitized else ""
+        rendered.append(f'<option value="{value}"{selected_attr}>{value} 档</option>')
+    if sanitized not in choices:
+        rendered.append(f'<option value="{sanitized}" selected>{sanitized} 档</option>')
+    return "\n".join(rendered)
