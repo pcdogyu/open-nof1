@@ -33,7 +33,7 @@ OKX_CACHE_TTL_SECONDS = 600
 
 # Scheduler defaults (seconds)
 MARKET_SYNC_INTERVAL = 60
-AI_INTERACTION_INTERVAL = 60
+AI_INTERACTION_INTERVAL = 900
 
 # OKX demo accounts (API keys / secrets / passphrases).
 # Populate secrets/passphrases when available.

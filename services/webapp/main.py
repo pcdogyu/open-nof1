@@ -959,6 +959,8 @@ HTML_TEMPLATE = r"""
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
     </style>
 </head>
 <body>
@@ -1049,6 +1051,8 @@ MODEL_MANAGER_TEMPLATE = r"""
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
         .models-grid {{ display: grid; grid-template-columns: repeat(3, minmax(280px, 1fr)); gap: 20px; }}
         @media (max-width: 1200px) {{ .models-grid {{ grid-template-columns: repeat(2, minmax(280px, 1fr)); }} }}
         @media (max-width: 768px) {{ .models-grid {{ grid-template-columns: 1fr; }} }}
@@ -1101,6 +1105,8 @@ SETTINGS_TEMPLATE = r"""
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
         .settings-card {{ background-color: #1e293b; border-radius: 12px; padding: 20px 24px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); margin-top: 20px; }}
         .settings-card form {{ display: flex; flex-direction: column; gap: 14px; }}
         label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
@@ -1206,6 +1212,8 @@ OKX_TEMPLATE = r"""
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
         .error-card {{ background-color: #3f1d45; border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.45); }}
         .error-card h2 {{ margin: 0 0 10px 0; color: #f87171; }}
         .error-card ul {{ margin: 0; padding-left: 20px; }}
@@ -1280,6 +1288,8 @@ SCHEDULER_TEMPLATE = r"""
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
         .card {{ background-color: #1e293b; border-radius: 12px; padding: 22px 26px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); max-width: 620px; }}
         form {{ display: grid; gap: 18px; }}
         label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
@@ -1290,9 +1300,13 @@ SCHEDULER_TEMPLATE = r"""
         .hint {{ color: #94a3b8; font-size: 0.85rem; margin-top: -6px; }}
         .meta {{ margin-top: 20px; font-size: 0.85rem; color: #64748b; }}
         .timestamp {{ color: #38bdf8; }}
-        .log-card {{ max-width: 960px; margin-top: 26px; }}
+        .log-card {{ width: 100%; max-width: 620px; margin-top: 26px; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-        th, td {{ padding: 10px 14px; border-bottom: 1px solid rgba(226, 232, 240, 0.08); text-align: left; font-size: 0.9rem; }}
+        th, td {{ padding: 10px 14px; border-bottom: 1px solid rgba(226, 232, 240, 0.08); text-align: left; font-size: 0.9rem; word-break: break-word; }}
+        .log-card table {{ table-layout: fixed; }}
+        .log-card th:nth-child(1), .log-card td:nth-child(1) {{ width: 140px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+        .log-card th:nth-child(2), .log-card td:nth-child(2) {{ width: 110px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+        .log-card th:nth-child(3), .log-card td:nth-child(3) {{ width: 100px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
         th {{ color: #a5b4fc; font-weight: 600; background-color: rgba(15, 23, 42, 0.6); }}
         tr:nth-child(even) {{ background-color: rgba(15, 23, 42, 0.35); }}
         .status-pill {{ padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; }}
@@ -1372,6 +1386,8 @@ PROMPT_EDITOR_TEMPLATE = r"""
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; flex-wrap: wrap; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        .ai-signals-card {{ margin-bottom: 2rem; }}
+        .ai-signals-card table {{ margin-top: 0.5rem; }}
         .prompt-layout {{ max-width: 960px; margin: 0 auto; display: grid; gap: 24px; }}
         .card {{ background-color: #1e293b; border-radius: 12px; padding: 24px 28px; box-shadow: 0 15px 45px rgba(15, 23, 42, 0.55); }}
         .card.helper {{ background-color: rgba(15, 23, 42, 0.8); }}
@@ -2219,6 +2235,10 @@ ORDERBOOK_TEMPLATE = r"""
 </body>
 </html>
 """
+
+
+
+
 
 
 
