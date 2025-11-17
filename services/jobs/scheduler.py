@@ -10,6 +10,7 @@ import math
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
@@ -27,10 +28,13 @@ from execution import RoutedOrder, SignalRouter
 from exchanges.base_client import ExchangeCredentials
 from exchanges.okx.paper import OkxClientError, OkxPaperClient
 from models.runtime import SignalRuntime
-from models.schemas import MarketSnapshot, RiskContext, SignalRequest
+from models.schemas import MarketSnapshot, RiskContext, SignalRequest, SignalResponse
+from risk.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from risk.engine import RiskEngine
 from risk.order_validation import BasicOrderValidator, OrderValidationError, ensure_valid_order
-from risk.schemas import OrderIntent
+from risk.notional_limits import OrderNotionalGuard, ProfitLossGuard
+from risk.price_limits import PriceLimitValidator
+from risk.schemas import MarketContext, OrderIntent
 from services.analytics.leaderboard import refresh_leaderboard_cache
 from services.okx.transform import (
     extract_balances,
@@ -42,7 +46,12 @@ from services.webapp.dependencies import (
     get_account_repository,
     get_portfolio_registry,
 )
-from data_pipeline.pipeline import MarketDataPipeline, PipelineSettings
+from data_pipeline.pipeline import (
+    MarketDataPipeline,
+    PipelineSettings,
+    SIGNAL_LOG_MAX_LINES,
+    _append_signal_log,
+)
 
 try:  # pragma: no cover - optional dependency
     from data_pipeline.influx import InfluxConfig, InfluxWriter
@@ -63,11 +72,16 @@ try:  # pragma: no cover - config is optional for tests
         OKX_ACCOUNTS,
         TRADABLE_INSTRUMENTS,
     )
+    try:
+        from config import RISK_SETTINGS as _RISK_DEFAULTS  # type: ignore[attr-defined]
+    except Exception:
+        _RISK_DEFAULTS = {}
 except ImportError:  # pragma: no cover
     OKX_ACCOUNTS = {}
     TRADABLE_INSTRUMENTS: Sequence[str] = ()
     MARKET_SYNC_INTERVAL = 60
     AI_INTERACTION_INTERVAL = 300
+    _RISK_DEFAULTS = {}
 
 _SCHEDULER: Optional["AsyncIOScheduler"] = None
 _FEATURE_CLIENT: Optional["InfluxDBClient"] = None
@@ -82,14 +96,62 @@ def _sanitize_interval(value: int, minimum: int, maximum: int = 3600) -> int:
     return int(max(minimum, min(maximum, value)))
 
 
+_DEFAULT_RISK_CONFIG = {
+    "price_tolerance_pct": 0.02,
+    "max_drawdown_pct": 8.0,
+    "max_loss_absolute": 1500.0,
+    "cooldown_seconds": 600,
+    "min_notional_usd": 50.0,
+    "take_profit_pct": 0.0,
+    "stop_loss_pct": 0.0,
+}
+
+
+def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | int]:
+    config = dict(_DEFAULT_RISK_CONFIG)
+    if isinstance(raw, dict):
+        for key in (
+            "price_tolerance_pct",
+            "max_drawdown_pct",
+            "max_loss_absolute",
+            "cooldown_seconds",
+            "min_notional_usd",
+        ):
+            if key in raw:
+                config[key] = raw[key]  # type: ignore[assignment]
+    price = float(config["price_tolerance_pct"])
+    drawdown = float(config["max_drawdown_pct"])
+    max_loss = float(config["max_loss_absolute"])
+    cooldown = int(config["cooldown_seconds"])
+    min_notional = float(config["min_notional_usd"])
+    price = max(0.001, min(0.5, price))
+    drawdown = max(0.1, min(95.0, drawdown))
+    max_loss = max(1.0, max_loss)
+    cooldown = max(60, min(86400, cooldown))
+    min_notional = max(0.0, min_notional)
+    return {
+        "price_tolerance_pct": price,
+        "max_drawdown_pct": drawdown,
+        "max_loss_absolute": max_loss,
+        "cooldown_seconds": cooldown,
+        "min_notional_usd": min_notional,
+    }
+
+
 _MARKET_INTERVAL = _sanitize_interval(int(MARKET_SYNC_INTERVAL), 30)
 _AI_INTERVAL = _sanitize_interval(int(AI_INTERACTION_INTERVAL), 60)
+AI_SIGNAL_LOG_PATH = Path("data/logs/ai_signals.jsonl")
+AI_SIGNAL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 _PIPELINE_SETTINGS = PipelineSettings(
     instruments=list(TRADABLE_INSTRUMENTS) if TRADABLE_INSTRUMENTS else ["BTC-USDT-SWAP"],
-    signal_log_path=Path("data/logs/ai_signals_scheduler.jsonl"),
+    signal_log_path=AI_SIGNAL_LOG_PATH,
 )
 _PIPELINE: Optional[MarketDataPipeline] = None
+_RISK_CONFIG_LOCK = Lock()
+_RISK_CONFIG = _sanitize_risk_config(_RISK_DEFAULTS)
 _EXECUTION_LOG = deque(maxlen=100)
+_ORDER_DEBUG_LOG = deque(maxlen=50)
+_ORDER_DEBUG_WRITER: Optional["InfluxWriter"] = None
 _EXEC_LOG_WRITER: Optional["InfluxWriter"] = None
 
 
@@ -139,9 +201,169 @@ def _append_execution_log(job: str, status: str, detail: str | None = None) -> N
             pass
 
 
+def get_risk_configuration() -> Dict[str, float | int]:
+    """Return a snapshot of the current risk configuration."""
+    with _RISK_CONFIG_LOCK:
+        return dict(_RISK_CONFIG)
+
+
+def update_risk_configuration(
+    *,
+    price_tolerance_pct: float,
+    max_drawdown_pct: float,
+    max_loss_absolute: float,
+    cooldown_seconds: int,
+    min_order_notional: float,
+    max_order_notional: float,
+    take_profit_pct: float,
+    stop_loss_pct: float,
+) -> None:
+    """Refresh the in-memory risk configuration."""
+    normalized = _sanitize_risk_config(
+        {
+            "price_tolerance_pct": price_tolerance_pct,
+            "max_drawdown_pct": max_drawdown_pct,
+            "max_loss_absolute": max_loss_absolute,
+            "cooldown_seconds": cooldown_seconds,
+            "min_order_notional": min_order_notional,
+            "max_order_notional": max_order_notional,
+            "take_profit_pct": take_profit_pct,
+            "stop_loss_pct": stop_loss_pct,
+        }
+    )
+    with _RISK_CONFIG_LOCK:
+        _RISK_CONFIG.update(normalized)
+
+
+def _build_risk_engine() -> RiskEngine:
+    with _RISK_CONFIG_LOCK:
+        config = dict(_RISK_CONFIG)
+    price_validator = PriceLimitValidator(default_tolerance_pct=config["price_tolerance_pct"])
+    circuit_breaker = CircuitBreaker(
+        CircuitBreakerConfig(
+            max_drawdown_pct=config["max_drawdown_pct"],
+            max_loss_absolute=config["max_loss_absolute"],
+            cooldown_seconds=int(config["cooldown_seconds"]),
+        )
+    )
+    notional_guard = OrderNotionalGuard(
+        min_notional=float(config.get("min_notional_usd", 0.0)),
+        max_notional=0.0,
+    )
+    pnl_guard = ProfitLossGuard(
+        take_profit_pct=float(config.get("take_profit_pct", 0.0)),
+        stop_loss_pct=float(config.get("stop_loss_pct", 0.0)),
+    )
+    return RiskEngine(
+        price_validator=price_validator,
+        circuit_breaker=circuit_breaker,
+        notional_guard=notional_guard,
+        pnl_guard=pnl_guard,
+    )
+
+
+def _prime_price_band(risk_engine: RiskEngine, market: Optional[MarketContext]) -> None:
+    if market is None:
+        return
+    with _RISK_CONFIG_LOCK:
+        tolerance = float(_RISK_CONFIG["price_tolerance_pct"])
+    try:
+        risk_engine.update_market(market, tolerance_pct=tolerance)
+    except Exception as exc:
+        logger.debug("Failed to update price band for %s: %s", market.instrument_id, exc)
+
+
 def get_execution_log(limit: int = 20) -> List[dict]:
     """Return a snapshot of recent scheduler job executions."""
     return list(_EXECUTION_LOG)[:limit]
+
+
+def get_order_debug_log(limit: int = 20) -> List[dict]:
+    """Return recent order-stage debug entries."""
+    entries = list(_ORDER_DEBUG_LOG)[:limit]
+    if len(entries) < limit:
+        entries.extend(_hydrate_order_debug_from_influx(limit - len(entries)))
+    return entries
+
+
+def _record_order_debug_entry(entry: Dict[str, Any]) -> None:
+    payload = dict(entry)
+    payload.setdefault("timestamp", datetime.now(tz=timezone.utc).isoformat())
+    _ORDER_DEBUG_LOG.appendleft(payload)
+    writer = _get_order_debug_writer()
+    if writer:
+        try:
+            timestamp_ns = int(datetime.fromisoformat(payload["timestamp"]).timestamp() * 1e9)
+        except Exception:
+            timestamp_ns = int(datetime.now(tz=timezone.utc).timestamp() * 1e9)
+        try:
+            writer.write_indicator_set(
+                measurement="order_debug_log",
+                tags={
+                    "account_id": str(payload.get("account_id") or payload.get("account_key") or "-"),
+                    "model_id": str(payload.get("model_id") or "-"),
+                },
+                fields={
+                    "signal_generated": int(bool(payload.get("signal_generated"))),
+                    "decision_actionable": int(bool(payload.get("decision_actionable"))),
+                    "order_ready": int(bool(payload.get("order_ready"))),
+                    "risk_passed": int(bool(payload.get("risk_passed"))),
+                    "submitted": int(bool(payload.get("submitted"))),
+                    "notes": str(payload.get("notes") or ""),
+                    "instrument": str(payload.get("instrument") or ""),
+                    "decision": str(payload.get("decision") or ""),
+                    "confidence": float(payload.get("confidence") or 0.0),
+                    "fallback_used": int(bool(payload.get("fallback_used"))),
+                },
+                timestamp_ns=timestamp_ns,
+            )
+        except Exception:
+            logger.debug("Failed to persist order debug entry to Influx.", exc_info=True)
+
+
+def _hydrate_order_debug_from_influx(limit: int) -> List[dict]:
+    if limit <= 0 or InfluxDBClient is None or InfluxConfig is None:
+        return []
+    try:
+        cfg = InfluxConfig.from_env()
+    except Exception:
+        return []
+    if not getattr(cfg, "token", None):
+        return []
+    flux = f"""
+from(bucket: "{cfg.bucket}")
+  |> range(start: -7d)
+  |> filter(fn: (r) => r["_measurement"] == "order_debug_log")
+  |> pivot(rowKey:["_time","account_id","model_id"], columnKey:["_field"], valueColumn:"_value")
+  |> sort(columns: ["_time"], desc: true)
+  |> limit(n: {limit})
+"""
+    results: list[dict] = []
+    try:
+        with InfluxDBClient(url=cfg.url, token=cfg.token, org=cfg.org) as client:
+            tables = client.query_api().query(flux)
+    except Exception:
+        return []
+    for table in tables:
+        for record in getattr(table, "records", []):
+            values = getattr(record, "values", {})
+            entry = {
+                "timestamp": str(values.get("_time") or ""),
+                "account_id": values.get("account_id"),
+                "model_id": values.get("model_id"),
+                "instrument": values.get("instrument"),
+                "decision": values.get("decision"),
+                "confidence": values.get("confidence"),
+                "signal_generated": bool(values.get("signal_generated")),
+                "decision_actionable": bool(values.get("decision_actionable")),
+                "order_ready": bool(values.get("order_ready")),
+                "risk_passed": bool(values.get("risk_passed")),
+                "submitted": bool(values.get("submitted")),
+                "fallback_used": bool(values.get("fallback_used")),
+                "notes": values.get("notes"),
+            }
+            results.append(entry)
+    return results
 
 
 def _get_execution_log_writer() -> Optional["InfluxWriter"]:
@@ -161,6 +383,25 @@ def _get_execution_log_writer() -> Optional["InfluxWriter"]:
     except Exception:
         _EXEC_LOG_WRITER = None
     return _EXEC_LOG_WRITER
+
+
+def _get_order_debug_writer() -> Optional["InfluxWriter"]:
+    global _ORDER_DEBUG_WRITER
+    if InfluxWriter is None:
+        return None
+    if _ORDER_DEBUG_WRITER is not None:
+        return _ORDER_DEBUG_WRITER
+    try:
+        cfg = InfluxConfig.from_env()
+    except Exception:
+        return None
+    if not getattr(cfg, "token", None):
+        return None
+    try:
+        _ORDER_DEBUG_WRITER = InfluxWriter(cfg)
+    except Exception:
+        _ORDER_DEBUG_WRITER = None
+    return _ORDER_DEBUG_WRITER
 
 
 def _hydrate_execution_log_from_influx(limit: int = 20) -> None:
@@ -310,6 +551,16 @@ def update_task_intervals(*, market_interval: Optional[int] = None, ai_interval:
             )
         logger.info("Updated AI execution interval to %ds", _AI_INTERVAL)
 
+
+async def run_market_job_once() -> Dict[str, str]:
+    """Manually trigger the market data ingestion job."""
+    return await _market_data_ingestion_job()
+
+
+async def run_ai_job_once() -> Dict[str, str]:
+    """Manually trigger the AI execution workflow job."""
+    return await _execute_model_workflow_job()
+
 def shutdown_scheduler() -> None:
     """Stop the scheduler when the application shuts down."""
     global _SCHEDULER, _FEATURE_CLIENT, _FEATURE_CONFIG, _EXEC_LOG_WRITER
@@ -339,11 +590,12 @@ def _refresh_metrics_job() -> None:
     _record_equity_points(repository)
 
 
-async def _market_data_ingestion_job() -> None:
+async def _market_data_ingestion_job() -> Dict[str, str]:
     if not TRADABLE_INSTRUMENTS:
         logger.debug("No tradable instruments configured; skipping market ingestion job.")
-        _append_execution_log("market", "skipped", "未配置可交易合约")
-        return
+        detail = "未配置可交易合约"
+        _append_execution_log("market", "skipped", detail)
+        return {"status": "skipped", "detail": detail}
     pipeline = _get_pipeline()
     try:
         result = await pipeline.run_cycle(
@@ -356,19 +608,23 @@ async def _market_data_ingestion_job() -> None:
         )
         detail = f"{len(result.feature_snapshots)} 条币对，{len(result.signals)} 条信号"
         _append_execution_log("market", "success", detail)
+        return {"status": "success", "detail": detail}
     except Exception as exc:
         logger.warning("Market ingestion job failed: %s", exc)
-        _append_execution_log("market", "error", str(exc))
+        message = str(exc)
+        _append_execution_log("market", "error", message)
+        return {"status": "error", "detail": message}
 
 
-async def _execute_model_workflow_job() -> None:
+async def _execute_model_workflow_job() -> Dict[str, str]:
     """
     Drive the signal �� routing �� risk �� execution loop for configured accounts.
     """
     if not OKX_ACCOUNTS:
         logger.debug("No OKX accounts configured; skipping execution job.")
-        _append_execution_log("ai", "skipped", "未配置 OKX 账户")
-        return
+        detail = "未配置 OKX 账户"
+        _append_execution_log("ai", "skipped", detail)
+        return {"status": "skipped", "detail": detail}
 
     repository = get_account_repository()
     registry = get_portfolio_registry()
@@ -377,13 +633,14 @@ async def _execute_model_workflow_job() -> None:
         okx_accounts=OKX_ACCOUNTS,
         instrument_fallbacks=TRADABLE_INSTRUMENTS,
     )
-    risk_engine = RiskEngine()
+    risk_engine = _build_risk_engine()
     validator = BasicOrderValidator(
         instrument_allowlist=set(TRADABLE_INSTRUMENTS) if TRADABLE_INSTRUMENTS else None
     )
     processed_accounts = 0
     submitted_orders = 0
     errors = 0
+    signal_summaries: list[str] = []
 
     try:
         async with SignalRuntime() as runtime:
@@ -397,7 +654,7 @@ async def _execute_model_workflow_job() -> None:
                     continue
                 processed_accounts += 1
                 try:
-                    order_submitted = await _process_account_signal(
+                    order_submitted, signal_summary = await _process_account_signal(
                         account_key=account_key,
                         meta=meta,
                         runtime=runtime,
@@ -406,6 +663,8 @@ async def _execute_model_workflow_job() -> None:
                         risk_engine=risk_engine,
                         repository=repository,
                     )
+                    if signal_summary:
+                        signal_summaries.append(signal_summary)
                     if order_submitted:
                         submitted_orders += 1
                 except OrderValidationError as exc:
@@ -416,10 +675,32 @@ async def _execute_model_workflow_job() -> None:
                     logger.exception("Execution pipeline failed for %s: %s", account_key, exc)
         status = "success" if errors == 0 else "warning"
         detail = f"处理 {processed_accounts} 个账户，提交 {submitted_orders} 个订单，错误 {errors} 次"
+        if signal_summaries:
+            preview = " | ".join(signal_summaries[:5])
+            if len(signal_summaries) > 5:
+                preview += " | ..."
+            detail = f"{detail}；信号详情：{preview}"
+        summary_entry = {
+            "account_key": "scheduler",
+            "account_id": "-",
+            "model_id": "-",
+            "instrument": "-",
+            "account_enabled": processed_accounts > 0,
+            "signal_generated": processed_accounts > 0,
+            "decision_actionable": submitted_orders > 0,
+            "order_ready": submitted_orders > 0,
+            "risk_passed": submitted_orders > 0 and errors == 0,
+            "submitted": submitted_orders > 0,
+            "notes": detail,
+        }
+        _record_order_debug_entry(summary_entry)
         _append_execution_log("ai", status, detail)
+        return {"status": status, "detail": detail}
     except Exception as exc:
         logger.exception("Execution job fatal error: %s", exc)
-        _append_execution_log("ai", "error", str(exc))
+        message = str(exc)
+        _append_execution_log("ai", "error", message)
+        return {"status": "error", "detail": message}
 
 async def _process_account_signal(
     *,
@@ -430,10 +711,24 @@ async def _process_account_signal(
     validator: BasicOrderValidator,
     risk_engine: RiskEngine,
     repository: AccountRepository,
-) -> bool:
+) -> Tuple[bool, Optional[str]]:
     snapshot = await asyncio.to_thread(_collect_okx_snapshot, account_key, meta)
     if snapshot is None:
-        return False
+        _record_order_debug_entry(
+            {
+                "account_key": account_key,
+                "account_id": meta.get("account_id") or f"okx_{account_key}",
+                "model_id": meta.get("model_id") or account_key,
+                "account_enabled": bool(meta.get("enabled", True)),
+                "signal_generated": False,
+                "decision_actionable": False,
+                "order_ready": False,
+                "risk_passed": False,
+                "submitted": False,
+                "notes": "无法获取账户快照",
+            }
+        )
+        return False, None
     account, balances, positions, trades, open_orders, market_price = snapshot
 
     _persist_snapshot(
@@ -445,6 +740,23 @@ async def _process_account_signal(
         open_orders=open_orders,
     )
 
+    debug_entry: Dict[str, Any] = {
+        "account_key": account_key,
+        "account_id": account.account_id,
+        "model_id": account.model_id,
+        "instrument": None,
+        "account_enabled": bool(meta.get("enabled", True)),
+        "signal_generated": False,
+        "decision_actionable": False,
+        "order_ready": False,
+        "risk_passed": False,
+        "submitted": False,
+        "decision": None,
+        "confidence": None,
+        "fallback_used": False,
+        "notes": "",
+    }
+
     request = _build_signal_request(
         model_id=account.model_id,
         meta=meta,
@@ -454,9 +766,17 @@ async def _process_account_signal(
     )
     if request is None:
         logger.debug("Unable to build signal request for %s; skipping", account_key)
-        return False
-
+        debug_entry["notes"] = "缺少可交易合约"
+        _record_order_debug_entry(debug_entry)
+        return False, None
     response = await runtime.generate_signal(request)
+    debug_entry["signal_generated"] = True
+    debug_entry["decision"] = response.decision
+    try:
+        debug_entry["confidence"] = float(response.confidence)
+    except Exception:
+        debug_entry["confidence"] = None
+    debug_entry["decision_actionable"] = (response.decision or "").lower() not in {"hold"}
     routed = router.route(
         response,
         market=request.market,
@@ -464,12 +784,69 @@ async def _process_account_signal(
         positions=positions,
         account_meta=meta,
     )
+    if not routed and not _has_open_positions(positions):
+        fallback = await _select_fallback_trade(
+            runtime=runtime,
+            router=router,
+            model_id=account.model_id,
+            meta=meta,
+            account=account,
+            positions=positions,
+            market_price=market_price,
+        )
+        if fallback:
+            request, response, routed = fallback
+            debug_entry["fallback_used"] = True
+            debug_entry["decision_actionable"] = True
+            logger.info(
+                "Fallback trade selected for %s using %s (confidence %.2f)",
+                account_key,
+                routed.intent.instrument_id,
+                response.confidence,
+            )
+    signal_summary = _summarize_ai_signal(response, request, routed)
+    _record_ai_signal_entry(response, request, routed)
     if not routed:
         logger.debug("Router did not produce executable order for %s", account_key)
-        return False
+        debug_entry["instrument"] = request.market.instrument_id
+        debug_entry["notes"] = "模型指令为 hold 或缺少订单信息"
+        _record_order_debug_entry(debug_entry)
+        return False, signal_summary
+    debug_entry["order_ready"] = True
+    debug_entry["instrument"] = routed.intent.instrument_id or request.market.instrument_id
 
-    ensure_valid_order(routed.intent, [validator])
+    with _RISK_CONFIG_LOCK:
+        min_notional = float(_RISK_CONFIG.get("min_notional_usd", 0.0))
+    if min_notional > 0:
+        price_ref = (
+            routed.intent.price
+            or routed.market.mid_price
+            or routed.market.last_price
+            or routed.market.best_bid
+            or routed.market.best_ask
+        )
+        try:
+            notional = abs(float(routed.intent.size) * float(price_ref))
+        except Exception:
+            notional = 0.0
+        if notional <= 0:
+            debug_entry["notes"] = "缺少价格无法计算名义金额"
+            _record_order_debug_entry(debug_entry)
+            return False, signal_summary
+        if notional < min_notional:
+            debug_entry["notes"] = f"名义金额 {notional:.2f} 小于最小下单金额 {min_notional:.2f}"
+            _record_order_debug_entry(debug_entry)
+            return False, signal_summary
 
+    try:
+        ensure_valid_order(routed.intent, [validator])
+    except OrderValidationError as exc:
+        debug_entry["notes"] = f"下单校验失败: {exc}"
+        _record_order_debug_entry(debug_entry)
+        raise
+
+    signal_summary = _summarize_ai_signal(response, request, routed)
+    _prime_price_band(risk_engine, routed.market)
     evaluation = risk_engine.evaluate(routed.intent, routed.market, routed.portfolio_metrics)
     if not evaluation.approved:
         logger.info(
@@ -477,13 +854,23 @@ async def _process_account_signal(
             account_key,
             [violation.message for violation in evaluation.violations],
         )
-        return False
+        debug_entry["risk_passed"] = False
+        debug_entry["notes"] = "; ".join(violation.message for violation in evaluation.violations)
+        _record_order_debug_entry(debug_entry)
+        return False, signal_summary
+    debug_entry["risk_passed"] = True
 
-    execution_result = await asyncio.to_thread(_place_order, meta, routed.intent)
+    execution_result, placement_error = await asyncio.to_thread(_place_order, meta, routed.intent)
     if execution_result is None:
-        return False
+        debug_entry["notes"] = f"交易所下单失败: {placement_error or '未知错误'}"
+        debug_entry["placement_error"] = placement_error
+        _record_order_debug_entry(debug_entry)
+        return False, signal_summary
 
     _record_submitted_order(repository, routed, execution_result)
+    debug_entry["submitted"] = True
+    debug_entry["notes"] = f"order_id={execution_result.get('order_id')}"
+    _record_order_debug_entry(debug_entry)
     logger.info(
         "Submitted order %s for %s (%s %s @ %s)",
         execution_result.get("order_id"),
@@ -492,7 +879,74 @@ async def _process_account_signal(
         routed.intent.size,
         routed.intent.price or "MKT",
     )
-    return True
+    return True, signal_summary
+
+
+def _summarize_ai_signal(
+    response: SignalResponse,
+    request: SignalRequest,
+    routed: Optional[RoutedOrder],
+) -> str:
+    instrument = getattr(request.market, "instrument_id", None) or (
+        response.suggested_order or {}
+    ).get("instrument_id") or "-"
+    decision = response.decision
+    confidence = f"{response.confidence:.2f}"
+    order_desc = ""
+    if routed and routed.intent:
+        intent = routed.intent
+        intent_instrument = intent.instrument_id or instrument
+        instrument = intent_instrument or instrument
+        order_desc = f"{intent.side} {intent.size} {intent_instrument}"
+    else:
+        suggested = response.suggested_order or {}
+        side = suggested.get("side")
+        size = suggested.get("size")
+        instrument = suggested.get("instrument_id", instrument)
+        if side or size:
+            size_text = "-" if size in (None, "") else str(size)
+            order_desc = f"{side or '-'} {size_text}"
+    reason = (response.reasoning or "").strip().replace("\n", " ")
+    if reason:
+        reason = f" 理由:{reason}"
+    return f"{instrument}:{response.model_id}={decision}({confidence}){(' -> ' + order_desc) if order_desc else ''}{reason}"
+
+
+def _record_ai_signal_entry(
+    response: SignalResponse,
+    request: SignalRequest,
+    routed: Optional[RoutedOrder],
+) -> None:
+    if AI_SIGNAL_LOG_PATH is None:
+        return
+    order_payload: Dict[str, Any] = {}
+    instrument = getattr(request.market, "instrument_id", None)
+    if routed and routed.intent:
+        intent = routed.intent
+        instrument = intent.instrument_id or instrument
+        order_payload = {
+            "instrument_id": intent.instrument_id,
+            "side": intent.side,
+            "size": intent.size,
+            "type": intent.order_type,
+            "price": intent.price,
+        }
+    elif response.suggested_order:
+        order_payload = dict(response.suggested_order)
+        instrument = order_payload.get("instrument_id") or instrument
+    record = {
+        "timestamp": response.generated_at.isoformat(),
+        "instrument_id": instrument or "-",
+        "model_id": response.model_id,
+        "decision": response.decision,
+        "confidence": response.confidence,
+        "reasoning": response.reasoning,
+        "order": order_payload,
+    }
+    try:
+        _append_signal_log(AI_SIGNAL_LOG_PATH, record, max_lines=SIGNAL_LOG_MAX_LINES)
+    except Exception:
+        logger.debug("Failed to append AI signal log.", exc_info=True)
 
 
 def _collect_okx_snapshot(
@@ -581,8 +1035,9 @@ def _build_signal_request(
     account: Account,
     positions: Sequence[Position],
     market_price: float,
+    instrument_override: Optional[str] = None,
 ) -> Optional[SignalRequest]:
-    instrument = (
+    instrument = instrument_override or (
         meta.get("default_instrument")
         or meta.get("instrument_id")
         or _infer_instrument_from_positions(positions)
@@ -648,6 +1103,62 @@ def _build_signal_request(
     )
 
 
+async def _select_fallback_trade(
+    *,
+    runtime: SignalRuntime,
+    router: SignalRouter,
+    model_id: str,
+    meta: Dict[str, str],
+    account: Account,
+    positions: Sequence[Position],
+    market_price: float,
+) -> Optional[Tuple[SignalRequest, SignalResponse, RoutedOrder]]:
+    """Evaluate all tradable instruments and return the highest-confidence routed order."""
+    if not TRADABLE_INSTRUMENTS:
+        return None
+    candidates: list[tuple[float, SignalRequest, SignalResponse, RoutedOrder]] = []
+    seen: set[str] = set()
+    for instrument in TRADABLE_INSTRUMENTS:
+        inst = (instrument or "").strip()
+        if not inst or inst in seen:
+            continue
+        seen.add(inst)
+        request = _build_signal_request(
+            model_id=model_id,
+            meta=meta,
+            account=account,
+            positions=positions,
+            market_price=market_price,
+            instrument_override=inst,
+        )
+        if request is None:
+            continue
+        try:
+            response = await runtime.generate_signal(request)
+        except Exception as exc:  # pragma: no cover - adapter failures handled per instrument
+            logger.debug("Fallback signal generation failed for %s: %s", inst, exc)
+            continue
+        routed = router.route(
+            response,
+            market=request.market,
+            account=account,
+            positions=positions,
+            account_meta=meta,
+        )
+        if not routed:
+            continue
+        candidates.append((float(response.confidence or 0.0), request, response, routed))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, best_request, best_response, best_routed = candidates[0]
+    fallback_meta = best_routed.intent.metadata
+    fallback_meta["fallback_selected"] = True
+    if best_routed.intent.instrument_id in TRADABLE_INSTRUMENTS:
+        fallback_meta["fallback_rank"] = TRADABLE_INSTRUMENTS.index(best_routed.intent.instrument_id) + 1
+    return best_request, best_response, best_routed
+
+
 def _summarize_positions_for_ai(positions: Sequence[Position]) -> List[Dict[str, Any]]:
     """Convert full position models into lightweight dicts for model prompts."""
     summaries: List[Dict[str, Any]] = []
@@ -667,7 +1178,36 @@ def _summarize_positions_for_ai(positions: Sequence[Position]) -> List[Dict[str,
     return summaries
 
 
-def _place_order(meta: Dict[str, str], intent: OrderIntent) -> Optional[Dict[str, object]]:
+def _has_open_positions(positions: Sequence[Position]) -> bool:
+    """Return True when the account currently holds any non-zero quantity."""
+    for position in positions:
+        try:
+            qty = float(position.quantity)
+        except (TypeError, ValueError):
+            continue
+        if abs(qty) > 1e-8:
+            return True
+    return False
+
+
+def _choose_margin_mode(instrument_id: str, meta: Dict[str, str]) -> str:
+    """
+    Derive the correct OKX tdMode for an order.
+
+    OKX perpetual/futures contracts reject "cash" (spot) margin mode with
+    a generic "All operations failed" error. Default to cross margin for
+    derivative symbols when no explicit override is provided.
+    """
+    override = str(meta.get("margin_mode") or "").lower()
+    if override in {"cash", "cross", "isolated"}:
+        return override
+    symbol = (instrument_id or "").upper()
+    if symbol.endswith("-SWAP") or "FUTURE" in symbol:
+        return "cross"
+    return "cash"
+
+
+def _place_order(meta: Dict[str, str], intent: OrderIntent) -> tuple[Optional[Dict[str, object]], Optional[str]]:
     credentials = ExchangeCredentials(
         api_key=meta["api_key"],
         api_secret=meta["api_secret"],
@@ -679,7 +1219,7 @@ def _place_order(meta: Dict[str, str], intent: OrderIntent) -> Optional[Dict[str
         client.authenticate(credentials)
     except OkxClientError as exc:
         logger.error("[%s] Unable to authenticate for order placement: %s", account_id, exc)
-        return None
+        return None, str(exc)
 
     try:
         payload = {
@@ -687,16 +1227,35 @@ def _place_order(meta: Dict[str, str], intent: OrderIntent) -> Optional[Dict[str
             "side": intent.side,
             "order_type": intent.order_type,
             "size": intent.size,
+            "margin_mode": _choose_margin_mode(intent.instrument_id, meta),
         }
         if intent.price:
             payload["price"] = intent.price
-        if intent.metadata.get("client_order_id"):
-            payload["client_order_id"] = intent.metadata["client_order_id"]
-        return client.place_order(payload)
+        client_order_id = intent.metadata.get("client_order_id") if isinstance(intent.metadata, dict) else None
+        if client_order_id:
+            payload["client_order_id"] = client_order_id
+        raw_response = None
+        try:
+            result = client.place_order(payload)
+            raw_response = result.get("raw")
+            return result, None
+        except OkxClientError as exc:
+            raw_response = getattr(exc, "payload", None) or getattr(exc, "args", [None])[0]
+            detail = str(exc)
+            if getattr(exc, "payload", None):
+                code = exc.payload.get("code")
+                msg = exc.payload.get("msg") or exc.payload.get("sMsg")
+                detail = f"{detail} (code={code}, msg={msg})"
+            raise OkxClientError(detail, payload=getattr(exc, "payload", None))
     except OkxClientError as exc:
         logger.error("[%s] Order placement failed: %s", account_id, exc)
-        return None
+        return None, f"{exc}"
+    except Exception as exc:
+        logger.exception("[%s] Unexpected error during order placement", account_id)
+        return None, str(exc)
     finally:
+        if raw_response:
+            logger.debug("[%s] OKX raw response: %s", account_id, raw_response)
         client.close()
 
 

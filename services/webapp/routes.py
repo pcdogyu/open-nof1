@@ -25,6 +25,8 @@ from accounts.repository import AccountRepository
 from data_pipeline.influx import InfluxConfig, InfluxWriter
 from services.analytics.leaderboard import get_leaderboard, refresh_leaderboard_cache
 from services.jobs import scheduler as scheduler_module
+from exchanges.base_client import ExchangeCredentials
+from exchanges.okx.paper import OkxPaperClient, OkxClientError
 from services.okx.catalog import (
     load_catalog_cache,
     refresh_okx_instrument_catalog,
@@ -51,15 +53,19 @@ try:
     from config import (
         MODEL_DEFAULTS,
         AI_INTERACTION_INTERVAL,
-        MARKET_SYNC_INTERVAL,
-        OKX_ACCOUNTS,
-        PIPELINE_POLL_INTERVAL,
-        TRADABLE_INSTRUMENTS,
+    MARKET_SYNC_INTERVAL,
+    OKX_ACCOUNTS,
+    PIPELINE_POLL_INTERVAL,
+    TRADABLE_INSTRUMENTS,
     )
     try:
         from config import OKX_CACHE_TTL_SECONDS as _OKX_TTL
     except Exception:  # name missing or other
         _OKX_TTL = 600
+    try:
+        from config import RISK_SETTINGS as _RISK_DEFAULTS  # type: ignore[attr-defined]
+    except Exception:
+        _RISK_DEFAULTS = {}
 except ImportError:  # pragma: no cover - fallback for test envs
     MODEL_DEFAULTS = {
         "deepseek-v1": {
@@ -88,6 +94,7 @@ except ImportError:  # pragma: no cover - fallback for test envs
     MARKET_SYNC_INTERVAL = 60
     AI_INTERACTION_INTERVAL = 300
     _OKX_TTL = 600
+    _RISK_DEFAULTS = {}
 router = APIRouter()
 _OKX_CACHE_TTL_SECONDS = int(_OKX_TTL)
 
@@ -123,6 +130,75 @@ _SCHEDULER_SETTINGS_LOCK = Lock()
 _SCHEDULER_SETTINGS: dict[str, object] = {
     "market_interval": int(MARKET_SYNC_INTERVAL),
     "ai_interval": int(AI_INTERACTION_INTERVAL),
+    "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+}
+
+_DEFAULT_RISK_SETTINGS = {
+    "price_tolerance_pct": 0.02,
+    "max_drawdown_pct": 8.0,
+    "max_loss_absolute": 1500.0,
+    "cooldown_seconds": 600,
+    "min_notional_usd": 50.0,
+    "take_profit_pct": 0.0,
+    "stop_loss_pct": 0.0,
+    "default_leverage": 1,
+    "max_leverage": 125,
+}
+
+
+def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float | int]:
+    """Normalize risk configuration values and enforce bounds."""
+    config = dict(_DEFAULT_RISK_SETTINGS)
+    if isinstance(raw, dict):
+        for key in (
+            "price_tolerance_pct",
+            "max_drawdown_pct",
+            "max_loss_absolute",
+            "cooldown_seconds",
+            "min_notional_usd",
+            "take_profit_pct",
+            "stop_loss_pct",
+            "default_leverage",
+            "max_leverage",
+        ):
+            if key in raw:
+                config[key] = raw[key]  # type: ignore[assignment]
+    price = float(config["price_tolerance_pct"])
+    drawdown = float(config["max_drawdown_pct"])
+    max_loss = float(config["max_loss_absolute"])
+    cooldown = int(config["cooldown_seconds"])
+    min_notional = float(config["min_notional_usd"])
+    take_profit = float(config["take_profit_pct"])
+    stop_loss = float(config["stop_loss_pct"])
+    default_leverage = int(config.get("default_leverage", 1))
+    max_leverage = int(config.get("max_leverage", 125))
+    price = max(0.001, min(0.5, price))
+    drawdown = max(0.1, min(95.0, drawdown))
+    max_loss = max(1.0, max_loss)
+    cooldown = max(60, min(86400, cooldown))
+    min_notional = max(0.0, min_notional)
+    take_profit = max(0.0, min(500.0, take_profit))
+    stop_loss = max(0.0, min(95.0, stop_loss))
+    default_leverage = max(1, min(125, default_leverage))
+    max_leverage = max(1, min(125, max_leverage))
+    if max_leverage < default_leverage:
+        max_leverage = default_leverage
+    return {
+        "price_tolerance_pct": price,
+        "max_drawdown_pct": drawdown,
+        "max_loss_absolute": max_loss,
+        "cooldown_seconds": cooldown,
+        "min_notional_usd": min_notional,
+        "take_profit_pct": take_profit,
+        "stop_loss_pct": stop_loss,
+        "default_leverage": default_leverage,
+        "max_leverage": max_leverage,
+    }
+
+
+_RISK_SETTINGS_LOCK = Lock()
+_RISK_SETTINGS: dict[str, object] = {
+    **_sanitize_risk_config(_RISK_DEFAULTS),
     "updated_at": datetime.now(tz=timezone.utc).isoformat(),
 }
 
@@ -228,6 +304,137 @@ def update_scheduler_settings(market_interval: int, ai_interval: int) -> dict:
         logger.debug("Failed to notify scheduler of interval change: %s", exc)
 
     return get_scheduler_settings()
+
+
+def get_order_debug_status(limit: int = 25) -> list[dict]:
+    """Return the latest order pipeline debug entries."""
+    return scheduler_module.get_order_debug_log(limit=limit)
+
+
+def get_risk_settings() -> dict:
+    """Return the currently active risk configuration."""
+    with _RISK_SETTINGS_LOCK:
+        return {
+            "price_tolerance_pct": float(_RISK_SETTINGS["price_tolerance_pct"]),
+            "max_drawdown_pct": float(_RISK_SETTINGS["max_drawdown_pct"]),
+            "max_loss_absolute": float(_RISK_SETTINGS["max_loss_absolute"]),
+            "cooldown_seconds": int(_RISK_SETTINGS["cooldown_seconds"]),
+            "min_notional_usd": float(_RISK_SETTINGS.get("min_notional_usd", 0.0)),
+            "take_profit_pct": float(_RISK_SETTINGS.get("take_profit_pct", 0.0)),
+            "stop_loss_pct": float(_RISK_SETTINGS.get("stop_loss_pct", 0.0)),
+            "default_leverage": int(_RISK_SETTINGS.get("default_leverage", 1)),
+            "max_leverage": int(_RISK_SETTINGS.get("max_leverage", 125)),
+            "updated_at": _RISK_SETTINGS["updated_at"],
+        }
+
+
+def update_risk_settings(
+    *,
+    price_tolerance_pct: float,
+    max_drawdown_pct: float,
+    max_loss_absolute: float,
+    cooldown_seconds: int,
+    min_notional_usd: float,
+    take_profit_pct: float,
+    stop_loss_pct: float,
+    default_leverage: int,
+    max_leverage: int,
+) -> dict:
+    """Update risk parameters and persist them to config.py."""
+    try:
+        price = float(price_tolerance_pct)
+        drawdown = float(max_drawdown_pct)
+        max_loss = float(max_loss_absolute)
+        min_notional = float(min_notional_usd)
+        take_profit = float(take_profit_pct)
+        stop_loss = float(stop_loss_pct)
+        default_leverage_val = int(default_leverage)
+        max_leverage_val = int(max_leverage)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="数值必须为数字。")
+    try:
+        cooldown = int(cooldown_seconds)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="冷却时长必须为整数。")
+
+    if price <= 0 or price > 0.5:
+        raise HTTPException(status_code=400, detail="价格偏离长度需在 0.1% - 50% 之间。")
+    if drawdown <= 0 or drawdown > 95:
+        raise HTTPException(status_code=400, detail="回撤阈值需在 0 - 95% 之间。")
+    if max_loss <= 0:
+        raise HTTPException(status_code=400, detail="最大亏损需为正。")
+    if cooldown < 60 or cooldown > 86400:
+        raise HTTPException(status_code=400, detail="冷却时间需在 60 秒 - 24 小时之间。")
+    if min_notional < 0:
+        raise HTTPException(status_code=400, detail="单笔金额不能为负。")
+    if take_profit < 0 or take_profit > 500:
+        raise HTTPException(status_code=400, detail="止盈需在 0-500% 之间。")
+    if stop_loss < 0 or stop_loss > 95:
+        raise HTTPException(status_code=400, detail="止损需在 0-95% 之间。")
+    if default_leverage_val < 1 or default_leverage_val > 125:
+        raise HTTPException(status_code=400, detail="默认杠杆需在 1-125 之间。")
+    if max_leverage_val < 1 or max_leverage_val > 125:
+        raise HTTPException(status_code=400, detail="最大杠杆需在 1-125 之间。")
+    if max_leverage_val < default_leverage_val:
+        raise HTTPException(status_code=400, detail="最大杠杆需大于等于默认杠杆。")
+
+    normalized = {
+        "price_tolerance_pct": price,
+        "max_drawdown_pct": drawdown,
+        "max_loss_absolute": max_loss,
+        "cooldown_seconds": cooldown,
+        "min_notional_usd": min_notional,
+        "take_profit_pct": take_profit,
+        "stop_loss_pct": stop_loss,
+        "default_leverage": default_leverage_val,
+        "max_leverage": max_leverage_val,
+    }
+    with _RISK_SETTINGS_LOCK:
+        for key, value in normalized.items():
+            _RISK_SETTINGS[key] = value
+        _RISK_SETTINGS["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
+        _persist_risk_settings(normalized)
+
+    try:
+        scheduler_module.update_risk_configuration(**normalized)
+    except Exception as exc:  # pragma: no cover - scheduler optional
+        logger.debug("Failed to notify scheduler of risk config change: %s", exc)
+
+    return get_risk_settings()
+
+
+@router.post(
+    "/api/scheduler/test-market",
+    summary="Trigger the market data job once for testing",
+)
+async def trigger_market_job_api() -> dict:
+    try:
+        result = await scheduler_module.run_market_job_once()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Manual market job failed: %s", exc)
+        raise HTTPException(status_code=500, detail="触发行情测试失败")
+    return {
+        "status": result.get("status", "unknown"),
+        "detail": result.get("detail") or "",
+        "executed_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+@router.post(
+    "/api/scheduler/test-ai",
+    summary="Trigger the AI execution job once for testing",
+)
+async def trigger_ai_job_api() -> dict:
+    try:
+        result = await scheduler_module.run_ai_job_once()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Manual AI job failed: %s", exc)
+        raise HTTPException(status_code=500, detail="触发 AI 测试失败")
+    return {
+        "status": result.get("status", "unknown"),
+        "detail": result.get("detail") or "",
+        "executed_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
 
 
 async def refresh_instrument_catalog() -> dict:
@@ -674,6 +881,198 @@ def get_okx_summary(
         "accounts": account_payloads,
         "leaderboard": leaderboard,
         "sync_errors": sync_errors,
+    }
+
+
+def _resolve_okx_account_meta(account_identifier: str) -> tuple[str, dict]:
+    normalized = (account_identifier or "").strip()
+    for key, meta in OKX_ACCOUNTS.items():
+        account_id = meta.get("account_id") or key
+        if normalized and normalized in {account_id, key}:
+            return account_id, meta
+    raise HTTPException(status_code=400, detail=f"未找到账户 {account_identifier}")
+
+
+def _choose_margin_mode(instrument_id: str, meta: dict, override: str | None) -> str:
+    mode = (override or meta.get("margin_mode") or "").lower()
+    if mode in {"cash", "cross", "isolated"}:
+        return mode
+    symbol = (instrument_id or "").upper()
+    if symbol.endswith("-SWAP") or "FUTURE" in symbol:
+        return "cross"
+    return "cash"
+
+
+def place_manual_okx_order(
+    *,
+    account_id: str,
+    instrument_id: str,
+    side: str,
+    order_type: str,
+    size: float,
+    price: float | None,
+    margin_mode: str | None = None,
+) -> dict:
+    """Submit a manual order to the OKX demo endpoint."""
+    account_key, meta = _resolve_okx_account_meta(account_id)
+    for field in ("api_key", "api_secret"):
+        if not meta.get(field):
+            raise HTTPException(status_code=400, detail=f"账户 {account_key} 缺少 {field}")
+    normalized_side = side.lower()
+    normalized_type = order_type.lower()
+    if normalized_side not in {"buy", "sell"}:
+        raise HTTPException(status_code=400, detail="方向必须为 buy 或 sell")
+    if normalized_type not in {"limit", "market"}:
+        raise HTTPException(status_code=400, detail="订单类型必须为 limit 或 market")
+
+    payload = {
+        "instrument_id": instrument_id.upper(),
+        "side": normalized_side,
+        "order_type": normalized_type,
+        "size": str(size),
+        "margin_mode": _choose_margin_mode(instrument_id, meta, margin_mode),
+    }
+    if normalized_type == "limit":
+        if price is None:
+            raise HTTPException(status_code=400, detail="限价单需要价格")
+        payload["price"] = str(price)
+
+    credentials = ExchangeCredentials(
+        api_key=meta["api_key"],
+        api_secret=meta["api_secret"],
+        passphrase=meta.get("passphrase"),
+    )
+    client = OkxPaperClient()
+    try:
+        client.authenticate(credentials)
+        response = client.place_order(payload)
+    except OkxClientError as exc:
+        payload = getattr(exc, "payload", None) or {}
+        code = payload.get("code")
+        msg = payload.get("msg") or payload.get("sMsg")
+        detail = str(exc)
+        if code or msg:
+            detail = f"{detail} (code={code}, msg={msg})"
+        raise HTTPException(status_code=400, detail=detail)
+    finally:
+        client.close()
+
+    return {
+        "status": response.get("status"),
+        "order_id": response.get("order_id"),
+        "client_order_id": response.get("client_order_id"),
+        "raw": response.get("raw"),
+    }
+
+
+def close_okx_position(
+    *,
+    account_id: str,
+    instrument_id: str,
+    position_side: str,
+    quantity: float,
+    margin_mode: str | None = None,
+) -> dict:
+    """Submit a market order to close an existing position."""
+    account_key, meta = _resolve_okx_account_meta(account_id)
+    for field in ("api_key", "api_secret"):
+        if not meta.get(field):
+            raise HTTPException(status_code=400, detail=f"�˻� {account_key} ȱ�� {field}")
+
+    try:
+        normalized_qty = float(quantity)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="�ֲ���ҪΪ��Ч��������")
+    if normalized_qty <= 0:
+        raise HTTPException(status_code=400, detail="�ֲ�����Ӧ���� 0")
+
+    side_lower = (position_side or "").lower()
+    if side_lower in {"long", "buy"}:
+        close_side = "sell"
+    elif side_lower in {"short", "sell"}:
+        close_side = "buy"
+    else:
+        raise HTTPException(status_code=400, detail=f"δ֪�ĳ�Ʒ�˵�：{position_side}")
+
+    payload = {
+        "instrument_id": instrument_id.upper(),
+        "side": close_side,
+        "order_type": "market",
+        "size": str(normalized_qty),
+        "margin_mode": _choose_margin_mode(instrument_id, meta, margin_mode),
+    }
+    credentials = ExchangeCredentials(
+        api_key=meta["api_key"],
+        api_secret=meta["api_secret"],
+        passphrase=meta.get("passphrase"),
+    )
+    client = OkxPaperClient()
+    try:
+        client.authenticate(credentials)
+        response = client.place_order(payload)
+    except OkxClientError as exc:
+        payload = getattr(exc, "payload", None) or {}
+        code = payload.get("code")
+        msg = payload.get("msg") or payload.get("sMsg")
+        detail = str(exc)
+        if code or msg:
+            detail = f"{detail} (code={code}, msg={msg})"
+        raise HTTPException(status_code=400, detail=detail)
+    finally:
+        client.close()
+
+    return {
+        "status": response.get("status"),
+        "order_id": response.get("order_id"),
+        "client_order_id": response.get("client_order_id"),
+        "closed_side": close_side,
+        "raw": response.get("raw"),
+    }
+
+
+def cancel_okx_order(
+    *,
+    account_id: str,
+    instrument_id: str,
+    order_id: str,
+) -> dict:
+    """Cancel an open OKX order."""
+    account_key, meta = _resolve_okx_account_meta(account_id)
+    for field in ("api_key", "api_secret"):
+        if not meta.get(field):
+            raise HTTPException(status_code=400, detail=f"�˻� {account_key} ȱ�� {field}")
+    symbol = (instrument_id or "").strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="��Л�����Ϊ��")
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        raise HTTPException(status_code=400, detail="��������ID")
+
+    credentials = ExchangeCredentials(
+        api_key=meta["api_key"],
+        api_secret=meta["api_secret"],
+        passphrase=meta.get("passphrase"),
+    )
+    client = OkxPaperClient()
+    try:
+        client.authenticate(credentials)
+        response = client.cancel_order(order_id=normalized_order_id, instrument_id=symbol)
+    except OkxClientError as exc:
+        payload = getattr(exc, "payload", None) or {}
+        code = payload.get("code")
+        msg = payload.get("msg") or payload.get("sMsg")
+        detail = str(exc)
+        if code or msg:
+            detail = f"{detail} (code={code}, msg={msg})"
+        raise HTTPException(status_code=400, detail=detail)
+    finally:
+        client.close()
+
+    return {
+        "status": response.get("status"),
+        "order_id": response.get("order_id"),
+        "instrument_id": symbol,
+        "raw": response.get("raw"),
     }
 
 
@@ -1386,6 +1785,17 @@ def _persist_pipeline_settings(tradable_instruments: List[str], poll_interval: i
 
         config_module.TRADABLE_INSTRUMENTS = tradable_instruments  # type: ignore[attr-defined]
         config_module.PIPELINE_POLL_INTERVAL = poll_interval  # type: ignore[attr-defined]
+    except ImportError:
+        pass
+
+
+def _persist_risk_settings(settings: Dict[str, object]) -> None:
+    """Persist risk configuration settings to config.py."""
+    _replace_config_assignment("RISK_SETTINGS", settings)
+    try:
+        import config as config_module  # type: ignore
+
+        config_module.RISK_SETTINGS = settings  # type: ignore[attr-defined]
     except ImportError:
         pass
 

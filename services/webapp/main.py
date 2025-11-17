@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import logging
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
@@ -71,8 +72,94 @@ def model_manager() -> HTMLResponse:
 def okx_dashboard(request: Request) -> HTMLResponse:
     refresh_flag = str(request.query_params.get("refresh", "")).lower()
     force_refresh = refresh_flag in ("1", "true", "yes", "y")
+    order_status = request.query_params.get("order_status")
+    order_detail = request.query_params.get("detail")
     summary = routes.get_okx_summary(force_refresh=force_refresh)
-    return HTMLResponse(content=_render_okx_dashboard(summary))
+    return HTMLResponse(content=_render_okx_dashboard(summary, order_status, order_detail))
+
+
+@app.post("/okx/manual-order", include_in_schema=False)
+def okx_manual_order(
+    account_id: str = Form(...),
+    instrument_id: str = Form(...),
+    side: str = Form(...),
+    order_type: str = Form(...),
+    size: float = Form(...),
+    price: Optional[float] = Form(None),
+    margin_mode: Optional[str] = Form(None),
+) -> RedirectResponse:
+    try:
+        result = routes.place_manual_okx_order(
+            account_id=account_id.strip(),
+            instrument_id=instrument_id.strip(),
+            side=side.strip(),
+            order_type=order_type.strip(),
+            size=size,
+            price=price,
+            margin_mode=(margin_mode or "").strip() or None,
+        )
+        detail = result.get("order_id") or ""
+        return RedirectResponse(
+            url=f"/okx?order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    except Exception as exc:
+        return RedirectResponse(
+            url=f"/okx?order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+
+@app.post("/okx/close-position", include_in_schema=False)
+def okx_close_position(
+    account_id: str = Form(...),
+    instrument_id: str = Form(...),
+    position_side: str = Form(...),
+    quantity: float = Form(...),
+    margin_mode: Optional[str] = Form(None),
+) -> RedirectResponse:
+    try:
+        result = routes.close_okx_position(
+            account_id=account_id.strip(),
+            instrument_id=instrument_id.strip(),
+            position_side=position_side.strip(),
+            quantity=quantity,
+            margin_mode=(margin_mode or "").strip() or None,
+        )
+        detail = result.get("order_id") or ""
+        return RedirectResponse(
+            url=f"/okx?order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    except Exception as exc:
+        return RedirectResponse(
+            url=f"/okx?order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+
+@app.post("/okx/cancel-order", include_in_schema=False)
+def okx_cancel_order(
+    account_id: str = Form(...),
+    instrument_id: str = Form(...),
+    order_id: str = Form(...),
+) -> RedirectResponse:
+    try:
+        result = routes.cancel_okx_order(
+            account_id=account_id.strip(),
+            instrument_id=instrument_id.strip(),
+            order_id=order_id.strip(),
+        )
+        detail = result.get("order_id") or ""
+        return RedirectResponse(
+            url=f"/okx?order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    except Exception as exc:
+        return RedirectResponse(
+            url=f"/okx?order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
 
 
 @app.get("/liquidations", include_in_schema=False, response_class=HTMLResponse)
@@ -127,6 +214,44 @@ def add_pipeline_instrument(
         instrument_list.append(normalized_new)
     routes.update_pipeline_settings(instrument_list, poll_interval)
     return RedirectResponse(url="/settings", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.get("/orders/debug", include_in_schema=False, response_class=HTMLResponse)
+def order_debug_page() -> HTMLResponse:
+    entries = routes.get_order_debug_status()
+    return HTMLResponse(content=_render_order_debug_page(entries))
+
+
+@app.get("/risk", include_in_schema=False, response_class=HTMLResponse)
+def risk_settings_page() -> HTMLResponse:
+    settings = routes.get_risk_settings()
+    return HTMLResponse(content=_render_risk_page(settings))
+
+
+@app.post("/risk/update", include_in_schema=False)
+def submit_risk_settings(
+    price_tolerance_pct: float = Form(...),
+    max_drawdown_pct: float = Form(...),
+    max_loss_absolute: float = Form(...),
+    cooldown_seconds: int = Form(...),
+    min_notional_usd: float = Form(0),
+    take_profit_pct: float = Form(0),
+    stop_loss_pct: float = Form(0),
+    default_leverage: int = Form(1),
+    max_leverage: int = Form(125),
+) -> RedirectResponse:
+    routes.update_risk_settings(
+        price_tolerance_pct=price_tolerance_pct / 100.0,
+        max_drawdown_pct=max_drawdown_pct,
+        max_loss_absolute=max_loss_absolute,
+        cooldown_seconds=cooldown_seconds,
+        min_notional_usd=min_notional_usd,
+        take_profit_pct=take_profit_pct,
+        stop_loss_pct=stop_loss_pct,
+        default_leverage=default_leverage,
+        max_leverage=max_leverage,
+    )
+    return RedirectResponse(url="/risk", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @app.post("/settings/refresh-catalog", include_in_schema=False)
@@ -350,10 +475,12 @@ def _render_model_manager(catalog: list[dict]) -> str:
 
 
 
-def _render_okx_dashboard(summary: dict) -> str:
+def _render_okx_dashboard(summary: dict, order_status: str | None = None, order_detail: str | None = None) -> str:
     """Render the OKX paper trading overview page."""
     esc = _escape
     as_of = esc(_format_asia_shanghai(summary.get("as_of")))
+    settings = routes.get_pipeline_settings()
+    instruments = settings.get("tradable_instruments", [])
 
     error_block = ""
     errors = summary.get("sync_errors", []) or []
@@ -372,6 +499,16 @@ def _render_okx_dashboard(summary: dict) -> str:
             "</section>"
         )
 
+    flash_block = ""
+    if order_status:
+        kind = "success" if order_status == "success" else "error"
+        flash_block = (
+            f"<div class='flash {kind}'>"
+            f"{'下单成功' if kind == 'success' else '下单失败'}"
+            f"{'：' + esc(order_detail) if order_detail else ''}"
+            "</div>"
+        )
+
     account_sections: list[str] = []
     for bundle in summary.get("accounts", []):
         account = bundle.get("account", {}) or {}
@@ -385,9 +522,9 @@ def _render_okx_dashboard(summary: dict) -> str:
         starting_equity = _format_number(account.get("starting_equity"))
 
         balances_html = _render_balances_table(bundle.get("balances", []))
-        positions_html = _render_positions_table(bundle.get("positions", []))
+        positions_html = _render_positions_table(bundle.get("positions", []), account_id=account_id)
         trades_html = _render_trades_table(bundle.get("recent_trades", []))
-        orders_html = _render_orders_table(bundle.get("open_orders", []))
+        orders_html = _render_orders_table(bundle.get("open_orders", []), account_id=account_id)
         curve_html = _render_equity_curve(bundle.get("equity_curve", []))
 
         account_sections.append(
@@ -441,9 +578,23 @@ def _render_okx_dashboard(summary: dict) -> str:
     if not account_sections:
         account_sections.append("<p class='empty-state'>暂无 OKX 模拟账户数据。</p>")
 
+    # Build account options for manual order form
+    option_items: list[str] = []
+    for bundle in summary.get("accounts", []):
+        account_id = esc(bundle.get("account", {}).get("account_id") or "")
+        if not account_id:
+            continue
+        model_id = esc(bundle.get("account", {}).get("model_id") or "-")
+        option_items.append(f'<option value="{account_id}">{account_id} · 模型 {model_id}</option>')
+    options_html = "".join(option_items) if option_items else '<option value="" disabled selected>暂无账户</option>'
+    manual_instrument_options = _build_manual_instrument_options(instruments)
+
     return OKX_TEMPLATE.format(
         as_of=as_of,
         error_block=error_block,
+        flash_block=flash_block,
+        manual_account_options=options_html,
+        manual_instrument_options=manual_instrument_options,
         account_sections="\n".join(account_sections),
     )
 
@@ -662,6 +813,107 @@ def _render_settings_page(settings: dict, catalog: Sequence[dict]) -> str:
     )
 
 
+def _render_order_debug_page(entries: Sequence[dict]) -> str:
+    esc = _escape
+
+    def _stage(flag: object) -> str:
+        status = bool(flag)
+        label = "通过" if status else "待满足"
+        css = "pass" if status else "pending"
+        return f'<span class="stage-pill stage-{css}">{label}</span>'
+
+    rows: list[str] = []
+    for entry in entries:
+        timestamp = esc(_format_asia_shanghai(entry.get("timestamp")))
+        account = esc(entry.get("account_id") or entry.get("account_key") or "--")
+        model = esc(entry.get("model_id") or "--")
+        instrument = esc(entry.get("instrument") or "--")
+        decision = esc(entry.get("decision") or "--")
+        confidence = entry.get("confidence")
+        if confidence is not None:
+            try:
+                decision = f"{decision} ({float(confidence):.2f})"
+            except Exception:
+                decision = f"{decision} (--)"
+        if entry.get("fallback_used"):
+            decision = f"{decision} · Fallback"
+        notes = entry.get("notes") or ""
+        rows.append(
+            "<tr>"
+            f"<td>{timestamp}</td>"
+            f"<td>{account}</td>"
+            f"<td>{model}</td>"
+            f"<td>{instrument}</td>"
+            f"<td class=\"decision\">{decision}</td>"
+            f"<td>{_stage(entry.get('account_enabled'))}</td>"
+            f"<td>{_stage(entry.get('decision_actionable'))}</td>"
+            f"<td>{_stage(entry.get('order_ready'))}</td>"
+            f"<td>{_stage(entry.get('risk_passed'))}</td>"
+            f"<td>{_stage(entry.get('submitted'))}</td>"
+            f"<td>{esc(notes) if notes else '--'}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append("<tr><td colspan='11' class='empty-state'>暂无订单调试数据</td></tr>")
+    return ORDER_DEBUG_TEMPLATE.format(rows="\n".join(rows))
+
+
+def _render_risk_page(settings: dict) -> str:
+    esc = _escape
+    price_pct = float(settings.get("price_tolerance_pct") or 0.02) * 100
+    price_pct = max(0.1, min(50.0, price_pct))
+    drawdown_pct = float(settings.get("max_drawdown_pct") or 8.0)
+    drawdown_pct = max(0.1, min(95.0, drawdown_pct))
+    max_loss = float(settings.get("max_loss_absolute") or 1500.0)
+    max_loss = max(1.0, max_loss)
+    cooldown_seconds = int(settings.get("cooldown_seconds") or 600)
+    cooldown_seconds = max(60, min(86400, cooldown_seconds))
+    min_notional = max(0.0, float(settings.get("min_notional_usd") or 0.0))
+    take_profit_pct = max(0.0, min(500.0, float(settings.get("take_profit_pct") or 0.0)))
+    stop_loss_pct = max(0.0, min(95.0, float(settings.get("stop_loss_pct") or 0.0)))
+    default_leverage = max(1, min(125, int(settings.get("default_leverage") or 1)))
+    max_leverage = max(default_leverage, min(125, int(settings.get("max_leverage") or default_leverage)))
+
+    def _compact(value: float, digits: int = 2) -> str:
+        text = f"{value:.{digits}f}"
+        text = text.rstrip("0").rstrip(".")
+        return text or "0"
+
+    tolerance_text = _compact(price_pct, 2)
+    drawdown_text = _compact(drawdown_pct, 2)
+    loss_text = _compact(max_loss, 2)
+    min_notional_text = _compact(min_notional, 2)
+    take_profit_text = _compact(take_profit_pct, 2)
+    stop_loss_text = _compact(stop_loss_pct, 2)
+    default_leverage_text = _compact(default_leverage, 0)
+    max_leverage_text = _compact(max_leverage, 0)
+    cooldown_minutes = cooldown_seconds / 60
+    cooldown_minutes_text = _compact(cooldown_minutes, 1)
+    updated_at = esc(_format_asia_shanghai(settings.get("updated_at")))
+
+    return RISK_TEMPLATE.format(
+        price_tolerance_pct=esc(f"{price_pct:.2f}"),
+        price_tolerance_display=esc(tolerance_text),
+        max_drawdown_pct=esc(f"{drawdown_pct:.2f}"),
+        drawdown_display=esc(drawdown_text),
+        max_loss_absolute=esc(f"{max_loss:.2f}"),
+        max_loss_display=esc(loss_text),
+        min_notional_usd=esc(f"{min_notional:.2f}"),
+        min_notional_display=esc(min_notional_text),
+        take_profit_pct=esc(f"{take_profit_pct:.2f}"),
+        stop_loss_pct=esc(f"{stop_loss_pct:.2f}"),
+        take_profit_display=esc(take_profit_text),
+        stop_loss_display=esc(stop_loss_text),
+        default_leverage=esc(str(default_leverage)),
+        max_leverage=esc(str(max_leverage)),
+        default_leverage_display=esc(default_leverage_text),
+        max_leverage_display=esc(max_leverage_text),
+        cooldown_seconds=esc(str(cooldown_seconds)),
+        cooldown_minutes=esc(cooldown_minutes_text),
+        updated_at=updated_at,
+    )
+
+
 def _render_balances_table(balances: Sequence[dict] | None) -> str:
     esc = _escape
     rows = []
@@ -685,28 +937,45 @@ def _render_balances_table(balances: Sequence[dict] | None) -> str:
     )
 
 
-def _render_positions_table(positions: Sequence[dict] | None) -> str:
+def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str | None = None) -> str:
     esc = _escape
     rows = []
     for pos in positions or []:
+        account_value = esc(account_id or pos.get("account_id") or "")
+        instrument_value = esc(pos.get("instrument_id"))
+        raw_side = str(pos.get("side") or "")
+        side_display = "多单" if raw_side.lower() in {"long", "buy"} else "空单" if raw_side.lower() in {"short", "sell"} else raw_side
+        side_value = esc(raw_side)
+        side_display_escaped = esc(side_display)
+        quantity_value = esc(str(pos.get("quantity") if pos.get("quantity") is not None else ""))
+        action_html = (
+            "<form method='post' action='/okx/close-position' class='inline-form'>"
+            f"<input type='hidden' name='account_id' value='{account_value}'>"
+            f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
+            f"<input type='hidden' name='position_side' value='{side_value}'>"
+            f"<input type='hidden' name='quantity' value='{quantity_value}'>"
+            f"<button type='submit' class='btn-close' onclick=\"return confirm('确认平掉 {instrument_value} 持仓？');\">平仓</button>"
+            "</form>"
+        )
         rows.append(
             "<tr>"
             f"<td>{esc(pos.get('position_id'))}</td>"
-            f"<td>{esc(pos.get('instrument_id'))}</td>"
-            f"<td>{esc(pos.get('side'))}</td>"
+            f"<td>{instrument_value}</td>"
+            f"<td>{side_display_escaped}</td>"
             f"<td>{_format_number(pos.get('quantity'))}</td>"
             f"<td>{_format_number(pos.get('entry_price'))}</td>"
             f"<td>{_format_number(pos.get('mark_price'))}</td>"
             f"<td>{_format_number(pos.get('unrealized_pnl'))}</td>"
             f"<td>{esc(_format_asia_shanghai(pos.get('updated_at')))}</td>"
+            f"<td>{action_html}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='8'>暂无持仓</td></tr>")
+        rows.append("<tr><td colspan='9'>暂无持仓</td></tr>")
 
     return (
         "<table class='dense'>"
-        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>未实现盈亏</th><th>更新时间</th></tr></thead>"
+        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>未实现盈亏</th><th>更新时间</th><th>操作</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
@@ -739,14 +1008,28 @@ def _render_trades_table(trades: Sequence[dict] | None) -> str:
     )
 
 
-def _render_orders_table(orders: Sequence[dict] | None) -> str:
+
+def _render_orders_table(orders: Sequence[dict] | None, *, account_id: str | None = None) -> str:
     esc = _escape
     rows = []
     for order in orders or []:
+        account_value = esc(account_id or order.get("account_id") or "")
+        instrument_value = esc(order.get("instrument_id"))
+        order_id_value = esc(order.get("order_id"))
+        action_html = ""
+        if account_value and instrument_value and order_id_value:
+            action_html = (
+                "<form method='post' action='/okx/cancel-order' class='inline-form'>"
+                f"<input type='hidden' name='account_id' value='{account_value}'>"
+                f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
+                f"<input type='hidden' name='order_id' value='{order_id_value}'>"
+                f"<button type='submit' class='btn-cancel' onclick="return confirm('确认取消订单 {order_id_value} ?');">取消</button>"
+                "</form>"
+            )
         rows.append(
             "<tr>"
-            f"<td>{esc(order.get('order_id'))}</td>"
-            f"<td>{esc(order.get('instrument_id'))}</td>"
+            f"<td>{order_id_value}</td>"
+            f"<td>{instrument_value}</td>"
             f"<td>{esc(order.get('order_type'))}</td>"
             f"<td>{esc(order.get('side'))}</td>"
             f"<td>{_format_number(order.get('size'))}</td>"
@@ -756,17 +1039,17 @@ def _render_orders_table(orders: Sequence[dict] | None) -> str:
             f"<td>{esc(order.get('state'))}</td>"
             f"<td>{esc(_format_asia_shanghai(order.get('updated_at')))}</td>"
             f"<td>{esc(_format_asia_shanghai(order.get('created_at')))}</td>"
+            f"<td>{action_html}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='11'>暂无挂单</td></tr>")
+        rows.append("<tr><td colspan='12'>暂无挂单</td></tr>")
     return (
         "<table class='dense'>"
-        "<thead><tr><th>订单ID</th><th>交易对</th><th>委托类型</th><th>方向</th><th>委托数量</th><th>已成交数量</th><th>委托价格</th><th>成交均价</th><th>订单状态</th><th>更新时间</th><th>创建时间</th></tr></thead>"
+        "<thead><tr><th>订单ID</th><th>交易对</th><th>委托类型</th><th>方向</th><th>委托数量</th><th>已成交数量</th><th>委托价格</th><th>成交均价</th><th>订单状态</th><th>更新时间</th><th>创建时间</th><th>操作</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
-
 
 def _render_equity_curve(points: Sequence[dict] | None) -> str:
     esc = _escape
@@ -797,6 +1080,21 @@ def _build_instrument_options(instruments: Sequence[str], selected: Optional[str
             1,
             f'<option value="{esc(selected_norm)}" selected>{esc(selected_norm)}</option>',
         )
+    return "\n".join(options)
+
+
+def _build_manual_instrument_options(instruments: Sequence[str]) -> str:
+    esc = _escape
+    seen: set[str] = set()
+    if not instruments:
+        return '<option value="" disabled selected>暂无可交易合约</option>'
+    options = ['<option value="" disabled selected>请选择合约</option>']
+    for inst in instruments:
+        inst_upper = str(inst or "").strip().upper()
+        if not inst_upper or inst_upper in seen:
+            continue
+        seen.add(inst_upper)
+        options.append(f'<option value="{esc(inst_upper)}">{esc(inst_upper)}</option>')
     return "\n".join(options)
 
 
@@ -940,7 +1238,7 @@ HTML_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai Dashboard</title>
+    <title>Dashboard</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         h1 {{ margin-bottom: 0.2rem; }}
@@ -972,7 +1270,9 @@ HTML_TEMPLATE = r"""
         <a href="/orderbook" class="nav-link">市场深度</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
+        <a href="/risk" class="nav-link">风险控制</a>
         <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/orders/debug" class="nav-link">下单调试</a>
     </nav>
 
 
@@ -1044,7 +1344,7 @@ MODEL_MANAGER_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 模型管理</title>
+    <title>模型管理</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         h1 {{ margin-bottom: 0.5rem; }}
@@ -1079,7 +1379,9 @@ MODEL_MANAGER_TEMPLATE = r"""
         <a href="/orderbook" class="nav-link">市场深度</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
+        <a href="/risk" class="nav-link">风险控制</a>
         <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/orders/debug" class="nav-link">下单调试</a>
     </nav>
 
     <h1>模型管理</h1>
@@ -1097,7 +1399,7 @@ SETTINGS_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 币对设置</title>
+    <title>币对设置</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         h1 {{ margin-bottom: 0.5rem; }}
@@ -1157,7 +1459,9 @@ SETTINGS_TEMPLATE = r"""
         <a href="/orderbook" class="nav-link">市场深度</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link active">币对配置</a>
+        <a href="/risk" class="nav-link">风险控制</a>
         <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/orders/debug" class="nav-link">下单调试</a>
     </nav>
 
     <h1>币对与刷新频率</h1>
@@ -1198,13 +1502,259 @@ SETTINGS_TEMPLATE = r"""
 </html>
 """
 
+ORDER_DEBUG_TEMPLATE = r"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>下单调试</title>
+    <style>
+        body {{ font-family: "Segoe UI", Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }}
+        .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; flex-wrap: wrap; }}
+        .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
+        .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        h1 {{ margin-bottom: 0.2rem; }}
+        .hint {{ color: #94a3b8; margin-bottom: 1rem; }}
+        table {{ width: 100%; border-collapse: collapse; background-color: rgba(15, 23, 42, 0.7); border-radius: 12px; overflow: hidden; box-shadow: 0 10px 30px rgba(2, 6, 23, 0.75); }}
+        thead th {{ text-align: left; padding: 14px 16px; background-color: rgba(30, 41, 59, 0.9); font-size: 0.85rem; border-bottom: 1px solid rgba(148, 163, 184, 0.2); white-space: nowrap; }}
+        tbody td {{ padding: 14px 16px; border-bottom: 1px solid rgba(30, 41, 59, 0.8); font-size: 0.9rem; }}
+        tbody tr:nth-child(even) {{ background-color: rgba(15, 23, 42, 0.6); }}
+        .stage-pill {{ display: inline-flex; align-items: center; justify-content: center; padding: 4px 10px; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; white-space: nowrap; }}
+        .stage-pass {{ background-color: rgba(74, 222, 128, 0.15); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.4); }}
+        .stage-pending {{ background-color: rgba(248, 250, 252, 0.05); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.4); }}
+        .decision {{ font-family: "Fira Code", "Consolas", monospace; font-size: 0.85rem; }}
+        .empty-state {{ text-align: center; padding: 60px 0; color: #94a3b8; font-size: 0.95rem; }}
+    </style>
+</head>
+<body>
+    <nav class="top-nav">
+        <a href="/" class="nav-link">首页</a>
+        <a href="/models" class="nav-link">模型管理</a>
+        <a href="/okx" class="nav-link">OKX 模拟</a>
+        <a href="/liquidations" class="nav-link">爆仓监控</a>
+        <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/prompts" class="nav-link">提示词</a>
+        <a href="/settings" class="nav-link">币对配置</a>
+        <a href="/risk" class="nav-link">风险控制</a>
+        <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/orders/debug" class="nav-link active">下单调试</a>
+    </nav>
+
+    <h1>下单调试</h1>
+    <p class="hint">依次检查：账户启用 → 模型输出非 hold → 订单字段齐全 → 风险/校验通过 → 提交下单。</p>
+    <table>
+        <thead>
+            <tr>
+                <th>时间</th>
+                <th>账户</th>
+                <th>模型</th>
+                <th>合约</th>
+                <th>模型信号</th>
+                <th>账户启用</th>
+                <th>模型非 hold</th>
+                <th>订单字段</th>
+                <th>风险/校验</th>
+                <th>实际下单</th>
+                <th>备注</th>
+            </tr>
+        </thead>
+        <tbody>
+            {rows}
+        </tbody>
+    </table>
+</body>
+</html>
+"""
+
+RISK_TEMPLATE = r"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>风险控制</title>
+    <style>
+        body {{ font-family: "Segoe UI", Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }}
+        .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; flex-wrap: wrap; }}
+        .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
+        .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
+        header h1 {{ margin-bottom: 0.2rem; }}
+        header .updated {{ color: #94a3b8; margin: 0 0 0.5rem 0; }}
+        header .hint {{ color: #94a3b8; margin: 0; }}
+        .risk-grid {{ display: flex; flex-wrap: wrap; gap: 24px; }}
+        .risk-card {{ flex: 1 1 320px; background-color: #1e293b; border-radius: 16px; padding: 24px; box-shadow: 0 8px 24px rgba(2, 6, 23, 0.65); }}
+        .risk-card.secondary {{ background-color: rgba(15, 23, 42, 0.8); border: 1px solid rgba(59, 130, 246, 0.2); }}
+        .risk-card h2 {{ margin-top: 0; margin-bottom: 1rem; }}
+        form label {{ display: flex; flex-direction: column; gap: 6px; font-weight: 600; margin-top: 1rem; }}
+        form label:first-of-type {{ margin-top: 0; }}
+        input[type="number"] {{ border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.4); background-color: rgba(15, 23, 42, 0.9); padding: 10px 12px; color: #e2e8f0; font-size: 1rem; }}
+        input[type="number"]:focus {{ outline: none; border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2); }}
+        button {{ margin-top: 1.5rem; width: 100%; padding: 12px 0; border: none; border-radius: 10px; font-size: 1rem; background-color: #38bdf8; color: #0f172a; cursor: pointer; font-weight: 600; }}
+        button:hover {{ background-color: #0ea5e9; }}
+        .hint {{ color: #94a3b8; font-size: 0.9rem; margin-top: 0.3rem; }}
+        .timestamp {{ color: #38bdf8; }}
+        .rule-list {{ list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 12px; }}
+        .rule-list li {{ padding: 12px; border-radius: 10px; background-color: rgba(30, 41, 59, 0.8); border: 1px solid rgba(56, 189, 248, 0.18); font-size: 0.95rem; }}
+        @media (max-width: 768px) {{
+            .risk-card {{ flex: 1 1 100%; }}
+        }}
+    </style>
+</head>
+<body>
+    <nav class="top-nav">
+        <a href="/" class="nav-link">首页</a>
+        <a href="/models" class="nav-link">模型管理</a>
+        <a href="/okx" class="nav-link">OKX 模拟</a>
+        <a href="/liquidations" class="nav-link">爆仓监控</a>
+        <a href="/orderbook" class="nav-link">盘口深度</a>
+        <a href="/prompts" class="nav-link">提示词</a>
+        <a href="/settings" class="nav-link">管道设置</a>
+        <a href="/risk" class="nav-link active">风险控制</a>
+        <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/orders/debug" class="nav-link">下单链路</a>
+    </nav>
+
+    <header>
+        <h1>风险控制面板</h1>
+        <p class="updated">最近更新：<span class="timestamp">{updated_at}</span></p>
+        <p class="hint">更新后将同步至 config.py 并通知后台任务</p>
+    </header>
+
+    <div class="risk-grid">
+        <section class="risk-card primary">
+            <h2>风险参数</h2>
+            <form method="post" action="/risk/update">
+                <label for="price-tolerance">价格波动幅度（%）
+                    <input id="price-tolerance" type="number" name="price_tolerance_pct" min="0.1" max="50" step="0.1" value="{price_tolerance_pct}" required>
+                    <span class="hint">限价单需落在参考价 ±<span id="hint-price-value">{price_tolerance_display}</span>% 内。</span>
+                </label>
+                <label for="min-notional">最小下单金额（USDT）
+                    <input id="min-notional" type="number" name="min_notional_usd" min="0" step="0.01" value="{min_notional_usd}" required>
+                    <span class="hint">名义金额至少 <span id="hint-min-notional">{min_notional_display}</span> USDT，0 表示关闭。</span>
+                </label>
+                <label for="drawdown-limit">最大回撤（%）
+                    <input id="drawdown-limit" type="number" name="max_drawdown_pct" min="0.1" max="95" step="0.1" value="{max_drawdown_pct}" required>
+                </label>
+                <label for="loss-limit">累计亏损上限（USDT）
+                    <input id="loss-limit" type="number" name="max_loss_absolute" min="1" step="1" value="{max_loss_absolute}" required>
+                </label>
+                <label for="default-leverage">默认杠杆（倍）
+                    <input id="default-leverage" type="number" name="default_leverage" min="1" max="125" step="1" value="{default_leverage}" required>
+                    <span class="hint">用于下单时的默认杠杆，范围 1-125。</span>
+                </label>
+                <label for="max-leverage">最大杠杆（倍）
+                    <input id="max-leverage" type="number" name="max_leverage" min="1" max="125" step="1" value="{max_leverage}" required>
+                    <span class="hint">不可低于默认杠杆，范围 1-125。</span>
+                </label>
+                <label for="take-profit">止盈阈值（%）
+                    <input id="take-profit" type="number" name="take_profit_pct" min="0" max="500" step="0.1" value="{take_profit_pct}" required>
+                    <span class="hint">未实现收益达到该值后停止新开仓，0 表示关闭。</span>
+                </label>
+                <label for="stop-loss">止损阈值（%）
+                    <input id="stop-loss" type="number" name="stop_loss_pct" min="0" max="95" step="0.1" value="{stop_loss_pct}" required>
+                    <span class="hint">未实现收益低于 -阈值 时停止新开仓，0 表示关闭。</span>
+                </label>
+                <label for="cooldown-seconds">熔断冷却（秒）
+                    <input id="cooldown-seconds" type="number" name="cooldown_seconds" min="60" max="86400" step="30" value="{cooldown_seconds}" required>
+                    <span class="hint">相当于暂停 <span id="hint-cooldown-value">{cooldown_minutes}</span> 分钟后再恢复</span>
+                </label>
+                <button type="submit">保存风控参数</button>
+            </form>
+        </section>
+        <section class="risk-card secondary">
+            <h2>规则说明</h2>
+            <ul class="rule-list">
+                <li>价格限制：限价单需落在参考价 ±<span id="rule-price-value">{price_tolerance_display}</span>% 内。</li>
+                <li>单笔金额：名义金额需 ≥ <span id="rule-min-notional-value">{min_notional_display}</span> USDT（0 表示不限制）。</li>
+                <li>回撤保护：账户回撤超过 <span id="rule-drawdown-value">{drawdown_display}</span>% 将触发熔断。</li>
+                <li>亏损上限：亏损超过 <span id="rule-loss-value">{max_loss_display}</span> USDT 时停止交易。</li>
+                <li>杠杆限制：默认 <span id="rule-default-lev">{default_leverage_display}</span>x，最高 <span id="rule-max-lev">{max_leverage_display}</span>x。</li>
+                <li>止盈止损：未实现收益 ≥ <span id="rule-take-profit-value">{take_profit_display}</span>% 或 ≤ -<span id="rule-stop-loss-value">{stop_loss_display}</span>% 时停止新开仓。</li>
+                <li>冷却时间：熔断后等待 <span id="rule-cooldown-value">{cooldown_minutes}</span> 分钟或手动恢复。</li>
+            </ul>
+            <p class="hint">保存后写入 config.py 并通知调度任务</p>
+        </section>
+    </div>
+    <script>
+      (function() {{
+        const priceInput = document.getElementById('price-tolerance');
+        const drawdownInput = document.getElementById('drawdown-limit');
+        const lossInput = document.getElementById('loss-limit');
+        const cooldownInput = document.getElementById('cooldown-seconds');
+        const minNotionalInput = document.getElementById('min-notional');
+        const takeProfitInput = document.getElementById('take-profit');
+        const stopLossInput = document.getElementById('stop-loss');
+        const defaultLevInput = document.getElementById('default-leverage');
+        const maxLevInput = document.getElementById('max-leverage');
+        if (!priceInput || !drawdownInput || !lossInput || !cooldownInput || !minNotionalInput || !takeProfitInput || !stopLossInput || !defaultLevInput || !maxLevInput) {{
+          return;
+        }}
+        const formatCompact = (value, digits = 2) => {{
+          const num = Number(value);
+          if (!isFinite(num)) {{
+            return '--';
+          }}
+          const fixed = num.toFixed(digits);
+          return fixed.replace(/\.?0+$/, '') || '0';
+        }};
+        const updateRules = () => {{
+          const priceValue = Number(priceInput.value) || 0;
+          const drawdownValue = Number(drawdownInput.value) || 0;
+          const lossValue = Number(lossInput.value) || 0;
+          const cooldownSeconds = Number(cooldownInput.value) || 0;
+          const cooldownMinutes = cooldownSeconds / 60;
+          const minNotional = Number(minNotionalInput.value) || 0;
+          const takeProfit = Number(takeProfitInput.value) || 0;
+          const stopLoss = Number(stopLossInput.value) || 0;
+          const defaultLev = Number(defaultLevInput.value) || 0;
+          const maxLev = Number(maxLevInput.value) || 0;
+          const priceText = formatCompact(priceValue, 2);
+          const drawdownText = formatCompact(drawdownValue, 2);
+          const lossText = formatCompact(lossValue, 2);
+          const cooldownText = formatCompact(cooldownMinutes, 1);
+          const minNotionalText = formatCompact(minNotional, 2);
+          const takeProfitText = formatCompact(takeProfit, 2);
+          const stopLossText = formatCompact(stopLoss, 2);
+          const defaultLevText = formatCompact(defaultLev, 0);
+          const maxLevText = formatCompact(maxLev, 0);
+          const mapping = [
+            ['hint-price-value', priceText],
+            ['rule-price-value', priceText],
+            ['hint-min-notional', minNotionalText],
+            ['rule-min-notional-value', minNotionalText],
+            ['rule-drawdown-value', drawdownText],
+            ['rule-loss-value', lossText],
+            ['rule-cooldown-value', cooldownText],
+            ['hint-cooldown-value', cooldownText],
+            ['rule-take-profit-value', takeProfitText],
+            ['rule-stop-loss-value', stopLossText],
+            ['rule-default-lev', defaultLevText],
+            ['rule-max-lev', maxLevText],
+          ];
+        mapping.forEach(([id, text]) => {{
+            const el = document.getElementById(id);
+            if (el) {{
+              el.textContent = text;
+            }}
+          }});
+        }};
+        ['input', 'change'].forEach((eventName) => {{
+          [priceInput, drawdownInput, lossInput, cooldownInput, minNotionalInput, takeProfitInput, stopLossInput, defaultLevInput, maxLevInput].forEach((input) => {{
+            input.addEventListener(eventName, updateRules);
+          }});
+        }});
+        updateRules();
+      }})();
+    </script>
+</body>
+</html>
+"""
 
 OKX_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai OKX 模拟交易</title>
+    <title>OKX 模拟交易</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         h1 {{ margin-bottom: 0.5rem; }}
@@ -1229,9 +1779,23 @@ OKX_TEMPLATE = r"""
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
         ul.curve-list li {{ padding: 6px 0; border-bottom: 1px dashed #334155; font-size: 0.9rem; }}
         .inline-row {{ display: inline-flex; align-items: center; gap: 10px; margin: 0; }}
+        .inline-form {{ display: inline-flex; align-items: center; margin: 0; }}
         .btn-refresh {{ font-size: 12px; padding: 4px 8px; border-radius: 6px; border: 1px solid #38bdf8; color: #38bdf8; text-decoration: none; background: transparent; }}
         .btn-refresh:hover {{ background-color: rgba(56, 189, 248, 0.15); }}
+        .btn-close {{ background-color: #f87171; color: #0f172a; border: none; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-weight: 600; }}
+        .btn-close:hover {{ background-color: #ef4444; }}
         .local-time {{ color: #94a3b8; font-size: 0.9rem; }}
+        .flash {{ margin: 12px 0; padding: 12px 16px; border-radius: 10px; font-size: 0.95rem; }}
+        .flash.success {{ background-color: rgba(74, 222, 128, 0.12); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.3); }}
+        .flash.error {{ background-color: rgba(248, 113, 113, 0.12); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.3); }}
+        .manual-card {{ background-color: #1e293b; border-radius: 12px; padding: 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); }}
+        .manual-form {{ display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }}
+        .manual-form label {{ display: flex; flex-direction: column; gap: 6px; color: #94a3b8; font-size: 0.9rem; }}
+        .manual-form input, .manual-form select {{ border-radius: 8px; border: 1px solid #334155; background-color: #0f172a; color: #e2e8f0; padding: 10px; font-size: 0.95rem; }}
+        .manual-form .actions {{ grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; }}
+        .manual-form button {{ background-color: #38bdf8; color: #0f172a; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; }}
+        .manual-form button:hover {{ background-color: #0ea5e9; }}
+        .hint {{ color: #94a3b8; font-size: 0.85rem; margin: 0; }}
     </style>
 </head>
 <body>
@@ -1243,11 +1807,59 @@ OKX_TEMPLATE = r"""
         <a href="/orderbook" class="nav-link">市场深度</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
+        <a href="/risk" class="nav-link">风险控制</a>
         <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/orders/debug" class="nav-link">下单调试</a>
     </nav>
 
     <h1>OKX 模拟交易概览</h1>
     <p class="inline-row">数据时间：<span class="timestamp">{as_of}</span><span class="local-time">（本地时间：<span id="local-time">--:--:--</span>）</span><a href="/okx?refresh=1" class="btn-refresh" title="从交易所拉取最新并写入缓存">强制刷新</a></p>
+    {flash_block}
+    <section class="manual-card">
+      <h2>手动下单</h2>
+      <form class="manual-form" method="post" action="/okx/manual-order">
+        <label>账户
+          <select name="account_id" required>
+            {manual_account_options}
+          </select>
+        </label>
+        <label>合约
+          <select name="instrument_id" required>
+            {manual_instrument_options}
+          </select>
+        </label>
+        <label>方向
+          <select name="side" required>
+            <option value="buy">买入</option>
+            <option value="sell">卖出</option>
+          </select>
+        </label>
+        <label>类型
+          <select name="order_type" id="order-type" required>
+            <option value="limit">限价</option>
+            <option value="market">市价</option>
+          </select>
+        </label>
+        <label>数量
+          <input type="number" step="any" min="0" name="size" required>
+        </label>
+        <label>价格（限价必填）
+          <input type="number" step="any" min="0" name="price" id="price-input" placeholder="市价单可留空">
+        </label>
+        <label>保证金模式
+          <select name="margin_mode">
+            <option value="">自动</option>
+            <option value="cross">全仓</option>
+            <option value="isolated">逐仓</option>
+            <option value="cash">现货</option>
+          </select>
+        </label>
+        <div class="actions">
+          <button type="submit">提交订单</button>
+          <p class="hint">使用 OKX 模拟接口下单，自动补充账户 API 密钥。</p>
+        </div>
+      </form>
+    </section>
     {error_block}
     {account_sections}
     <script>
@@ -1268,6 +1880,19 @@ OKX_TEMPLATE = r"""
         }}
         tick();
         setInterval(tick, 1000);
+        var orderType = document.getElementById('order-type');
+        var priceInput = document.getElementById('price-input');
+        function togglePrice() {{
+          if (!orderType || !priceInput) return;
+          var isMarket = orderType.value === 'market';
+          priceInput.required = !isMarket;
+          priceInput.disabled = isMarket;
+          if (isMarket) priceInput.value = '';
+        }}
+        if (orderType && priceInput) {{
+          orderType.addEventListener('change', togglePrice);
+          togglePrice();
+        }}
       }})();
     </script>
 </body>
@@ -1280,7 +1905,7 @@ SCHEDULER_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 任务调度</title>
+    <title>任务调度</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         h1 {{ margin-bottom: 0.5rem; }}
@@ -1290,17 +1915,24 @@ SCHEDULER_TEMPLATE = r"""
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
         .ai-signals-card {{ margin-bottom: 2rem; }}
         .ai-signals-card table {{ margin-top: 0.5rem; }}
-        .card {{ background-color: #1e293b; border-radius: 12px; padding: 22px 26px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); max-width: 620px; }}
+        .scheduler-layout {{ display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }}
+        .card {{ background-color: #1e293b; border-radius: 12px; padding: 22px 26px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); }}
+        .primary-card {{ flex: 0 1 360px; min-width: 320px; max-width: 420px; }}
         form {{ display: grid; gap: 18px; }}
         label {{ display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; color: #94a3b8; }}
-        input[type="number"] {{ border-radius: 8px; border: 1px solid #334155; background-color: #0f172a; color: #e2e8f0; padding: 10px 12px; font-size: 0.95rem; }}
+        .control-line {{ display: flex; gap: 12px; align-items: center; }}
+        input[type="number"] {{ border-radius: 8px; border: 1px solid #334155; background-color: #0f172a; color: #e2e8f0; padding: 10px 12px; font-size: 0.95rem; flex: 1; min-width: 0; }}
         input[type="number"]::placeholder {{ color: #64748b; }}
         button {{ background-color: #38bdf8; color: #0f172a; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; justify-self: flex-start; }}
         button:hover {{ background-color: #0ea5e9; }}
+        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
         .hint {{ color: #94a3b8; font-size: 0.85rem; margin-top: -6px; }}
+        .test-status {{ margin-top: 12px; font-size: 0.85rem; color: #94a3b8; }}
+        .test-status.success {{ color: #4ade80; }}
+        .test-status.error {{ color: #f87171; }}
         .meta {{ margin-top: 20px; font-size: 0.85rem; color: #64748b; }}
         .timestamp {{ color: #38bdf8; }}
-        .log-card {{ width: 100%; max-width: 620px; margin-top: 26px; }}
+        .log-card {{ flex: 1 1 520px; min-width: 420px; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
         th, td {{ padding: 10px 14px; border-bottom: 1px solid rgba(226, 232, 240, 0.08); text-align: left; font-size: 0.9rem; word-break: break-word; }}
         .log-card table {{ table-layout: fixed; }}
@@ -1315,7 +1947,8 @@ SCHEDULER_TEMPLATE = r"""
         .status-error {{ background: rgba(248, 113, 113, 0.2); color: #f87171; }}
         .status-skipped {{ background: rgba(148, 163, 184, 0.2); color: #cbd5f5; }}
         .empty-state {{ text-align: center; color: #94a3b8; padding: 14px 0; }}
-        @media (max-width: 600px) {{
+        @media (max-width: 900px) {{
+            .scheduler-layout {{ flex-direction: column; }}
             .card {{ width: 100%; padding: 18px; }}
             button {{ width: 100%; }}
         }}
@@ -1330,21 +1963,30 @@ SCHEDULER_TEMPLATE = r"""
         <a href="/orderbook" class="nav-link">市场深度</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
+        <a href="/risk" class="nav-link">风险控制</a>
         <a href="/scheduler" class="nav-link active">调度器</a>
+        <a href="/orders/debug" class="nav-link">下单调试</a>
     </nav>
 
     <h1>任务调度控制</h1>
     <p class="hint">设置行情抽取与 AI 交互的周期，变更会实时更新后台 APScheduler 任务。</p>
-    <section class="card">
+    <div class="scheduler-layout">
+    <section class="card primary-card">
         <form method="post" action="/scheduler/update">
             <label for="market-interval">
                 行情抽取间隔（秒）
-                <input id="market-interval" name="market_interval" type="number" min="30" max="3600" value="{market_interval}" required>
+                <div class="control-line">
+                    <input id="market-interval" name="market_interval" type="number" min="30" max="3600" value="{market_interval}" required>
+                    <button type="button" class="test-trigger" id="market-test-btn" data-url="/api/scheduler/test-market" data-label="行情测试">行情测试</button>
+                </div>
                 <span class="hint">用于调用 OKX 行情 API、写入 Influx、生成最新指标。</span>
             </label>
             <label for="ai-interval">
                 AI 交互间隔（秒）
-                <input id="ai-interval" name="ai_interval" type="number" min="60" max="7200" value="{ai_interval}" required>
+                <div class="control-line">
+                    <input id="ai-interval" name="ai_interval" type="number" min="60" max="7200" value="{ai_interval}" required>
+                    <button type="button" class="test-trigger" id="ai-test-btn" data-url="/api/scheduler/test-ai" data-label="AI 交互测试">AI 交互测试</button>
+                </div>
                 <span class="hint">触发 LLM 信号 → 风控 → 模拟下单流程的周期。</span>
             </label>
             <button type="submit">保存调度设置</button>
@@ -1352,6 +1994,7 @@ SCHEDULER_TEMPLATE = r"""
         <div class="meta">
             最近更新：<span class="timestamp">{updated_at}</span>
         </div>
+        <p class="hint test-status" id="scheduler-test-status">点击按钮会立即触发行情或 AI 任务，可用于验证调度逻辑。</p>
     </section>
     <section class="card log-card">
         <h2>最近执行记录</h2>
@@ -1369,6 +2012,51 @@ SCHEDULER_TEMPLATE = r"""
             </tbody>
         </table>
     </section>
+    </div>
+    <script>
+      (function() {{
+        const statusEl = document.getElementById('scheduler-test-status');
+        const buttons = Array.from(document.querySelectorAll('.test-trigger')).map((button) => ({{
+          button,
+          url: button.dataset.url,
+          label: button.dataset.label || button.textContent || '任务',
+        }}));
+        const setStatus = (text, level) => {{
+          if (!statusEl) return;
+          statusEl.textContent = text;
+          statusEl.className = ['hint', 'test-status', level || ''].join(' ').trim();
+        }};
+        const runTest = (button, meta) => {{
+          if (!button) return;
+          button.disabled = true;
+          setStatus(`正在触发${{meta.label}}...`, '');
+          fetch(meta.url, {{ method: 'POST' }})
+            .then((res) => {{
+              if (!res.ok) throw new Error('请求失败');
+              return res.json();
+            }})
+            .then((data) => {{
+              const status = (data.status || '').toLowerCase();
+              const detail = data.detail || '无额外信息';
+              if (status === 'error') {{
+                setStatus(`${{meta.label}}失败：${{detail}}`, 'error');
+              }} else {{
+                setStatus(`${{meta.label}}完成：${{detail}}`, 'success');
+              }}
+            }})
+            .catch((err) => {{
+              setStatus(`${{meta.label}}失败：${{err.message}}`, 'error');
+            }})
+            .finally(() => {{
+              button.disabled = false;
+            }});
+        }};
+        buttons.forEach((meta) => {{
+          if (!meta.button || !meta.url) return;
+          meta.button.addEventListener('click', () => runTest(meta.button, meta));
+        }});
+      }})();
+    </script>
 </body>
 </html>
 """
@@ -1378,7 +2066,7 @@ PROMPT_EDITOR_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 提示词模板</title>
+    <title>提示词模板</title>
     <style>
         body {{ font-family: "Segoe UI", "PingFang SC", Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         h1 {{ margin-bottom: 0.5rem; }}
@@ -1433,7 +2121,9 @@ PROMPT_EDITOR_TEMPLATE = r"""
         <a href="/orderbook" class="nav-link">市场深度</a>
         <a href="/prompts" class="nav-link active">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
+        <a href="/risk" class="nav-link">风险控制</a>
         <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/orders/debug" class="nav-link">下单调试</a>
     </nav>
 
     <div class="prompt-layout">
@@ -1526,7 +2216,7 @@ LIQUIDATION_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 爆仓监控</title>
+    <title>爆仓监控</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
@@ -1554,7 +2244,9 @@ LIQUIDATION_TEMPLATE = r"""
         <a href="/orderbook" class="nav-link">市场深度</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
+        <a href="/risk" class="nav-link">风险控制</a>
         <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/orders/debug" class="nav-link">下单调试</a>
     </nav>
     <h1>OKX 爆仓监控</h1>
     <div class="controls">
@@ -1696,7 +2388,7 @@ ORDERBOOK_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>open-nof1.ai 市场深度</title>
+    <title>市场深度</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
         .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
@@ -1746,7 +2438,9 @@ ORDERBOOK_TEMPLATE = r"""
         <a href="/orderbook" class="nav-link active">市场深度</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
+        <a href="/risk" class="nav-link">风险控制</a>
         <a href="/scheduler" class="nav-link">调度器</a>
+        <a href="/orders/debug" class="nav-link">下单调试</a>
     </nav>
     <h1>OKX 市场深度</h1>
     <div class="controls">
@@ -2009,6 +2703,7 @@ ORDERBOOK_TEMPLATE = r"""
           }});
         }}
         const drawNetDepthChart = (canvas, history, timeframeKey = activeTimeframe) => {{
+          const yAxisLabel = "净深度（买-卖，张）";
           const parent = canvas.parentElement;
           const width = Math.max((parent ? parent.clientWidth : 320), 420);
           const height = 260;
@@ -2036,16 +2731,29 @@ ORDERBOOK_TEMPLATE = r"""
           const maxAbs = Math.max(Math.abs(maxVal), Math.abs(minVal), 1);
           const padding = maxAbs * 0.1;
           const limit = maxAbs + padding;
+          const labelFormatter = (value) => {{
+            const digits = Math.abs(value) < 1 ? 4 : 2;
+            return formatSignedNumber(value, digits);
+          }};
           const topVal = limit;
           const bottomVal = -limit;
           const range = topVal - bottomVal || 1;
-          const left = 50;
-          const right = 16;
+          const left = 70;
+          const right = 28;
           const top = 18;
           const bottom = 30;
           const chartWidth = width - left - right;
           const chartHeight = height - top - bottom;
           const zeroY = top + chartHeight - ((0 - bottomVal) / range) * chartHeight;
+          ctx.save();
+          ctx.translate(16, top + chartHeight / 2);
+          ctx.rotate(-Math.PI / 2);
+          ctx.fillStyle = "#cbd5e1";
+          ctx.font = "12px Arial";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(yAxisLabel, 0, 0);
+          ctx.restore();
           ctx.strokeStyle = "#475569";
           ctx.lineWidth = 1;
           ctx.beginPath();
@@ -2092,9 +2800,11 @@ ORDERBOOK_TEMPLATE = r"""
           for (let i = 1; i <= ticksPerSide; i += 1) {{
             tickValues.push(-tickStep * i);
           }}
+          const yLabelX = width - 6;
           tickValues.forEach((value) => {{
             const y = top + chartHeight - ((value - bottomVal) / range) * chartHeight;
-            ctx.fillText(formatSignedNumber(value, 2), left - 6, y);
+            const offset = value === 0 ? 0 : value > 0 ? -2 : 2;
+            ctx.fillText(labelFormatter(value), yLabelX, y + offset);
           }});
         }};
 
@@ -2235,6 +2945,8 @@ ORDERBOOK_TEMPLATE = r"""
 </body>
 </html>
 """
+
+
 
 
 

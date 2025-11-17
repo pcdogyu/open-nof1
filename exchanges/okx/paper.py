@@ -26,6 +26,10 @@ ISO_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 class OkxClientError(RuntimeError):
     """Raised when OKX returns a non-success response."""
 
+    def __init__(self, message: str, payload: Optional[dict] = None) -> None:
+        super().__init__(message)
+        self.payload = payload or {}
+
 
 @dataclass(slots=True)
 class OrderPayload:
@@ -196,7 +200,8 @@ class OkxPaperClient(ExchangeClient):
         payload = response.json()
         if payload.get("code") != "0":
             raise OkxClientError(
-                f"OKX error {payload.get('code')}: {payload.get('msg')}"
+                f"OKX error {payload.get('code')}: {payload.get('msg')}",
+                payload=payload,
             )
         return payload
 

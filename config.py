@@ -33,7 +33,7 @@ OKX_CACHE_TTL_SECONDS = 600
 
 # Scheduler defaults (seconds)
 MARKET_SYNC_INTERVAL = 60
-AI_INTERACTION_INTERVAL = 900
+AI_INTERACTION_INTERVAL = 120
 
 # OKX demo accounts (API keys / secrets / passphrases).
 # Populate secrets/passphrases when available.
@@ -49,7 +49,7 @@ OKX_ACCOUNTS = {
     },
 }
 
-DEEPSEEK_API_KEY = "sk-152bd2aae0f541df9c9afa4277e0b36e"
+
 
 # Placeholder for Qwen / 通义千问 API key (populate with your credential).
 QWEN_API_KEY = "QW-1234567890"
@@ -58,7 +58,7 @@ QWEN_API_KEY = "QW-1234567890"
 MODEL_DEFAULTS = {   'deepseek-v1': {   'display_name': 'DeepSeek Reasoner (V3.2-Exp)',
                        'provider': 'DeepSeek',
                        'enabled': True,
-                       'api_key': 'sk-152bd2aae0f541df9c9afa4277e0b36e'},
+                       'api_key': 'sk-6a6df7e0b4364817881ce1d9fb4dd814'},
     'qwen-v1': {'display_name': 'Qwen 千问模型', 'provider': '阿里云通义', 'enabled': False, 'api_key': ''},
     'grok-v1': {   'display_name': 'Grok 交易模型',
                    'provider': 'xAI Grok',
@@ -76,3 +76,14 @@ MODEL_DEFAULTS = {   'deepseek-v1': {   'display_name': 'DeepSeek Reasoner (V3.2
                      'provider': 'Google DeepMind',
                      'enabled': False,
                      'api_key': ''}}
+
+# Default risk configuration (override via web UI).
+RISK_SETTINGS = {   'price_tolerance_pct': 0.02,
+    'max_drawdown_pct': 8.0,
+    'max_loss_absolute': 1500.0,
+    'cooldown_seconds': 600,
+    'min_notional_usd': 50.0,
+    'take_profit_pct': 8.0,
+    'stop_loss_pct': 5.0,
+    'default_leverage': 1,
+    'max_leverage': 125}

@@ -34,8 +34,11 @@ class PriceLimitValidator:
     data refreshes.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, default_tolerance_pct: float = 0.02) -> None:
+        if default_tolerance_pct <= 0 or default_tolerance_pct > 1:
+            raise ValueError("default_tolerance_pct must be within (0, 1]")
         self._bands: Dict[str, PriceBand] = {}
+        self._default_tolerance_pct = default_tolerance_pct
 
     def set_band(self, instrument_id: str, reference_price: float, tolerance_pct: float) -> None:
         """Configure price band for an instrument."""
@@ -60,7 +63,7 @@ class PriceLimitValidator:
         """
         current_band = self._bands.get(market.instrument_id)
         pct = tolerance_pct if tolerance_pct is not None else (
-            current_band.tolerance_pct if current_band else 0.02
+            current_band.tolerance_pct if current_band else self._default_tolerance_pct
         )
         self.set_band(market.instrument_id, market.mid_price or market.last_price, pct)
 
