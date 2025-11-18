@@ -178,13 +178,20 @@ def _close_pipeline() -> None:
         asyncio.run(pipeline.aclose())
 
 
-def _append_execution_log(job: str, status: str, detail: str | None = None) -> None:
+def _append_execution_log(
+    job: str,
+    status: str,
+    detail: str | None = None,
+    duration_seconds: float | None = None,
+) -> None:
     now = datetime.now(tz=timezone.utc)
+    detail_text = "" if detail is None else str(detail)
     entry = {
         "timestamp": now.isoformat(),
         "job": job,
         "status": status,
-        "detail": detail or "",
+        "detail": detail_text,
+        "duration_seconds": duration_seconds,
     }
     _EXECUTION_LOG.appendleft(entry)
     writer = _get_execution_log_writer()
@@ -194,7 +201,11 @@ def _append_execution_log(job: str, status: str, detail: str | None = None) -> N
             writer.write_indicator_set(
                 measurement="scheduler_execution_log",
                 tags={"job": job},
-                fields={"status": status, "detail": detail or ""},
+                fields={
+                    "status": status,
+                    "detail": detail_text,
+                    "duration_seconds": float(duration_seconds) if duration_seconds is not None else None,
+                },
                 timestamp_ns=timestamp_ns,
             )
         except Exception:
@@ -407,6 +418,11 @@ def _get_order_debug_writer() -> Optional["InfluxWriter"]:
 def _hydrate_execution_log_from_influx(limit: int = 20) -> None:
     if InfluxDBClient is None or InfluxConfig is None:
         return
+    def _coerce_float(value: object) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
     try:
         cfg = InfluxConfig.from_env()
     except Exception:
@@ -442,6 +458,7 @@ from(bucket: "{cfg.bucket}")
                     "job": values.get("job", ""),
                     "status": values.get("status", ""),
                     "detail": values.get("detail", ""),
+                    "duration_seconds": _coerce_float(values.get("duration_seconds")),
                 }
             )
     if not entries:
@@ -597,6 +614,7 @@ async def _market_data_ingestion_job() -> Dict[str, str]:
         _append_execution_log("market", "skipped", detail)
         return {"status": "skipped", "detail": detail}
     pipeline = _get_pipeline()
+    started = datetime.now(tz=timezone.utc)
     try:
         result = await pipeline.run_cycle(
             log=lambda message: logger.info("Market pipeline: %s", message),
@@ -607,12 +625,14 @@ async def _market_data_ingestion_job() -> Dict[str, str]:
             len(result.signals),
         )
         detail = f"{len(result.feature_snapshots)} 条币对，{len(result.signals)} 条信号"
-        _append_execution_log("market", "success", detail)
+        duration = (datetime.now(tz=timezone.utc) - started).total_seconds()
+        _append_execution_log("market", "success", detail, duration_seconds=duration)
         return {"status": "success", "detail": detail}
     except Exception as exc:
         logger.warning("Market ingestion job failed: %s", exc)
         message = str(exc)
-        _append_execution_log("market", "error", message)
+        duration = (datetime.now(tz=timezone.utc) - started).total_seconds()
+        _append_execution_log("market", "error", message, duration_seconds=duration)
         return {"status": "error", "detail": message}
 
 
@@ -642,6 +662,7 @@ async def _execute_model_workflow_job() -> Dict[str, str]:
     errors = 0
     signal_summaries: list[str] = []
 
+    started = datetime.now(tz=timezone.utc)
     try:
         async with SignalRuntime() as runtime:
             for account_key, meta in OKX_ACCOUNTS.items():
@@ -694,12 +715,14 @@ async def _execute_model_workflow_job() -> Dict[str, str]:
             "notes": detail,
         }
         _record_order_debug_entry(summary_entry)
-        _append_execution_log("ai", status, detail)
+        duration = (datetime.now(tz=timezone.utc) - started).total_seconds()
+        _append_execution_log("ai", status, detail, duration_seconds=duration)
         return {"status": status, "detail": detail}
     except Exception as exc:
         logger.exception("Execution job fatal error: %s", exc)
         message = str(exc)
-        _append_execution_log("ai", "error", message)
+        duration = (datetime.now(tz=timezone.utc) - started).total_seconds()
+        _append_execution_log("ai", "error", message, duration_seconds=duration)
         return {"status": "error", "detail": message}
 
 async def _process_account_signal(

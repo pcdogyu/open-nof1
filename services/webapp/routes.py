@@ -10,6 +10,7 @@ import logging
 import math
 import pprint
 import base64
+import asyncio
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -134,6 +135,9 @@ _SCHEDULER_SETTINGS: dict[str, object] = {
     "ai_interval": int(AI_INTERACTION_INTERVAL),
     "updated_at": datetime.now(tz=timezone.utc).isoformat(),
 }
+
+# Cache for boot-time orderbook priming so first requests can avoid hitting upstreams.
+_ORDERBOOK_WARM_CACHE: dict | None = None
 
 _DEFAULT_RISK_SETTINGS = {
     "price_tolerance_pct": 0.02,
@@ -1136,14 +1140,20 @@ def get_liquidation_snapshot(limit: int = 50, instrument: Optional[str] = None) 
     }
 
 
-def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -> dict:
+def get_orderbook_snapshot(
+    levels: int = 10,
+    instrument: Optional[str] = None,
+    *,
+    allow_live_fallback: bool = True,
+) -> dict:
     """Return latest order book snapshots for configured instruments."""
     instrument_filter = (instrument or "").strip().upper()
     fetch_limit = max(1, max(levels, len(TRADABLE_INSTRUMENTS)))
     history_cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=1)
-    max_history_points = 1200
+    # Keep client payloads small enough for fast initial page loads.
+    max_history_points = 300
     instrument_count = max(1, len(TRADABLE_INSTRUMENTS))
-    history_fetch_limit = max_history_points * instrument_count
+    history_fetch_limit = min(max_history_points * instrument_count, max_history_points * 8)
     micro_records = _query_influx_measurement(
         measurement="market_microstructure",
         limit=max(history_fetch_limit, 500),
@@ -1298,7 +1308,20 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
             }
         )
     if not items:
-        items = _fetch_live_orderbooks(levels=levels, instrument_filter=instrument_filter)
+        if _ORDERBOOK_WARM_CACHE and _ORDERBOOK_WARM_CACHE.get("items"):
+            cached_items = _ORDERBOOK_WARM_CACHE.get("items", [])
+            if instrument_filter:
+                cached_items = [
+                    entry
+                    for entry in cached_items
+                    if (entry.get("instrument_id") or "").upper() == instrument_filter
+                ]
+            items = cached_items
+    if not items:
+        if allow_live_fallback:
+            items = _fetch_live_orderbooks(levels=levels, instrument_filter=instrument_filter)
+        else:
+            items = []
     items.sort(key=lambda entry: entry["instrument_id"])
     return {
         "instrument": instrument_filter,
@@ -1306,6 +1329,37 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
         "items": items,
         "updated_at": datetime.now(tz=timezone.utc).isoformat(),
     }
+
+
+def prime_orderbook_cache(levels: int = 400, instrument: Optional[str] = None) -> dict:
+    """
+    Populate a warm cache from local Influx data without hitting external sources.
+
+    Used at service startup so first requests render immediately; live data will
+    be fetched asynchronously afterwards.
+    """
+    global _ORDERBOOK_WARM_CACHE
+    snapshot = get_orderbook_snapshot(
+        levels=levels,
+        instrument=instrument,
+        allow_live_fallback=False,
+    )
+    _ORDERBOOK_WARM_CACHE = snapshot
+    return snapshot
+
+
+async def refresh_orderbook_live_async(levels: int = 400, instrument: Optional[str] = None) -> None:
+    """
+    Fetch fresh orderbook data from upstream in a background task.
+
+    This runs the synchronous OKX call in a thread so the caller isn't blocked.
+    """
+    loop = asyncio.get_running_loop()
+    instrument_filter = (instrument or "").strip().upper() or None
+    await loop.run_in_executor(
+        None,
+        lambda: _fetch_live_orderbooks(levels=levels, instrument_filter=instrument_filter),
+    )
 
 
 def get_market_depth_attachments(limit: int = 6) -> list[dict]:

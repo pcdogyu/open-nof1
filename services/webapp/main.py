@@ -5,6 +5,7 @@ Entrypoint for the open-nof1.ai user-facing web service.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import urllib.parse
@@ -45,6 +46,15 @@ async def _startup() -> None:
         await start_ws_streams(instruments)
     except Exception as exc:
         logger.warning("Failed to start websocket streams: %s", exc)
+    # Warm orderbook cache from local Influx first, then refresh live data asynchronously.
+    try:
+        routes.prime_orderbook_cache()
+    except Exception as exc:
+        logger.debug("Orderbook cache warm-up skipped: %s", exc)
+    try:
+        asyncio.create_task(routes.refresh_orderbook_live_async())
+    except Exception as exc:
+        logger.debug("Unable to schedule live orderbook refresh: %s", exc)
 
 
 @app.on_event("shutdown")
@@ -1023,7 +1033,7 @@ def _render_orders_table(orders: Sequence[dict] | None, *, account_id: str | Non
                 f"<input type='hidden' name='account_id' value='{account_value}'>"
                 f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
                 f"<input type='hidden' name='order_id' value='{order_id_value}'>"
-                f"<button type='submit' class='btn-cancel' onclick="return confirm('确认取消订单 {order_id_value} ?');">取消</button>"
+                f"<button type='submit' class='btn-cancel' onclick=\"return confirm('确认取消订单 {order_id_value} ?');\">取消</button>"
                 "</form>"
             )
         rows.append(
@@ -1947,6 +1957,8 @@ SCHEDULER_TEMPLATE = r"""
         .status-error {{ background: rgba(248, 113, 113, 0.2); color: #f87171; }}
         .status-skipped {{ background: rgba(148, 163, 184, 0.2); color: #cbd5f5; }}
         .empty-state {{ text-align: center; color: #94a3b8; padding: 14px 0; }}
+        .scheduler-execlog {{ width: 100%; border-collapse: collapse; margin-top: 10px; background-color: rgba(15, 23, 42, 0.6); border-radius: 8px; overflow: hidden; }}
+        .scheduler-execlog th, .scheduler-execlog td {{ padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 0.9rem; }}
         @media (max-width: 900px) {{
             .scheduler-layout {{ flex-direction: column; }}
             .card {{ width: 100%; padding: 18px; }}
@@ -1998,13 +2010,14 @@ SCHEDULER_TEMPLATE = r"""
     </section>
     <section class="card log-card">
         <h2>最近执行记录</h2>
-        <table>
+        <table class="scheduler-execlog">
             <thead>
                 <tr>
                     <th>时间</th>
                     <th>任务</th>
                     <th>状态</th>
                     <th>描述信息</th>
+                    <th>耗时</th>
                 </tr>
             </thead>
             <tbody>
@@ -2185,16 +2198,19 @@ def _render_scheduler_page(settings: dict) -> str:
         status_text = esc(status_labels.get(status_key, status_key))
         status_class = f"status-{status_key}"
         detail = esc(entry.get("detail") or "--")
+        duration = entry.get("duration_seconds")
+        duration_text = f"{float(duration):.2f}s" if duration is not None else "--"
         log_rows.append(
             "<tr>"
             f"<td>{timestamp}</td>"
             f"<td>{job}</td>"
             f"<td><span class=\"status-pill {status_class}\">{status_text}</span></td>"
             f"<td>{detail}</td>"
+            f"<td>{duration_text}</td>"
             "</tr>"
         )
     if not log_rows:
-        log_rows.append("<tr><td colspan='4' class='empty-state'>暂无执行记录</td></tr>")
+        log_rows.append("<tr><td colspan='5' class='empty-state'>暂无执行记录</td></tr>")
     return SCHEDULER_TEMPLATE.format(
         market_interval=esc(settings.get("market_interval")),
         ai_interval=esc(settings.get("ai_interval")),
@@ -2403,10 +2419,10 @@ ORDERBOOK_TEMPLATE = r"""
         .timeframe-buttons button {{ background: rgba(51, 65, 85, 0.6); border: 1px solid rgba(148, 163, 184, 0.35); color: #e2e8f0; padding: 6px 16px; border-radius: 999px; cursor: pointer; font-size: 0.9rem; transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease; }}
         .timeframe-buttons button.active {{ background: #38bdf8; border-color: #38bdf8; color: #0f172a; }}
         .timeframe-buttons button:hover {{ border-color: rgba(148, 163, 184, 0.8); }}
-        .book-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 20px; align-items: stretch; width: 98vw; margin: 0 auto; }}
-        .book-grid.two-cols {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; width: 98vw; }}
-        @media (max-width: 1024px) {{ .book-grid.two-cols {{ grid-template-columns: 1fr; }} }}
-        .orderbook-chart {{ background: #0f1b2d; border-radius: 16px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.15); display: flex; flex-direction: column; gap: 14px; width: 100%; }}
+        .book-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(410px, 1fr)); gap: 12px; column-gap: 20px; align-items: stretch; width: 100%; margin: 0; justify-items: start; justify-content: start; }}
+        .book-grid.two-cols {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; column-gap: 16px; width: 100%; margin: 0; justify-items: start; justify-content: start; }}
+        @media (max-width: 1200px) {{ .book-grid.two-cols {{ grid-template-columns: 1fr; column-gap: 12px; }} }}
+        .orderbook-chart {{ background: #0f1b2d; border-radius: 16px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.15); display: flex; flex-direction: column; gap: 14px; width: calc(100% - 40px); }}
         .orderbook-chart.tone-positive {{ border-color: rgba(74, 222, 128, 0.4); }}
         .orderbook-chart.tone-negative {{ border-color: rgba(248, 113, 113, 0.35); }}
         .orderbook-chart.tone-neutral {{ border-color: rgba(59, 130, 246, 0.25); }}
@@ -2417,10 +2433,11 @@ ORDERBOOK_TEMPLATE = r"""
         .chart-price-group {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; width: 100%; }}
         .chart-prices span {{ background: rgba(248, 250, 252, 0.08); padding: 8px 14px; border-radius: 12px; text-align: center; }}
         .chart-prices span.mid {{ background: rgba(59, 130, 246, 0.18); color: #bfdbfe; }}
-        .chart-stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; font-size: 0.9rem; color: #cbd5f5; width: 100%; }}
+        .chart-stats {{ display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); column-gap: 12px; row-gap: 8px; font-size: 0.9rem; color: #cbd5f5; width: 100%; align-items: stretch; }}
+        @media (max-width: 1200px) {{ .chart-stats {{ grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); row-gap: 10px; }} }}
         .chart-stats .stat-pill {{ background: rgba(148, 163, 184, 0.1); padding: 8px 12px; border-radius: 12px; text-align: center; }}
         .chart-stats .stat-accent {{ background: rgba(34, 197, 94, 0.28); border: 1px solid rgba(34, 197, 94, 0.45); color: #dcfce7; font-weight: 600; }}
-        .chart-canvas {{ width: 100%; height: 220px; }}
+        .chart-canvas {{ width: 100%; height: 320px; }}
         .chart-insight {{ margin: 0; font-size: 0.9rem; color: #e2e8f0; }}
         .chart-insight.positive {{ color: #4ade80; }}
         .chart-insight.negative {{ color: #f87171; }}
@@ -2465,7 +2482,6 @@ ORDERBOOK_TEMPLATE = r"""
         </div>
         <span>最后更新：<span class="timestamp" id="orderbook-updated">{updated_at}</span></span>
     </div>
-    <h2 class="section-heading">市场深度</h2>
     <div id="orderbook-container" class="{book_grid_class}">
         {cards}
     </div>
@@ -2706,7 +2722,7 @@ ORDERBOOK_TEMPLATE = r"""
           const yAxisLabel = "净深度（买-卖，张）";
           const parent = canvas.parentElement;
           const width = Math.max((parent ? parent.clientWidth : 320), 420);
-          const height = 260;
+          const height = 360;
           const dpr = window.devicePixelRatio || 1;
           canvas.width = width * dpr;
           canvas.height = height * dpr;
@@ -2735,21 +2751,37 @@ ORDERBOOK_TEMPLATE = r"""
             const digits = Math.abs(value) < 1 ? 4 : 2;
             return formatSignedNumber(value, digits);
           }};
+          const ticksPerSide = 3;
+          const tickStep = limit / Math.max(1, ticksPerSide);
+          const tickValues = [];
+          // Force symmetric ticks so everything above the zero line is positive and below is negative.
+          for (let i = ticksPerSide; i > 0; i -= 1) {{
+            tickValues.push(tickStep * i);
+          }}
+          tickValues.push(0);
+          for (let i = 1; i <= ticksPerSide; i += 1) {{
+            tickValues.push(-tickStep * i);
+          }}
+          ctx.font = "12px Arial";
+          const tickLabels = tickValues.map((value) => labelFormatter(value));
+          const maxTickLabelWidth = Math.max(...tickLabels.map((text) => ctx.measureText(text).width), 0);
+          const left = Math.max(32, Math.ceil(maxTickLabelWidth + 14));
+          const right = 24;
+          const xPadding = 20;
+          const top = 16;
+          const bottom = 36;
+          const rightEdge = width - right - xPadding;
+          const chartWidth = rightEdge - left;
+          const chartHeight = height - top - bottom;
           const topVal = limit;
           const bottomVal = -limit;
           const range = topVal - bottomVal || 1;
-          const left = 70;
-          const right = 28;
-          const top = 18;
-          const bottom = 30;
-          const chartWidth = width - left - right;
-          const chartHeight = height - top - bottom;
           const zeroY = top + chartHeight - ((0 - bottomVal) / range) * chartHeight;
           ctx.save();
-          ctx.translate(16, top + chartHeight / 2);
+          const axisLabelX = Math.max(8, left - maxTickLabelWidth - 12);
+          ctx.translate(axisLabelX, top + chartHeight / 2);
           ctx.rotate(-Math.PI / 2);
           ctx.fillStyle = "#cbd5e1";
-          ctx.font = "12px Arial";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
           ctx.fillText(yAxisLabel, 0, 0);
@@ -2758,7 +2790,7 @@ ORDERBOOK_TEMPLATE = r"""
           ctx.lineWidth = 1;
           ctx.beginPath();
           ctx.moveTo(left, zeroY);
-          ctx.lineTo(width - right, zeroY);
+          ctx.lineTo(rightEdge, zeroY);
           ctx.stroke();
           ctx.strokeStyle = "#38bdf8";
           ctx.lineWidth = 2;
@@ -2789,22 +2821,11 @@ ORDERBOOK_TEMPLATE = r"""
           }}
           ctx.textAlign = "right";
           ctx.textBaseline = "middle";
-          const ticksPerSide = 3;
-          const tickStep = limit / ticksPerSide;
-          const tickValues = [];
-          // Force symmetric ticks so everything above the zero line is positive and below is negative.
-          for (let i = ticksPerSide; i > 0; i -= 1) {{
-            tickValues.push(tickStep * i);
-          }}
-          tickValues.push(0);
-          for (let i = 1; i <= ticksPerSide; i += 1) {{
-            tickValues.push(-tickStep * i);
-          }}
-          const yLabelX = width - 6;
-          tickValues.forEach((value) => {{
+          const yLabelX = left - 8;
+          tickValues.forEach((value, idx) => {{
             const y = top + chartHeight - ((value - bottomVal) / range) * chartHeight;
             const offset = value === 0 ? 0 : value > 0 ? -2 : 2;
-            ctx.fillText(labelFormatter(value), yLabelX, y + offset);
+            ctx.fillText(tickLabels[idx], yLabelX, y + offset);
           }});
         }};
 
@@ -2945,6 +2966,7 @@ ORDERBOOK_TEMPLATE = r"""
 </body>
 </html>
 """
+
 
 
 
