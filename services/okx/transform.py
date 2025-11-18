@@ -45,23 +45,80 @@ def normalize_positions(
     account_id: str,
     raw_positions: Iterable[dict],
 ) -> List[Position]:
-    cleaned: List[Position] = []
+    """
+    Normalize OKX positions and aggregate by instrument+side. In net mode,
+    `posSide` is "net" and the sign of `pos` indicates direction; we convert
+    that into explicit long/short and combine multiple fragments into a single
+    entry per side.
+    """
+    aggregated: dict[tuple[str, str], dict] = {}
+
     for item in raw_positions:
-        quantity = float(item.get("pos", 0.0))
-        if not quantity:
+        try:
+            raw_qty = float(item.get("pos", 0.0))
+        except (TypeError, ValueError):
             continue
-        position_id = str(item.get("posId") or f"{account_id}-{item.get('instId')}")
+        if raw_qty == 0:
+            continue
+
+        inst = item.get("instId", "")
+        pos_side = (item.get("posSide") or item.get("side") or "").lower()
+        side = pos_side
+        if side == "net":
+            side = "long" if raw_qty > 0 else "short"
+        if side not in {"long", "short"}:
+            side = "long" if raw_qty > 0 else "short"
+
+        qty = abs(raw_qty)
+        entry_px = _optional_float(item.get("avgPx")) or 0.0
+        mark_px = _optional_float(item.get("markPx"))
+        leverage = _optional_float(item.get("lever"))
+        upl = _optional_float(item.get("upl"))
+        position_id = str(item.get("posId") or f"{account_id}-{inst}-{side}")
+
+        key = (inst, side)
+        bucket = aggregated.setdefault(
+            key,
+            {
+                "position_id": position_id,
+                "account_id": account_id,
+                "instrument_id": inst,
+                "side": side,
+                "quantity": 0.0,
+                "entry_notional": 0.0,
+                "mark_notional": 0.0,
+                "leverage": leverage,
+                "unrealized_pnl": 0.0,
+            },
+        )
+
+        bucket["quantity"] += qty
+        if entry_px > 0:
+            bucket["entry_notional"] += qty * entry_px
+        if mark_px is not None and mark_px > 0:
+            bucket["mark_notional"] += qty * mark_px
+        if leverage is not None:
+            bucket["leverage"] = leverage
+        if upl is not None:
+            bucket["unrealized_pnl"] += upl
+        bucket["position_id"] = position_id  # keep latest id
+
+    cleaned: List[Position] = []
+    for bucket in aggregated.values():
+        qty = bucket["quantity"]
+        entry_price = bucket["entry_notional"] / qty if qty > 0 and bucket["entry_notional"] > 0 else 0.0
+        mark_price = bucket["mark_notional"] / qty if qty > 0 and bucket["mark_notional"] > 0 else None
         cleaned.append(
             Position(
-                position_id=position_id,
-                account_id=account_id,
-                instrument_id=item.get("instId", ""),
-                side=item.get("posSide") or item.get("side", "long"),
-                quantity=abs(quantity),
-                entry_price=float(item.get("avgPx", 0.0)),
-                mark_price=_optional_float(item.get("markPx")),
-                leverage=_optional_float(item.get("lever")),
-                unrealized_pnl=_optional_float(item.get("upl")),
+                position_id=bucket["position_id"],
+                account_id=bucket["account_id"],
+                instrument_id=bucket["instrument_id"],
+                side=bucket["side"],
+                quantity=qty,
+                entry_price=entry_price,
+                mark_price=mark_price,
+                leverage=bucket.get("leverage"),
+                unrealized_pnl=bucket.get("unrealized_pnl"),
                 updated_at=_utc_now(),
             )
         )

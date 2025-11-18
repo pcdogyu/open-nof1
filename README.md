@@ -74,6 +74,11 @@ python scripts/okx_demo_trade.py place --inst-id BTC-USDT-SWAP --side buy --type
 python scripts/okx_demo_trade.py cancel --inst-id BTC-USDT-SWAP --order-id <ordId>
 ```
 
+### OKX 工具脚本
+
+- 生成签名示例：`python exchanges/okxaccount.py`
+- 查询 Demo 余额：`python exchanges/okxaccountbalance.py`
+
 ### 风控演示
 
 ```bash

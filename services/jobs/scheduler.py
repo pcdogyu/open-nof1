@@ -35,6 +35,7 @@ from risk.order_validation import BasicOrderValidator, OrderValidationError, ens
 from risk.notional_limits import OrderNotionalGuard, ProfitLossGuard
 from risk.price_limits import PriceLimitValidator
 from risk.schemas import MarketContext, OrderIntent
+from services.okx.catalog import load_catalog_cache
 from services.analytics.leaderboard import refresh_leaderboard_cache
 from services.okx.transform import (
     extract_balances,
@@ -86,6 +87,7 @@ except ImportError:  # pragma: no cover
 _SCHEDULER: Optional["AsyncIOScheduler"] = None
 _FEATURE_CLIENT: Optional["InfluxDBClient"] = None
 _FEATURE_CONFIG: Optional["InfluxConfig"] = None
+_OKX_INSTRUMENT_MAP: Optional[Dict[str, dict]] = None
 
 _ANALYTICS_JOB_ID = "refresh_leaderboard_and_equity_curve"
 _MARKET_JOB_ID = "market_data_sync"
@@ -104,6 +106,7 @@ _DEFAULT_RISK_CONFIG = {
     "min_notional_usd": 50.0,
     "take_profit_pct": 0.0,
     "stop_loss_pct": 0.0,
+    "pyramid_max_orders": 100,
 }
 
 
@@ -116,6 +119,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
             "max_loss_absolute",
             "cooldown_seconds",
             "min_notional_usd",
+            "pyramid_max_orders",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -124,17 +128,20 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     max_loss = float(config["max_loss_absolute"])
     cooldown = int(config["cooldown_seconds"])
     min_notional = float(config["min_notional_usd"])
+    pyramid_max = int(config.get("pyramid_max_orders", 0))
     price = max(0.001, min(0.5, price))
     drawdown = max(0.1, min(95.0, drawdown))
     max_loss = max(1.0, max_loss)
-    cooldown = max(60, min(86400, cooldown))
+    cooldown = max(10, min(86400, cooldown))
     min_notional = max(0.0, min_notional)
+    pyramid_max = max(0, min(100, pyramid_max))
     return {
         "price_tolerance_pct": price,
         "max_drawdown_pct": drawdown,
         "max_loss_absolute": max_loss,
         "cooldown_seconds": cooldown,
         "min_notional_usd": min_notional,
+        "pyramid_max_orders": pyramid_max,
     }
 
 
@@ -224,10 +231,11 @@ def update_risk_configuration(
     max_drawdown_pct: float,
     max_loss_absolute: float,
     cooldown_seconds: int,
-    min_order_notional: float,
-    max_order_notional: float,
-    take_profit_pct: float,
-    stop_loss_pct: float,
+    min_notional_usd: float,
+    max_order_notional: float = 0.0,  # deprecated placeholder
+    take_profit_pct: float = 0.0,
+    stop_loss_pct: float = 0.0,
+    pyramid_max_orders: int = 0,
 ) -> None:
     """Refresh the in-memory risk configuration."""
     normalized = _sanitize_risk_config(
@@ -236,10 +244,11 @@ def update_risk_configuration(
             "max_drawdown_pct": max_drawdown_pct,
             "max_loss_absolute": max_loss_absolute,
             "cooldown_seconds": cooldown_seconds,
-            "min_order_notional": min_order_notional,
+            "min_notional_usd": min_notional_usd,
             "max_order_notional": max_order_notional,
             "take_profit_pct": take_profit_pct,
             "stop_loss_pct": stop_loss_pct,
+            "pyramid_max_orders": pyramid_max_orders,
         }
     )
     with _RISK_CONFIG_LOCK:
@@ -837,6 +846,26 @@ async def _process_account_signal(
         return False, signal_summary
     debug_entry["order_ready"] = True
     debug_entry["instrument"] = routed.intent.instrument_id or request.market.instrument_id
+
+    action_tag = _classify_order_action(routed.intent, positions)
+    if action_tag:
+        debug_entry["order_action"] = action_tag
+        if isinstance(routed.intent.metadata, dict):
+            routed.intent.metadata["order_action"] = action_tag
+
+    size_note = _align_size_to_lot(routed.intent)
+    if size_note:
+        debug_entry["size_adjusted"] = size_note
+
+    with _RISK_CONFIG_LOCK:
+        pyramid_cap = int(_RISK_CONFIG.get("pyramid_max_orders", 0))
+    if pyramid_cap > 0:
+        active_count = _count_active_orders(open_orders, routed.intent.instrument_id, routed.intent.side)
+        if active_count >= pyramid_cap:
+            debug_entry["notes"] = f"金字塔同向订单已达 {pyramid_cap} 单，跳过下单"
+            debug_entry["pyramid_blocked"] = True
+            _record_order_debug_entry(debug_entry)
+            return False, signal_summary
 
     with _RISK_CONFIG_LOCK:
         min_notional = float(_RISK_CONFIG.get("min_notional_usd", 0.0))
@@ -1473,6 +1502,112 @@ def _infer_instrument_from_positions(positions: Sequence[Position]) -> Optional[
     if not positions:
         return None
     return positions[0].instrument_id
+
+
+def _get_okx_instrument_meta(inst_id: str) -> Optional[dict]:
+    """
+    Load instrument metadata from the cached OKX catalog once and reuse it for
+    order normalization (lot size/min size).
+    """
+    global _OKX_INSTRUMENT_MAP
+    if not inst_id:
+        return None
+    if _OKX_INSTRUMENT_MAP is None:
+        try:
+            _OKX_INSTRUMENT_MAP = {
+                str(entry.get("instId", "")).upper(): entry
+                for entry in load_catalog_cache()
+                if entry.get("instId")
+            }
+        except Exception as exc:  # pragma: no cover - defensive path
+            logger.debug("Failed to load OKX instrument catalog cache: %s", exc)
+            _OKX_INSTRUMENT_MAP = {}
+    return _OKX_INSTRUMENT_MAP.get(str(inst_id).upper())
+
+
+def _align_size_to_lot(intent: OrderIntent) -> Optional[str]:
+    """
+    Clamp order size to the nearest valid OKX lot size to avoid 51121 rejections.
+    Returns a human-readable note when an adjustment was applied.
+    """
+    instrument = _get_okx_instrument_meta(intent.instrument_id)
+    if not instrument:
+        return None
+
+    lot_size = _try_float(instrument.get("lotSz"))
+    min_size = _try_float(instrument.get("minSz"))
+    if not lot_size or lot_size <= 0:
+        return None
+
+    raw_size = float(intent.size or 0.0)
+    multiples = math.floor(raw_size / lot_size)
+    if multiples <= 0:
+        multiples = 1
+    adjusted = multiples * lot_size
+    if min_size and min_size > 0 and adjusted < min_size:
+        adjusted = math.ceil(min_size / lot_size) * lot_size
+
+    adjusted = float(f"{adjusted:.10g}")  # trim float noise for cleaner payloads
+    if abs(adjusted - raw_size) <= 1e-9:
+        return None
+
+    intent.size = adjusted
+    return f"{intent.instrument_id} size adjusted to {adjusted} (lot={lot_size}, min={min_size or lot_size})"
+
+
+def _get_attr(obj, name: str):
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _count_active_orders(open_orders: Sequence[object], instrument_id: str, side: str) -> int:
+    """Count open orders for pyramid cap enforcement."""
+    active_states = {"live", "open", "new", "triggered", "partially_filled", "waiting"}
+    count = 0
+    for order in open_orders or []:
+        inst = _get_attr(order, "instrument_id")
+        ord_side = (_get_attr(order, "side") or "").lower()
+        state = (_get_attr(order, "state") or "").lower()
+        if inst != instrument_id or ord_side != side.lower():
+            continue
+        if state and state not in active_states:
+            continue
+        count += 1
+    return count
+
+
+def _classify_order_action(intent: OrderIntent, positions: Sequence[Position]) -> Optional[str]:
+    """
+    Derive a human-friendly action tag for the order:
+    建仓/加仓/减仓/平仓/对冲单.
+    """
+    if intent is None or not intent.instrument_id:
+        return None
+    net_qty = 0.0
+    for pos in positions or []:
+        if _get_attr(pos, "instrument_id") != intent.instrument_id:
+            continue
+        qty = _get_attr(pos, "quantity") or 0.0
+        try:
+            qty = float(qty)
+        except (TypeError, ValueError):
+            qty = 0.0
+        side = (_get_attr(pos, "side") or "").lower()
+        net_qty += qty if side in {"long", "buy"} else -qty
+
+    incoming = float(intent.size or 0.0)
+    incoming = incoming if intent.side.lower() == "buy" else -incoming
+
+    if net_qty == 0:
+        return "建仓"
+    if net_qty * incoming > 0:
+        return "加仓"
+    if abs(incoming) < abs(net_qty):
+        return "减仓"
+    if abs(incoming) == abs(net_qty):
+        return "平仓"
+    return "对冲单"
 
 
 def _refresh_leaderboard(repository: AccountRepository) -> None:

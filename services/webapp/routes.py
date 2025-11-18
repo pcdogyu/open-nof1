@@ -149,6 +149,7 @@ _DEFAULT_RISK_SETTINGS = {
     "stop_loss_pct": 0.0,
     "default_leverage": 1,
     "max_leverage": 125,
+    "pyramid_max_orders": 100,
 }
 
 
@@ -166,6 +167,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
             "stop_loss_pct",
             "default_leverage",
             "max_leverage",
+            "pyramid_max_orders",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -181,7 +183,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     price = max(0.001, min(0.5, price))
     drawdown = max(0.1, min(95.0, drawdown))
     max_loss = max(1.0, max_loss)
-    cooldown = max(60, min(86400, cooldown))
+    cooldown = max(10, min(86400, cooldown))
     min_notional = max(0.0, min_notional)
     take_profit = max(0.0, min(500.0, take_profit))
     stop_loss = max(0.0, min(95.0, stop_loss))
@@ -189,6 +191,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     max_leverage = max(1, min(125, max_leverage))
     if max_leverage < default_leverage:
         max_leverage = default_leverage
+    pyramid_max = int(config.get("pyramid_max_orders", 0))
+    pyramid_max = max(0, min(100, pyramid_max))
     return {
         "price_tolerance_pct": price,
         "max_drawdown_pct": drawdown,
@@ -199,6 +203,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
         "stop_loss_pct": stop_loss,
         "default_leverage": default_leverage,
         "max_leverage": max_leverage,
+        "pyramid_max_orders": pyramid_max,
     }
 
 
@@ -330,6 +335,7 @@ def get_risk_settings() -> dict:
             "stop_loss_pct": float(_RISK_SETTINGS.get("stop_loss_pct", 0.0)),
             "default_leverage": int(_RISK_SETTINGS.get("default_leverage", 1)),
             "max_leverage": int(_RISK_SETTINGS.get("max_leverage", 125)),
+            "pyramid_max_orders": int(_RISK_SETTINGS.get("pyramid_max_orders", 0)),
             "updated_at": _RISK_SETTINGS["updated_at"],
         }
 
@@ -345,6 +351,7 @@ def update_risk_settings(
     stop_loss_pct: float,
     default_leverage: int,
     max_leverage: int,
+    pyramid_max_orders: int,
 ) -> dict:
     """Update risk parameters and persist them to config.py."""
     try:
@@ -356,33 +363,36 @@ def update_risk_settings(
         stop_loss = float(stop_loss_pct)
         default_leverage_val = int(default_leverage)
         max_leverage_val = int(max_leverage)
+        pyramid_max_val = int(pyramid_max_orders)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="数值必须为数字。")
+        raise HTTPException(status_code=400, detail="数值需要为数字。")
     try:
         cooldown = int(cooldown_seconds)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="冷却时长必须为整数。")
+        raise HTTPException(status_code=400, detail="等待时间必须为整数。")
 
     if price <= 0 or price > 0.5:
-        raise HTTPException(status_code=400, detail="价格偏离长度需在 0.1% - 50% 之间。")
+        raise HTTPException(status_code=400, detail="价格偏移阈值需在 0.1% - 50% 之间。")
     if drawdown <= 0 or drawdown > 95:
         raise HTTPException(status_code=400, detail="回撤阈值需在 0 - 95% 之间。")
     if max_loss <= 0:
-        raise HTTPException(status_code=400, detail="最大亏损需为正。")
-    if cooldown < 60 or cooldown > 86400:
-        raise HTTPException(status_code=400, detail="冷却时间需在 60 秒 - 24 小时之间。")
+        raise HTTPException(status_code=400, detail="最大亏损需为正数")
+    if cooldown < 10 or cooldown > 86400:
+        raise HTTPException(status_code=400, detail="等待时间需在 10 秒 - 24 小时之间。")
     if min_notional < 0:
-        raise HTTPException(status_code=400, detail="单笔金额不能为负。")
+        raise HTTPException(status_code=400, detail="最小下单金额不能为负数。")
     if take_profit < 0 or take_profit > 500:
-        raise HTTPException(status_code=400, detail="止盈需在 0-500% 之间。")
+        raise HTTPException(status_code=400, detail="止盈范围 0-500% 之间。")
     if stop_loss < 0 or stop_loss > 95:
-        raise HTTPException(status_code=400, detail="止损需在 0-95% 之间。")
+        raise HTTPException(status_code=400, detail="止损范围 0-95% 之间。")
     if default_leverage_val < 1 or default_leverage_val > 125:
         raise HTTPException(status_code=400, detail="默认杠杆需在 1-125 之间。")
     if max_leverage_val < 1 or max_leverage_val > 125:
         raise HTTPException(status_code=400, detail="最大杠杆需在 1-125 之间。")
     if max_leverage_val < default_leverage_val:
         raise HTTPException(status_code=400, detail="最大杠杆需大于等于默认杠杆。")
+    if pyramid_max_val < 0 or pyramid_max_val > 100:
+        raise HTTPException(status_code=400, detail="单方向金字塔上限应在 0-100 之间。")
 
     normalized = {
         "price_tolerance_pct": price,
@@ -394,6 +404,7 @@ def update_risk_settings(
         "stop_loss_pct": stop_loss,
         "default_leverage": default_leverage_val,
         "max_leverage": max_leverage_val,
+        "pyramid_max_orders": pyramid_max_val,
     }
     with _RISK_SETTINGS_LOCK:
         for key, value in normalized.items():

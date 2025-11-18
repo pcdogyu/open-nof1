@@ -82,7 +82,7 @@ class SignalRouter:
             return None
 
         side = self._extract_side(order_payload, decision)
-        order_type = (order_payload.get("order_type") or order_payload.get("type") or "market").lower()
+        order_type = "market"  # Always use market orders for AI-driven execution
         size = self._extract_size(order_payload)
         if size is None or size <= 0:
             logger.warning("Signal from %s produced non-positive size; skipping", response.model_id)

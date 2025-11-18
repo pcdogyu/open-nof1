@@ -162,12 +162,12 @@ def okx_cancel_order(
         )
         detail = result.get("order_id") or ""
         return RedirectResponse(
-            url=f"/okx?order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
+            url=f"/okx?refresh=1&order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
     except Exception as exc:
         return RedirectResponse(
-            url=f"/okx?order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
+            url=f"/okx?refresh=1&order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
@@ -249,6 +249,7 @@ def submit_risk_settings(
     stop_loss_pct: float = Form(0),
     default_leverage: int = Form(1),
     max_leverage: int = Form(125),
+    pyramid_max_orders: int = Form(100),
 ) -> RedirectResponse:
     routes.update_risk_settings(
         price_tolerance_pct=price_tolerance_pct / 100.0,
@@ -260,6 +261,7 @@ def submit_risk_settings(
         stop_loss_pct=stop_loss_pct,
         default_leverage=default_leverage,
         max_leverage=max_leverage,
+        pyramid_max_orders=pyramid_max_orders,
     )
     return RedirectResponse(url="/risk", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -877,8 +879,9 @@ def _render_risk_page(settings: dict) -> str:
     max_loss = float(settings.get("max_loss_absolute") or 1500.0)
     max_loss = max(1.0, max_loss)
     cooldown_seconds = int(settings.get("cooldown_seconds") or 600)
-    cooldown_seconds = max(60, min(86400, cooldown_seconds))
+    cooldown_seconds = max(10, min(86400, cooldown_seconds))
     min_notional = max(0.0, float(settings.get("min_notional_usd") or 0.0))
+    pyramid_max_orders = max(0, min(100, int(settings.get("pyramid_max_orders") or 0)))
     take_profit_pct = max(0.0, min(500.0, float(settings.get("take_profit_pct") or 0.0)))
     stop_loss_pct = max(0.0, min(95.0, float(settings.get("stop_loss_pct") or 0.0)))
     default_leverage = max(1, min(125, int(settings.get("default_leverage") or 1)))
@@ -899,6 +902,7 @@ def _render_risk_page(settings: dict) -> str:
     max_leverage_text = _compact(max_leverage, 0)
     cooldown_minutes = cooldown_seconds / 60
     cooldown_minutes_text = _compact(cooldown_minutes, 1)
+    pyramid_cap_text = _compact(pyramid_max_orders, 0)
     updated_at = esc(_format_asia_shanghai(settings.get("updated_at")))
 
     return RISK_TEMPLATE.format(
@@ -918,6 +922,8 @@ def _render_risk_page(settings: dict) -> str:
         max_leverage=esc(str(max_leverage)),
         default_leverage_display=esc(default_leverage_text),
         max_leverage_display=esc(max_leverage_text),
+        pyramid_max_orders=esc(str(pyramid_max_orders)),
+        pyramid_max_display=esc(pyramid_cap_text),
         cooldown_seconds=esc(str(cooldown_seconds)),
         cooldown_minutes=esc(cooldown_minutes_text),
         updated_at=updated_at,
@@ -958,6 +964,20 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
         side_value = esc(raw_side)
         side_display_escaped = esc(side_display)
         quantity_value = esc(str(pos.get("quantity") if pos.get("quantity") is not None else ""))
+        leverage_display = _format_number(pos.get("leverage"))
+        try:
+            qty = float(pos.get("quantity") or 0.0)
+            mark_px = float(pos.get("mark_price") or 0.0)
+            entry_px = float(pos.get("entry_price") or 0.0)
+            leverage = float(pos.get("leverage") or 0.0)
+        except Exception:
+            qty = mark_px = entry_px = leverage = 0.0
+        margin = None
+        if qty > 0 and mark_px > 0 and leverage > 0:
+            margin = (qty * mark_px) / leverage
+        pnl_pct = None
+        if entry_px > 0 and mark_px > 0:
+            pnl_pct = ((mark_px - entry_px) / entry_px) * 100
         action_html = (
             "<form method='post' action='/okx/close-position' class='inline-form'>"
             f"<input type='hidden' name='account_id' value='{account_value}'>"
@@ -972,20 +992,23 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             f"<td>{esc(pos.get('position_id'))}</td>"
             f"<td>{instrument_value}</td>"
             f"<td>{side_display_escaped}</td>"
+            f"<td>{leverage_display}</td>"
             f"<td>{_format_number(pos.get('quantity'))}</td>"
             f"<td>{_format_number(pos.get('entry_price'))}</td>"
             f"<td>{_format_number(pos.get('mark_price'))}</td>"
+            f"<td>{_format_number(margin)}</td>"
             f"<td>{_format_number(pos.get('unrealized_pnl'))}</td>"
+            f"<td>{(_format_number(pnl_pct) + '%') if pnl_pct is not None else ''}</td>"
             f"<td>{esc(_format_asia_shanghai(pos.get('updated_at')))}</td>"
             f"<td>{action_html}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='9'>暂无持仓</td></tr>")
+        rows.append("<tr><td colspan='12'>暂无持仓</td></tr>")
 
     return (
         "<table class='dense'>"
-        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>未实现盈亏</th><th>更新时间</th><th>操作</th></tr></thead>"
+        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>更新时间</th><th>操作</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
@@ -1033,7 +1056,7 @@ def _render_orders_table(orders: Sequence[dict] | None, *, account_id: str | Non
                 f"<input type='hidden' name='account_id' value='{account_value}'>"
                 f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
                 f"<input type='hidden' name='order_id' value='{order_id_value}'>"
-                f"<button type='submit' class='btn-cancel' onclick=\"return confirm('确认取消订单 {order_id_value} ?');\">取消</button>"
+                "<button type='submit' class='btn-cancel'>取消</button>"
                 "</form>"
             )
         rows.append(
@@ -1633,79 +1656,86 @@ RISK_TEMPLATE = r"""
         <section class="risk-card primary">
             <h2>风险参数</h2>
             <form method="post" action="/risk/update">
-                <label for="price-tolerance">价格波动幅度（%）
+                <label for="price-tolerance">价格波动容忍度（%）
                     <input id="price-tolerance" type="number" name="price_tolerance_pct" min="0.1" max="50" step="0.1" value="{price_tolerance_pct}" required>
-                    <span class="hint">限价单需落在参考价 ±<span id="hint-price-value">{price_tolerance_display}</span>% 内。</span>
+                    <span class="hint">剧烈波动时参考价 ±<span id="hint-price-value">{price_tolerance_display}</span>% 内。</span>
                 </label>
                 <label for="min-notional">最小下单金额（USDT）
                     <input id="min-notional" type="number" name="min_notional_usd" min="0" step="0.01" value="{min_notional_usd}" required>
-                    <span class="hint">名义金额至少 <span id="hint-min-notional">{min_notional_display}</span> USDT，0 表示关闭。</span>
+                    <span class="hint">当前门槛：<span id="hint-min-notional">{min_notional_display}</span> USDT，0 表示关闭。</span>
                 </label>
-                <label for="drawdown-limit">最大回撤（%）
-                    <input id="drawdown-limit" type="number" name="max_drawdown_pct" min="0.1" max="95" step="0.1" value="{max_drawdown_pct}" required>
+                <label for="pyramid-max">金字塔单向上限（单币对）
+                    <input id="pyramid-max" type="number" name="pyramid_max_orders" min="0" max="100" step="1" value="{pyramid_max_orders}" required>
+                    <span class="hint">同向累计订单最多 <span id="hint-pyramid-value">{pyramid_max_display}</span> 笔，0 表示不限制。</span>
+                </label>
+                <label for="max-drawdown">最大回撤（%）
+                    <input id="max-drawdown" type="number" name="max_drawdown_pct" min="0.1" max="95" step="0.1" value="{max_drawdown_pct}" required>
                 </label>
                 <label for="loss-limit">累计亏损上限（USDT）
                     <input id="loss-limit" type="number" name="max_loss_absolute" min="1" step="1" value="{max_loss_absolute}" required>
                 </label>
                 <label for="default-leverage">默认杠杆（倍）
                     <input id="default-leverage" type="number" name="default_leverage" min="1" max="125" step="1" value="{default_leverage}" required>
-                    <span class="hint">用于下单时的默认杠杆，范围 1-125。</span>
+                    <span class="hint">建仓时默认杠杆，范围 1-125。</span>
                 </label>
                 <label for="max-leverage">最大杠杆（倍）
                     <input id="max-leverage" type="number" name="max_leverage" min="1" max="125" step="1" value="{max_leverage}" required>
-                    <span class="hint">不可低于默认杠杆，范围 1-125。</span>
+                    <span class="hint">不得低于默认杠杆，范围 1-125。</span>
                 </label>
                 <label for="take-profit">止盈阈值（%）
                     <input id="take-profit" type="number" name="take_profit_pct" min="0" max="500" step="0.1" value="{take_profit_pct}" required>
-                    <span class="hint">未实现收益达到该值后停止新开仓，0 表示关闭。</span>
+                    <span class="hint">未实现收益达到阈值时停止开仓，0 表示关闭。</span>
                 </label>
                 <label for="stop-loss">止损阈值（%）
                     <input id="stop-loss" type="number" name="stop_loss_pct" min="0" max="95" step="0.1" value="{stop_loss_pct}" required>
-                    <span class="hint">未实现收益低于 -阈值 时停止新开仓，0 表示关闭。</span>
+                    <span class="hint">未实现亏损达到 -阈值 时停止开仓，0 表示关闭。</span>
                 </label>
-                <label for="cooldown-seconds">熔断冷却（秒）
-                    <input id="cooldown-seconds" type="number" name="cooldown_seconds" min="60" max="86400" step="30" value="{cooldown_seconds}" required>
-                    <span class="hint">相当于暂停 <span id="hint-cooldown-value">{cooldown_minutes}</span> 分钟后再恢复</span>
+                <label for="cooldown-seconds">冷静时间（秒）
+                    <input id="cooldown-seconds" type="number" name="cooldown_seconds" min="10" max="86400" step="10" value="{cooldown_seconds}" required>
+                    <span class="hint">相当于暂停 <span id="hint-cooldown-value">{cooldown_minutes}</span> 分钟后再恢复（最短 10 秒，提高下单频率）</span>
                 </label>
-                <button type="submit">保存风控参数</button>
+                <button type="submit">保存策略参数</button>
             </form>
         </section>
         <section class="risk-card secondary">
             <h2>规则说明</h2>
             <ul class="rule-list">
-                <li>价格限制：限价单需落在参考价 ±<span id="rule-price-value">{price_tolerance_display}</span>% 内。</li>
-                <li>单笔金额：名义金额需 ≥ <span id="rule-min-notional-value">{min_notional_display}</span> USDT（0 表示不限制）。</li>
-                <li>回撤保护：账户回撤超过 <span id="rule-drawdown-value">{drawdown_display}</span>% 将触发熔断。</li>
-                <li>亏损上限：亏损超过 <span id="rule-loss-value">{max_loss_display}</span> USDT 时停止交易。</li>
-                <li>杠杆限制：默认 <span id="rule-default-lev">{default_leverage_display}</span>x，最高 <span id="rule-max-lev">{max_leverage_display}</span>x。</li>
-                <li>止盈止损：未实现收益 ≥ <span id="rule-take-profit-value">{take_profit_display}</span>% 或 ≤ -<span id="rule-stop-loss-value">{stop_loss_display}</span>% 时停止新开仓。</li>
-                <li>冷却时间：熔断后等待 <span id="rule-cooldown-value">{cooldown_minutes}</span> 分钟或手动恢复。</li>
+                <li>价格限制：委托价格需落在参考价 ±<span id="rule-price-value">{price_tolerance_display}</span>% 内。</li>
+                <li>最小名义：下单金额须 ≥ <span id="rule-min-notional-value">{min_notional_display}</span> USDT，0 表示不限制。</li>
+                <li>金字塔：同币种同方向最多 <span id="rule-pyramid-value">{pyramid_max_display}</span> 笔（0 表示关闭限制）。</li>
+                <li>回撤保护：账户回撤超过 <span id="rule-drawdown-value">{drawdown_display}</span>% 时进入冷静期。</li>
+                <li>亏损限制：累计亏损超出 <span id="rule-loss-value">{max_loss_display}</span> USDT 时停止交易。</li>
+                <li>杠杆限制：默认 <span id="rule-default-lev">{default_leverage_display}</span>x，最大 <span id="rule-max-lev">{max_leverage_display}</span>x。</li>
+                <li>止盈止损：未实现盈亏 ≥ <span id="rule-take-profit-value">{take_profit_display}</span>% 或 ≤ -<span id="rule-stop-loss-value">{stop_loss_display}</span>% 时停止开仓。</li>
+                <li>等待时长：冷静后等待 <span id="rule-cooldown-value">{cooldown_minutes}</span> 分钟或手动恢复。</li>
+                <li>数据馈送：盘口深度、爆仓流数据将注入模型特征辅助人工/AI决策。</li>
             </ul>
             <p class="hint">保存后写入 config.py 并通知调度任务</p>
         </section>
     </div>
     <script>
-      (function() {{
+      (function() {{{{
         const priceInput = document.getElementById('price-tolerance');
         const drawdownInput = document.getElementById('drawdown-limit');
         const lossInput = document.getElementById('loss-limit');
         const cooldownInput = document.getElementById('cooldown-seconds');
         const minNotionalInput = document.getElementById('min-notional');
+        const pyramidInput = document.getElementById('pyramid-max');
         const takeProfitInput = document.getElementById('take-profit');
         const stopLossInput = document.getElementById('stop-loss');
         const defaultLevInput = document.getElementById('default-leverage');
         const maxLevInput = document.getElementById('max-leverage');
-        if (!priceInput || !drawdownInput || !lossInput || !cooldownInput || !minNotionalInput || !takeProfitInput || !stopLossInput || !defaultLevInput || !maxLevInput) {{
+        if (!priceInput || !drawdownInput || !lossInput || !cooldownInput || !minNotionalInput || !pyramidInput || !takeProfitInput || !stopLossInput || !defaultLevInput || !maxLevInput) {{
           return;
-        }}
-        const formatCompact = (value, digits = 2) => {{
+        }}}}
+        const formatCompact = (value, digits = 2) => {{{{
           const num = Number(value);
-          if (!isFinite(num)) {{
+          if (!isFinite(num)) {{{{
             return '--';
-          }}
+          }}}}
           const fixed = num.toFixed(digits);
           return fixed.replace(/\.?0+$/, '') || '0';
-        }};
+        }}}};
         const updateRules = () => {{
           const priceValue = Number(priceInput.value) || 0;
           const drawdownValue = Number(drawdownInput.value) || 0;
@@ -1713,6 +1743,7 @@ RISK_TEMPLATE = r"""
           const cooldownSeconds = Number(cooldownInput.value) || 0;
           const cooldownMinutes = cooldownSeconds / 60;
           const minNotional = Number(minNotionalInput.value) || 0;
+          const pyramidCap = Number(pyramidInput.value) || 0;
           const takeProfit = Number(takeProfitInput.value) || 0;
           const stopLoss = Number(stopLossInput.value) || 0;
           const defaultLev = Number(defaultLevInput.value) || 0;
@@ -1722,38 +1753,33 @@ RISK_TEMPLATE = r"""
           const lossText = formatCompact(lossValue, 2);
           const cooldownText = formatCompact(cooldownMinutes, 1);
           const minNotionalText = formatCompact(minNotional, 2);
+          const pyramidCapText = formatCompact(pyramidCap, 0);
           const takeProfitText = formatCompact(takeProfit, 2);
           const stopLossText = formatCompact(stopLoss, 2);
           const defaultLevText = formatCompact(defaultLev, 0);
           const maxLevText = formatCompact(maxLev, 0);
-          const mapping = [
-            ['hint-price-value', priceText],
-            ['rule-price-value', priceText],
-            ['hint-min-notional', minNotionalText],
-            ['rule-min-notional-value', minNotionalText],
-            ['rule-drawdown-value', drawdownText],
-            ['rule-loss-value', lossText],
-            ['rule-cooldown-value', cooldownText],
-            ['hint-cooldown-value', cooldownText],
-            ['rule-take-profit-value', takeProfitText],
-            ['rule-stop-loss-value', stopLossText],
-            ['rule-default-lev', defaultLevText],
-            ['rule-max-lev', maxLevText],
-          ];
-        mapping.forEach(([id, text]) => {{
-            const el = document.getElementById(id);
-            if (el) {{
-              el.textContent = text;
-            }}
-          }});
+          document.getElementById('hint-price-value').textContent = priceText;
+          document.getElementById('rule-price-value').textContent = priceText;
+          document.getElementById('rule-drawdown-value').textContent = drawdownText;
+          document.getElementById('rule-loss-value').textContent = lossText;
+          document.getElementById('hint-cooldown-value').textContent = cooldownText;
+          document.getElementById('rule-cooldown-value').textContent = cooldownText;
+          document.getElementById('hint-min-notional').textContent = minNotionalText;
+          document.getElementById('rule-min-notional-value').textContent = minNotionalText;
+          document.getElementById('hint-pyramid-value').textContent = pyramidCapText;
+          document.getElementById('rule-pyramid-value').textContent = pyramidCapText;
+          document.getElementById('rule-take-profit-value').textContent = takeProfitText;
+          document.getElementById('rule-stop-loss-value').textContent = stopLossText;
+          document.getElementById('rule-default-lev').textContent = defaultLevText;
+          document.getElementById('rule-max-lev').textContent = maxLevText;
         }};
-        ['input', 'change'].forEach((eventName) => {{
-          [priceInput, drawdownInput, lossInput, cooldownInput, minNotionalInput, takeProfitInput, stopLossInput, defaultLevInput, maxLevInput].forEach((input) => {{
+        ['input', 'change'].forEach((eventName) => {{{{
+          [priceInput, drawdownInput, lossInput, cooldownInput, minNotionalInput, pyramidInput, takeProfitInput, stopLossInput, defaultLevInput, maxLevInput].forEach((input) => {{{{
             input.addEventListener(eventName, updateRules);
-          }});
-        }});
+          }}}});
+        }}}});
         updateRules();
-      }})();
+      }}}})();
     </script>
 </body>
 </html>
