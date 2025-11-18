@@ -1,4 +1,4 @@
-"""
+﻿"""
 Background scheduler for analytics refresh and automated signal execution.
 """
 
@@ -796,18 +796,19 @@ async def _process_account_signal(
         positions=positions,
         market_price=market_price,
     )
+
+
     if request is None:
         logger.debug("Unable to build signal request for %s; skipping", account_key)
         debug_entry["notes"] = "缺少可交易合约"
         _record_order_debug_entry(debug_entry)
         return False, None
-    response = await runtime.generate_signal(request)
-    debug_entry["signal_generated"] = True
-    debug_entry["decision"] = response.decision
-    try:
-        debug_entry["confidence"] = float(response.confidence)
-    except Exception:
-        debug_entry["confidence"] = None
+    override_signal = _build_liquidation_override(request)
+    if override_signal:
+        debug_entry["notes"] = "爆仓阈值触发直达信号"
+        response = override_signal
+    else:
+        response = await runtime.generate_signal(request)
     debug_entry["decision_actionable"] = (response.decision or "").lower() not in {"hold"}
     routed = router.route(
         response,
@@ -882,7 +883,7 @@ async def _process_account_signal(
         except Exception:
             notional = 0.0
         if notional <= 0:
-            debug_entry["notes"] = "缺少价格无法计算名义金额"
+            debug_entry["notes"] = "缺少价格无法计算最小名义金额"
             _record_order_debug_entry(debug_entry)
             return False, signal_summary
         if notional < min_notional:
@@ -1152,6 +1153,65 @@ def _build_signal_request(
             "account_id": account.account_id,
             "ai_cycle_seconds": _AI_INTERVAL,
         },
+    )
+
+
+def _build_liquidation_override(request: SignalRequest) -> Optional[SignalResponse]:
+    """
+    Generate a direct buy/sell signal when a single liquidation exceeds thresholds.
+
+    Rules:
+    - ETH: long liquidation > 5 triggers buy; short liquidation > 5 triggers sell.
+    - BTC: same thresholds.
+    """
+    meta = request.market.metadata or {}
+    instrument = (request.market.instrument_id or "").upper()
+    base = None
+    if instrument.startswith("ETH"):
+        base = "ETH"
+    elif instrument.startswith("BTC"):
+        base = "BTC"
+    if base is None:
+        return None
+
+    try:
+        long_qty = float(meta.get("liq_long_qty"))
+    except (TypeError, ValueError):
+        long_qty = None
+    try:
+        short_qty = float(meta.get("liq_short_qty"))
+    except (TypeError, ValueError):
+        short_qty = None
+
+    threshold = 5.0
+    decision: Optional[str] = None
+    qty: Optional[float] = None
+    reasoning: Optional[str] = None
+
+    if long_qty is not None and long_qty > threshold:
+        decision = "buy"
+        qty = max(0.01, min(long_qty, threshold))
+        reasoning = f"{base} 多单爆仓 {long_qty:.2f} > {threshold} 触发买入信号"
+    elif short_qty is not None and short_qty > threshold:
+        decision = "sell"
+        qty = max(0.01, min(short_qty, threshold))
+        reasoning = f"{base} 空单爆仓 {short_qty:.2f} > {threshold} 触发卖出信号"
+
+    if not decision or qty is None:
+        return None
+
+    return SignalResponse(
+        model_id=request.model_id,
+        decision=decision,
+        confidence=0.95,
+        reasoning=reasoning or "",
+        suggested_order={
+            "instrument_id": request.market.instrument_id,
+            "side": decision,
+            "size": qty,
+            "order_type": "market",
+        },
+        raw_output={"source": "liquidation_threshold", "long_qty": long_qty, "short_qty": short_qty},
     )
 
 
