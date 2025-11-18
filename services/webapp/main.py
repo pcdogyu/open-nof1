@@ -110,12 +110,12 @@ def okx_manual_order(
         )
         detail = result.get("order_id") or ""
         return RedirectResponse(
-            url=f"/okx?order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
+            url=f"/okx?refresh=1&order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
     except Exception as exc:
         return RedirectResponse(
-            url=f"/okx?order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
+            url=f"/okx?refresh=1&order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
@@ -138,12 +138,12 @@ def okx_close_position(
         )
         detail = result.get("order_id") or ""
         return RedirectResponse(
-            url=f"/okx?order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
+            url=f"/okx?refresh=1&order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
     except Exception as exc:
         return RedirectResponse(
-            url=f"/okx?order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
+            url=f"/okx?refresh=1&order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
@@ -1649,7 +1649,8 @@ RISK_TEMPLATE = r"""
     <header>
         <h1>风险控制面板</h1>
         <p class="updated">最近更新：<span class="timestamp">{updated_at}</span></p>
-        <p class="hint">更新后将同步至 config.py 并通知后台任务</p>
+        <p class="hint">更新后将同步到 config.py 并通知后台任务</p>
+        <p class="hint">数据馈送：盘口深度、爆仓流数据将注入模型特征辅助人工/AI决策，已增加价格和成交量推送给大模型。</p>
     </header>
 
     <div class="risk-grid">

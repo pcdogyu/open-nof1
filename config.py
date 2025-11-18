@@ -10,7 +10,7 @@ INFLUX_ORG = "hy"
 INFLUX_BUCKET = "orderflow"
 
 # Auto-generated InfluxDB token (scope manually configure in Influx UI).
-INFLUX_TOKEN = "local influxdb token"
+INFLUX_TOKEN = "vL31cBS6KGLdiYuhCZ2dZ21YZaHdn5EeFWv7iLbiwAy0rkhsoNor1328rf3AWtpqV6JWVRlAJHR6ov3WXWfn3Q=="
 
 # Optional: admin credentials if needed for scripts (avoid using in production).
 INFLUX_USERNAME = "admin"
@@ -39,9 +39,9 @@ AI_INTERACTION_INTERVAL = 120
 # Populate secrets/passphrases when available.
 OKX_ACCOUNTS = {
     "moni": {
-        "api_key": "api key",
-        "api_secret": "api secret",
-        "passphrase": "pass phrase",
+        "api_key": "d7f7bde1-b1b7-427b-b97a-37087c8560db",
+        "api_secret": "8A831D36FBC2EB7010B3B37D7D495F9A",
+        "passphrase": "123456.coM",
         "model_id": "deepseek-v1",
         "account_id": "okx_moni",
         "starting_equity": 10000.0,
@@ -58,7 +58,7 @@ QWEN_API_KEY = "QW-1234567890"
 MODEL_DEFAULTS = {   'deepseek-v1': {   'display_name': 'DeepSeek Reasoner (V3.2-Exp)',
                        'provider': 'DeepSeek',
                        'enabled': True,
-                       'api_key': 'sk-123456789'},
+                       'api_key': 'sk-6a6df7e0b4364817881ce1d9fb4dd814'},
     'qwen-v1': {'display_name': 'Qwen 千问模型', 'provider': '阿里云通义', 'enabled': False, 'api_key': ''},
     'grok-v1': {   'display_name': 'Grok 交易模型',
                    'provider': 'xAI Grok',

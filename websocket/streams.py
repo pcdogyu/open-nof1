@@ -34,6 +34,9 @@ class BaseOkxStream:
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._writer: InfluxWriter | None = None
+        # Keepalive tuning to reduce noisy restarts when the upstream is quiet.
+        self._ping_interval_seconds = 20
+        self._idle_timeout_seconds = 60
 
     def set_instruments(self, instruments: Iterable[str]) -> None:
         updated = {inst.strip().upper() for inst in instruments if inst and inst.strip()}
@@ -71,8 +74,9 @@ class BaseOkxStream:
             try:
                 async with websockets.connect(
                     OKX_PUBLIC_WS,
-                    ping_interval=30,
-                    ping_timeout=30,
+                    # Handle ping/idle manually to tolerate quiet periods.
+                    ping_interval=None,
+                    ping_timeout=None,
                     close_timeout=5,
                     max_queue=8,
                 ) as ws:
@@ -93,16 +97,53 @@ class BaseOkxStream:
                 await asyncio.sleep(reconnect_delay)
 
     async def _listen(self, ws: WebSocketClientProtocol) -> None:
-        async for message in ws:
-            if self._stop_event.is_set():
-                break
+        loop = asyncio.get_running_loop()
+        last_message_at = loop.time()
+
+        async def _keepalive() -> None:
+            nonlocal last_message_at
+            while not self._stop_event.is_set():
+                await asyncio.sleep(self._ping_interval_seconds)
+                if self._stop_event.is_set():
+                    break
+                idle = loop.time() - last_message_at
+                if idle >= self._idle_timeout_seconds:
+                    logger.warning(
+                        "%s idle for %.0fs; closing websocket to trigger reconnect",
+                        self.__class__.__name__,
+                        idle,
+                    )
+                    try:
+                        await ws.close(code=4004, reason="idle timeout")
+                    except Exception:
+                        pass
+                    break
+                # Send a lightweight ping if no data has arrived recently.
+                if idle >= self._ping_interval_seconds:
+                    try:
+                        await ws.ping()
+                    except Exception:
+                        break
+
+        keepalive_task = asyncio.create_task(_keepalive(), name=f"{self.__class__.__name__}-keepalive")
+        try:
+            async for message in ws:
+                if self._stop_event.is_set():
+                    break
+                last_message_at = loop.time()
+                try:
+                    payload = json.loads(message)
+                except json.JSONDecodeError:
+                    continue
+                if "event" in payload:
+                    continue  # subscription acknowledgement or error
+                await self._handle_payload(payload)
+        finally:
+            keepalive_task.cancel()
             try:
-                payload = json.loads(message)
-            except json.JSONDecodeError:
-                continue
-            if "event" in payload:
-                continue  # subscription acknowledgement or error
-            await self._handle_payload(payload)
+                await keepalive_task
+            except asyncio.CancelledError:
+                pass
 
     async def _handle_payload(self, payload: dict) -> None:
         raise NotImplementedError

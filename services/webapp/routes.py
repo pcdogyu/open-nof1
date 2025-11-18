@@ -837,20 +837,18 @@ def get_okx_summary(
             except Exception:
                 fresh_enough = False
 
-        if fresh_enough:
-            # Keep cached repository payload; skip OKX API call
-            continue
-
-        # Cache is missing or stale -> fetch from OKX
+        # Always attempt to refresh live state so positions/挂单 stay current.
         try:
             live = fetch_account_snapshot(meta)
         except Exception as exc:
-            sync_errors.append(
-                {
-                    "account_id": account_id,
-                    "message": str(exc),
-                }
-            )
+            # If we have a fresh-enough cached snapshot, keep it as a fallback.
+            if not fresh_enough:
+                sync_errors.append(
+                    {
+                        "account_id": account_id,
+                        "message": str(exc),
+                    }
+                )
             continue
 
         # Persist refreshed snapshot back to repository when available
@@ -881,10 +879,10 @@ def get_okx_summary(
             account_map[account_id] = target
         else:
             target["account"].update(live_account)
-            target["balances"] = live.get("balances", [])
-            target["positions"] = live.get("positions", [])
-            target["recent_trades"] = live.get("recent_trades", [])
-            target["open_orders"] = live.get("open_orders", [])
+            target["balances"] = live.get("balances", target.get("balances", []))
+            target["positions"] = live.get("positions", target.get("positions", []))
+            target["recent_trades"] = live.get("recent_trades", target.get("recent_trades", []))
+            target["open_orders"] = live.get("open_orders", target.get("open_orders", []))
 
     # Leaderboard may also rely on repository; guard to avoid 500s in demo setups
     try:
