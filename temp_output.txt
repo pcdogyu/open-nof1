@@ -1230,35 +1230,6 @@ def _choose_margin_mode(instrument_id: str, meta: Dict[str, str]) -> str:
     return "cash"
 
 
-def _summarize_okx_error(payload: Optional[dict]) -> str:
-    """
-    Render the OKX error payload into a compact string for debugging.
-    """
-    if not payload or not isinstance(payload, dict):
-        return ""
-    details: list[str] = []
-    for item in payload.get("data") or []:
-        if not isinstance(item, dict):
-            details.append(str(item))
-            continue
-        code = item.get("sCode") or item.get("code")
-        msg = item.get("sMsg") or item.get("msg")
-        tag = item.get("tag")
-        snippet = ""
-        if code and msg:
-            snippet = f"{code}: {msg}"
-        elif code:
-            snippet = str(code)
-        elif msg:
-            snippet = str(msg)
-        if tag:
-            snippet = f"{snippet} (tag={tag})" if snippet else f"(tag={tag})"
-        if not snippet:
-            snippet = str(item)
-        details.append(snippet)
-    return "; ".join(details)
-
-
 def _place_order(meta: Dict[str, str], intent: OrderIntent) -> tuple[Optional[Dict[str, object]], Optional[str]]:
     credentials = ExchangeCredentials(
         api_key=meta["api_key"],
@@ -1292,18 +1263,13 @@ def _place_order(meta: Dict[str, str], intent: OrderIntent) -> tuple[Optional[Di
             raw_response = result.get("raw")
             return result, None
         except OkxClientError as exc:
-            raw_payload = getattr(exc, "payload", None)
-            raw_response = raw_payload or getattr(exc, "args", [None])[0]
+            raw_response = getattr(exc, "payload", None) or getattr(exc, "args", [None])[0]
             detail = str(exc)
-            if raw_payload:
-                code = raw_payload.get("code")
-                msg = raw_payload.get("msg") or raw_payload.get("sMsg")
-                parts = [f"code={code}", f"msg={msg}"]
-                extra = _summarize_okx_error(raw_payload)
-                if extra:
-                    parts.append(f"details={extra}")
-                detail = f"{detail} ({'; '.join(parts)})"
-            raise OkxClientError(detail, payload=raw_payload)
+            if getattr(exc, "payload", None):
+                code = exc.payload.get("code")
+                msg = exc.payload.get("msg") or exc.payload.get("sMsg")
+                detail = f"{detail} (code={code}, msg={msg})"
+            raise OkxClientError(detail, payload=getattr(exc, "payload", None))
     except OkxClientError as exc:
         logger.error("[%s] Order placement failed: %s", account_id, exc)
         return None, f"{exc}"
@@ -1490,3 +1456,4 @@ def _record_equity_points(repository: AccountRepository) -> None:
             len(accounts),
             datetime.now(tz=timezone.utc).isoformat(),
         )
+
