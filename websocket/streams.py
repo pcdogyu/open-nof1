@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Iterable, List, Sequence, Set
 
 import websockets
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 try:  # websockets>=10
     from websockets.client import WebSocketClientProtocol
@@ -69,12 +70,24 @@ class BaseOkxStream:
         while not self._stop_event.is_set():
             try:
                 async with websockets.connect(
-                    OKX_PUBLIC_WS, ping_interval=20, ping_timeout=20, close_timeout=5
+                    OKX_PUBLIC_WS,
+                    ping_interval=30,
+                    ping_timeout=30,
+                    close_timeout=5,
+                    max_queue=8,
                 ) as ws:
                     await self._subscribe(ws)
                     await self._listen(ws)
             except asyncio.CancelledError:
                 break
+            except (ConnectionClosedError, ConnectionClosedOK) as exc:
+                logger.warning(
+                    "%s websocket closed (%s); reconnecting in %ss",
+                    self.__class__.__name__,
+                    exc,
+                    reconnect_delay,
+                )
+                await asyncio.sleep(reconnect_delay)
             except Exception as exc:
                 logger.warning("%s encountered an error: %s", self.__class__.__name__, exc)
                 await asyncio.sleep(reconnect_delay)

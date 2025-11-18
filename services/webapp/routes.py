@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import pprint
+import base64
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,6 +49,7 @@ except ImportError:  # pragma: no cover
         logger.debug("websocket instrumentation unavailable; skipping stream update.")
 
 CONFIG_PATH = Path("config.py")
+MARKET_DEPTH_ATTACHMENT_DIR = Path("data/attachments/market_depth")
 
 try:
     from config import (
@@ -751,7 +753,7 @@ def latest_liquidations_api(limit: int = 50, instrument: Optional[str] = None) -
     "/api/streams/orderbook/latest",
     summary="Fetch recent order book depth snapshots from InfluxDB",
 )
-def latest_orderbook_api(limit: int = 400, instrument: Optional[str] = None) -> dict:
+def latest_orderbook_api(limit: int = 50, instrument: Optional[str] = None) -> dict:
     limit = max(1, min(limit, 500))
     return get_orderbook_snapshot(levels=limit, instrument=instrument)
 
@@ -1138,67 +1140,123 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
     """Return latest order book snapshots for configured instruments."""
     instrument_filter = (instrument or "").strip().upper()
     fetch_limit = max(1, max(levels, len(TRADABLE_INSTRUMENTS)))
-    history_window_hours = 4
-    history_cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=history_window_hours)
-    max_history_points = history_window_hours * 1200
-    lookback_hours = max(history_window_hours + 1, 2)
-
-    def _normalize_timestamp(value: object) -> tuple[datetime | None, str]:
-        ts = value
-        if isinstance(value, str):
-            try:
-                ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                ts = None
-        if isinstance(ts, datetime):
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            return ts, ts.isoformat()
-        if isinstance(value, datetime) and value.tzinfo is not None:
-            return value, value.isoformat()
-        if value is None:
-            return None, ""
-        return None, str(value)
-
-    def _prune_history(entries: list[dict]) -> None:
-        entries[:] = [
-            entry
-            for entry in entries
-            if not isinstance(entry.get("_ts"), datetime) or entry["_ts"] >= history_cutoff
-        ]
-        if len(entries) > max_history_points:
-            del entries[: len(entries) - max_history_points]
-
-    records = _query_influx_measurement(
-        measurement="okx_orderbook_depth",
-        limit=fetch_limit * 2,
+    history_cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+    max_history_points = 1200
+    instrument_count = max(1, len(TRADABLE_INSTRUMENTS))
+    history_fetch_limit = max_history_points * instrument_count
+    micro_records = _query_influx_measurement(
+        measurement="market_microstructure",
+        limit=max(history_fetch_limit, 500),
         instrument=instrument_filter or None,
-        lookback=f"{lookback_hours}h",
+        lookback="1h",
     )
-    seen: set[str] = set()
-    history_map: dict[str, list[dict]] = {}
-    items_by_symbol: dict[str, dict] = {}
-    for row in records:
+    cvd_map: dict[str, float | None] = {}
+    cvd_history_map: dict[str, list[dict]] = {}
+    for row in micro_records:
         inst_id = (row.get("instrument_id") or "").upper()
         if not inst_id:
             continue
-        ts, ts_iso = _normalize_timestamp(row.get("_time"))
-        bids_raw = row.get("bids_json") or "[]"
-        asks_raw = row.get("asks_json") or "[]"
-        total_bid_qty = _coerce_float(row.get("total_bid_qty"))
-        total_ask_qty = _coerce_float(row.get("total_ask_qty"))
+        timestamp = row.get("_time")
+        ts = timestamp
+        if isinstance(timestamp, str):
+            try:
+                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                ts = None
+        if isinstance(ts, datetime) and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        cvd_value = _coerce_float(row.get("cvd"))
+        if inst_id not in cvd_map:
+            cvd_map[inst_id] = cvd_value
+        entry = {
+            "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
+            "cvd": cvd_value,
+        }
+        if isinstance(ts, datetime):
+            entry["_ts"] = ts
+        history_list = cvd_history_map.setdefault(inst_id, [])
+        history_list.append(entry)
+        if isinstance(ts, datetime):
+            history_list[:] = [
+                item
+                for item in history_list
+                if not isinstance(item.get("_ts"), datetime) or item["_ts"] >= history_cutoff
+            ]
+        if len(history_list) > max_history_points:
+            del history_list[: len(history_list) - max_history_points]
+    history_records = _query_influx_measurement(
+        measurement="okx_orderbook_depth",
+        limit=history_fetch_limit,
+        instrument=instrument_filter or None,
+        lookback="1h",
+    )
+    snapshot_records = _query_influx_measurement(
+        measurement="okx_orderbook_depth",
+        limit=fetch_limit * 2,
+        instrument=instrument_filter or None,
+        lookback="2h",
+    )
+    seen: set[str] = set()
+    items: list[dict] = []
+    history_map: dict[str, list[dict]] = {}
+
+    def _append_history_entry(row: dict) -> None:
+        inst_id = (row.get("instrument_id") or "").upper()
+        if not inst_id:
+            return
+        timestamp = row.get("_time")
+        ts = timestamp
+        if isinstance(timestamp, str):
+            try:
+                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                ts = None
+        if isinstance(ts, datetime) and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
         net_depth = _coerce_float(row.get("net_depth"))
-        if total_bid_qty is not None and total_ask_qty is not None:
-            net_depth = net_depth if net_depth is not None else total_bid_qty - total_ask_qty
+        if net_depth is None:
+            total_bid_qty = _coerce_float(row.get("total_bid_qty"))
+            total_ask_qty = _coerce_float(row.get("total_ask_qty"))
+            if total_bid_qty is not None and total_ask_qty is not None:
+                net_depth = total_bid_qty - total_ask_qty
         hist_entry = {
-            "timestamp": ts_iso,
+            "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
             "net_depth": net_depth,
         }
         if isinstance(ts, datetime):
             hist_entry["_ts"] = ts
         history_list = history_map.setdefault(inst_id, [])
-        history_list.insert(0, hist_entry)
-        _prune_history(history_list)
+        history_list.append(hist_entry)
+        if isinstance(ts, datetime):
+            history_list[:] = [
+                entry
+                for entry in history_list
+                if not isinstance(entry.get("_ts"), datetime) or entry["_ts"] >= history_cutoff
+            ]
+        if len(history_list) > max_history_points:
+            del history_list[: len(history_list) - max_history_points]
+
+    for row in history_records:
+        _append_history_entry(row)
+
+    for row in snapshot_records:
+        inst_id = (row.get("instrument_id") or "").upper()
+        if not inst_id:
+            continue
+        timestamp = row.get("_time")
+        ts = timestamp
+        if isinstance(timestamp, str):
+            try:
+                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                ts = None
+        if isinstance(ts, datetime) and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        bids_raw = row.get("bids_json") or "[]"
+        asks_raw = row.get("asks_json") or "[]"
+        total_bid_qty = _coerce_float(row.get("total_bid_qty"))
+        total_ask_qty = _coerce_float(row.get("total_ask_qty"))
+        _append_history_entry(row)
         if instrument_filter and inst_id != instrument_filter:
             continue
         if inst_id in seen:
@@ -1215,89 +1273,76 @@ def get_orderbook_snapshot(levels: int = 10, instrument: Optional[str] = None) -
         raw_history = history_map.get(inst_id, [])
         history = [
             {"timestamp": entry["timestamp"], "net_depth": entry["net_depth"]}
-            for entry in raw_history
+            for entry in reversed(raw_history)
         ]
-        items_by_symbol[inst_id] = {
-            "instrument_id": inst_id,
-            "timestamp": ts_iso,
-            "best_bid": _coerce_float(row.get("best_bid")),
-            "best_ask": _coerce_float(row.get("best_ask")),
-            "spread": _coerce_float(row.get("spread")),
-            "total_bid_qty": _coerce_float(row.get("total_bid_qty")),
-            "total_ask_qty": _coerce_float(row.get("total_ask_qty")),
-            "bids": bids[: max(1, levels)],
-            "asks": asks[: max(1, levels)],
-            "history": history,
-        }
-
-    missing_instruments: list[str] = []
-    if instrument_filter:
-        if instrument_filter not in items_by_symbol:
-            missing_instruments = [instrument_filter]
-    else:
-        desired = TRADABLE_INSTRUMENTS[: fetch_limit * 2]
-        missing_instruments = [inst for inst in desired if inst not in items_by_symbol]
-
-    for inst_id in missing_instruments:
-        live_items = _fetch_live_orderbooks(levels=levels, instrument_filter=inst_id)
-        for live in live_items:
-            symbol = (live.get("instrument_id") or inst_id or "").upper()
-            if not symbol:
-                continue
-            ts, ts_iso = _normalize_timestamp(live.get("timestamp"))
-            total_bid_qty = _coerce_float(live.get("total_bid_qty"))
-            total_ask_qty = _coerce_float(live.get("total_ask_qty"))
-            net_depth = _coerce_float(live.get("net_depth"))
-            if net_depth is None and total_bid_qty is not None and total_ask_qty is not None:
-                net_depth = total_bid_qty - total_ask_qty
-            history_list = history_map.setdefault(symbol, [])
-            hist_entry = {"timestamp": ts_iso, "net_depth": net_depth}
-            if isinstance(ts, datetime):
-                hist_entry["_ts"] = ts
-            history_list.append(hist_entry)
-            _prune_history(history_list)
-            history = [
-                {"timestamp": entry["timestamp"], "net_depth": entry["net_depth"]}
-                for entry in history_list
-            ]
-            items_by_symbol[symbol] = {
-                "instrument_id": symbol,
-                "timestamp": ts_iso,
-                "best_bid": _coerce_float(live.get("best_bid")),
-                "best_ask": _coerce_float(live.get("best_ask")),
-                "spread": _coerce_float(live.get("spread")),
-                "total_bid_qty": total_bid_qty,
-                "total_ask_qty": total_ask_qty,
-                "bids": live.get("bids", [])[: max(1, levels)],
-                "asks": live.get("asks", [])[: max(1, levels)],
+        cvd_history_raw = cvd_history_map.get(inst_id, [])
+        cvd_history = [
+            {"timestamp": entry["timestamp"], "cvd": entry.get("cvd")}
+            for entry in reversed(cvd_history_raw)
+        ]
+        cvd_value = cvd_map.get(inst_id)
+        items.append(
+            {
+                "instrument_id": inst_id,
+                "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
+                "best_bid": _coerce_float(row.get("best_bid")),
+                "best_ask": _coerce_float(row.get("best_ask")),
+                "spread": _coerce_float(row.get("spread")),
+                "total_bid_qty": _coerce_float(row.get("total_bid_qty")),
+                "total_ask_qty": _coerce_float(row.get("total_ask_qty")),
+                "bids": bids[: max(1, levels)],
+                "asks": asks[: max(1, levels)],
                 "history": history,
+                "cvd": cvd_value,
+                "cvd_history": cvd_history,
             }
-
-    items = sorted(items_by_symbol.values(), key=lambda entry: entry["instrument_id"])
+        )
     if not items:
         items = _fetch_live_orderbooks(levels=levels, instrument_filter=instrument_filter)
-        for item in items:
-            symbol = (item.get("instrument_id") or "").upper()
-            if not symbol:
-                continue
-            ts, ts_iso = _normalize_timestamp(item.get("timestamp"))
-            total_bid_qty = _coerce_float(item.get("total_bid_qty"))
-            total_ask_qty = _coerce_float(item.get("total_ask_qty"))
-            net_depth = None
-            if total_bid_qty is not None and total_ask_qty is not None:
-                net_depth = total_bid_qty - total_ask_qty
-            history = []
-            if net_depth is not None:
-                history = [{"timestamp": ts_iso, "net_depth": net_depth}]
-            item["timestamp"] = ts_iso
-            item["history"] = history
-
+    items.sort(key=lambda entry: entry["instrument_id"])
     return {
         "instrument": instrument_filter,
         "levels": max(1, levels),
         "items": items,
         "updated_at": datetime.now(tz=timezone.utc).isoformat(),
     }
+
+
+def get_market_depth_attachments(limit: int = 6) -> list[dict]:
+    """Return recent market depth screenshot attachments as data URLs."""
+    directory = MARKET_DEPTH_ATTACHMENT_DIR
+    if not directory.exists():
+        return []
+    allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    entries: list[dict] = []
+    try:
+        files = sorted(
+            [path for path in directory.iterdir() if path.is_file()],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return []
+    for path in files:
+        if path.suffix.lower() not in allowed:
+            continue
+        try:
+            data = path.read_bytes()
+            stat = path.stat()
+        except OSError:
+            continue
+        mime = _guess_mime_from_suffix(path.suffix.lower())
+        encoded = base64.b64encode(data).decode("ascii")
+        entries.append(
+            {
+                "filename": path.name,
+                "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                "data_url": f"data:{mime};base64,{encoded}",
+            }
+        )
+        if len(entries) >= max(1, limit):
+            break
+    return entries
 
 
 def _persist_live_snapshot(
@@ -1834,3 +1879,14 @@ def _replace_config_assignment(var_name: str, value: object) -> None:
     replacement_lines = formatted.splitlines()
     lines[start:end] = replacement_lines
     CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _guess_mime_from_suffix(suffix: str) -> str:
+    lookup = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }
+    return lookup.get(suffix.lower(), "image/png")
