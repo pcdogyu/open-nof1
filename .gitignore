@@ -1,1 +1,9 @@
 config.py
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.whl
+*.egg-info/
+*.egg
