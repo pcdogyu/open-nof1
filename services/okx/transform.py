@@ -136,8 +136,20 @@ def normalize_trades(
         if not trade_id:
             continue
         executed_at = _parse_timestamp(fill.get("fillTime") or fill.get("ts"))
-        quantity = abs(float(fill.get("sz", 0.0)))
-        price = float(fill.get("fillPx", 0.0))
+        raw_size = fill.get("sz")
+        if raw_size in (None, ""):
+            raw_size = fill.get("fillSz")
+        try:
+            quantity = abs(float(raw_size or 0.0))
+        except (TypeError, ValueError):
+            quantity = 0.0
+        raw_price = fill.get("fillPx")
+        if raw_price in (None, ""):
+            raw_price = fill.get("px")
+        try:
+            price = float(raw_price or 0.0)
+        except (TypeError, ValueError):
+            price = 0.0
         # Skip invalid fills that would violate pydantic constraints.
         if quantity <= 0 or price <= 0:
             continue
@@ -151,7 +163,7 @@ def normalize_trades(
                 quantity=quantity,
                 price=price,
                 fee=_optional_float(fill.get("fee")),
-                realized_pnl=_optional_float(fill.get("pnl")),
+                realized_pnl=_optional_float(fill.get("pnl") or fill.get("fillPnl")),
                 executed_at=executed_at,
             )
         )

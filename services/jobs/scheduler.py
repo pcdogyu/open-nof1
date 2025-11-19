@@ -1029,7 +1029,7 @@ def _collect_okx_snapshot(
             base_currency=meta.get("base_currency", "USDT"),
         )
         positions = normalize_positions(account_id, client.fetch_positions())
-        fills = client.fetch_fills(limit=100)
+        fills = client.fetch_fills(inst_type="SWAP", limit=100)
         trades = normalize_trades(
             account_id=account_id,
             model_id=model_id,
@@ -1199,6 +1199,16 @@ def _build_liquidation_override(request: SignalRequest) -> Optional[SignalRespon
 
     if not decision or qty is None:
         return None
+
+    # If持仓方向与信号相反，补上平仓量，避免重复信号只是在原方向加仓。
+    try:
+        current_pos = float(request.risk.current_position or 0.0)
+    except Exception:
+        current_pos = 0.0
+    if decision == "buy" and current_pos < 0:
+        qty += abs(current_pos)
+    elif decision == "sell" and current_pos > 0:
+        qty += abs(current_pos)
 
     return SignalResponse(
         model_id=request.model_id,

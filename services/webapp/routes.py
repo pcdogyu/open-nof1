@@ -810,7 +810,7 @@ def get_okx_summary(
         )
     for account in accounts:
         positions = repo.list_positions(account.account_id)
-        trades = repo.list_trades(account.account_id, limit=20)
+        trades = repo.list_trades(account.account_id, limit=50)
         curve = repo.get_equity_curve(account.account_id, limit=50)
         balances = repo.list_balances(account.account_id)
         orders = repo.list_orders(account.account_id, limit=50)

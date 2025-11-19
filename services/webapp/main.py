@@ -1,4 +1,4 @@
-# Trigger reloader
+﻿# Trigger reloader
 """
 Entrypoint for the open-nof1.ai user-facing web service.
 """
@@ -392,7 +392,7 @@ def _render_dashboard(metrics: dict) -> str:
             "</tr>"
         )
     if not trade_rows:
-        trade_rows.append("<tr><td colspan='9'>暂无成交记录</td></tr>")
+        rows.append("<tr><td colspan='9'>暂无成交记录</td></tr>")
     signal_rows: list[str] = []
     for signal in metrics.get("recent_ai_signals", []):
         action_zh = signal.get("action_zh") or "未知"
@@ -953,9 +953,11 @@ def _render_balances_table(balances: Sequence[dict] | None) -> str:
     )
 
 
+
+
 def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str | None = None) -> str:
     esc = _escape
-    rows = []
+    rows: list[str] = []
     for pos in positions or []:
         account_value = esc(account_id or pos.get("account_id") or "")
         instrument_value = esc(pos.get("instrument_id"))
@@ -977,14 +979,17 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             margin = (qty * mark_px) / leverage
         pnl_pct = None
         if entry_px > 0 and mark_px > 0:
-            pnl_pct = ((mark_px - entry_px) / entry_px) * 100
+            delta = (mark_px - entry_px)
+            if raw_side.lower() in {"short", "sell"}:
+                delta = -delta
+            pnl_pct = (delta / entry_px) * 100
         action_html = (
             "<form method='post' action='/okx/close-position' class='inline-form'>"
             f"<input type='hidden' name='account_id' value='{account_value}'>"
             f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
             f"<input type='hidden' name='position_side' value='{side_value}'>"
             f"<input type='hidden' name='quantity' value='{quantity_value}'>"
-            f"<button type='submit' class='btn-close' onclick=\"return confirm('确认平掉 {instrument_value} 持仓？');\">平仓</button>"
+            "<button type='submit' class='btn-close' onclick=\"return confirm('确认平仓该仓位？');\">平仓</button>"
             "</form>"
         )
         rows.append(
@@ -999,47 +1004,56 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             f"<td>{_format_number(margin)}</td>"
             f"<td>{_format_number(pos.get('unrealized_pnl'))}</td>"
             f"<td>{(_format_number(pnl_pct) + '%') if pnl_pct is not None else ''}</td>"
-            f"<td>{esc(_format_asia_shanghai(pos.get('updated_at')))}</td>"
+            f"<td>{esc(_format_asia_shanghai(pos.get('created_at') or pos.get('updated_at')))}</td>"
             f"<td>{action_html}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='12'>暂无持仓</td></tr>")
+        rows.append("<tr><td colspan='12'>当前无持仓</td></tr>")
 
     return (
         "<table class='dense'>"
-        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>更新时间</th><th>操作</th></tr></thead>"
+        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th>操作</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
-
-
 def _render_trades_table(trades: Sequence[dict] | None) -> str:
     esc = _escape
+    valid_symbols = {"ETH-USDT-SWAP", "BTC-USDT-SWAP"}
     rows = []
     for trade in trades or []:
+        instrument = (trade.get("instrument_id") or "").upper()
+        if instrument not in valid_symbols:
+            continue
+        entry_price = trade.get("price")
+        exit_price = trade.get("exit_price") or trade.get("price")
+        fee = trade.get("fee") or trade.get("feeCcy") or trade.get("feeUsd")
         rows.append(
             "<tr>"
             f"<td>{esc(_format_asia_shanghai(trade.get('executed_at')))}</td>"
             f"<td>{esc(trade.get('model_id'))}</td>"
             f"<td>{esc(trade.get('account_id') or trade.get('portfolio_id'))}</td>"
-            f"<td>{esc(trade.get('instrument_id'))}</td>"
+            f"<td>{esc(instrument)}</td>"
             f"<td>{esc(trade.get('side'))}</td>"
             f"<td>{_format_number(trade.get('quantity'))}</td>"
-            f"<td>{_format_number(trade.get('price'))}</td>"
+            f"<td>{_format_number(entry_price)}</td>"
+            f"<td>{_format_number(exit_price)}</td>"
+            f"<td>{_format_number(fee)}</td>"
             f"<td>{_format_number(trade.get('realized_pnl'))}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='9'>暂无成交记录</td></tr>")
+        rows.append("<tr><td colspan='10'>暂无成交记录</td></tr>")
 
     return (
         "<table class='dense'>"
-        "<thead><tr><th>成交时间</th><th>模型</th><th>投资组合</th><th>合约</th><th>方向</th><th>数量</th><th>入场价</th><th>离场价</th><th>盈亏(USD)</th></tr></thead>"
+        "<thead>"
+        "<tr><th>成交时间</th><th>模型</th><th>投资组合</th><th>合约</th>"
+        "<th>方向</th><th>数量</th><th>入场价</th><th>离场价</th><th>手续费</th><th>盈亏(USD)</th></tr>"
+        "</thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
-
 
 
 def _render_orders_table(orders: Sequence[dict] | None, *, account_id: str | None = None) -> str:
@@ -2993,12 +3007,6 @@ ORDERBOOK_TEMPLATE = r"""
 </body>
 </html>
 """
-
-
-
-
-
-
 
 
 

@@ -32,7 +32,7 @@ def fetch_account_snapshot(account_meta: dict, *, limit: int = 50) -> dict:
         balances_raw = client.fetch_balances()
         positions_raw = client.fetch_positions()
         orders_raw = client.fetch_open_orders(limit=limit)
-        fills_raw = client.fetch_fills(limit=limit)
+        fills_raw = client.fetch_fills(inst_type="SWAP", limit=limit)
     except OkxClientError as exc:
         raise RuntimeError(f"Failed to fetch OKX data for {account_id}: {exc}") from exc
     finally:

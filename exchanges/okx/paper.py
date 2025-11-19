@@ -80,19 +80,33 @@ class OkxPaperClient(ExchangeClient):
         response = self._request("GET", "/api/v5/account/positions", params=params)
         return response.get("data", [])
 
-    def fetch_fills(self, *, after: str | None = None, limit: int = 100) -> list[dict]:
+    def fetch_fills(
+        self,
+        *,
+        inst_type: str | None = "SWAP",
+        after: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
         """
         Fetch recent fills (executed trades) for the authenticated account.
 
         Parameters mirror OKX REST fields:
         - after: pagination cursor (bill ID) to fetch fills newer than the cursor.
         - limit: maximum number of fills to return (default 100).
+        - inst_type: optional instrument type filter, defaults to SWAP to match most paper use cases.
         """
         params = {"limit": str(limit)}
+        if inst_type:
+            params["instType"] = inst_type
         if after:
             params["after"] = after
         response = self._request("GET", "/api/v5/trade/fills", params=params)
-        return response.get("data", [])
+        data = response.get("data", []) or []
+        # If no live fills were returned, try fills-history as a fallback.
+        if not data:
+            history = self._request("GET", "/api/v5/trade/fills-history", params=params)
+            data = history.get("data", []) or []
+        return data
 
     def fetch_open_orders(self, *, inst_type: str | None = None, after: str | None = None, limit: int = 100) -> list[dict]:
         """
