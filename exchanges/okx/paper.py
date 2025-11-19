@@ -125,6 +125,11 @@ class OkxPaperClient(ExchangeClient):
         response = self._request("GET", "/api/v5/trade/orders-pending", params=params)
         return response.get("data", [])
 
+    def fetch_ticker(self, instrument_id: str) -> dict:
+        """Return the latest market ticker for a given instrument."""
+        response = self._request("GET", "/api/v5/market/ticker", params={"instId": instrument_id})
+        return _single_item(response)
+
     def place_order(self, payload: dict) -> dict:
         order = self._normalize_order_payload(payload)
         body = {

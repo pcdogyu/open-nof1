@@ -885,10 +885,18 @@ async def _process_account_signal(
         if notional <= 0:
             debug_entry["notes"] = "缺少价格无法计算最小名义金额"
             _record_order_debug_entry(debug_entry)
+            if signal_summary:
+                signal_summary = f"{signal_summary} | {debug_entry['notes']}"
+            else:
+                signal_summary = debug_entry["notes"]
             return False, signal_summary
         if notional < min_notional:
             debug_entry["notes"] = f"名义金额 {notional:.2f} 小于最小下单金额 {min_notional:.2f}"
             _record_order_debug_entry(debug_entry)
+            if signal_summary:
+                signal_summary = f"{signal_summary} | {debug_entry['notes']}"
+            else:
+                signal_summary = debug_entry["notes"]
             return False, signal_summary
 
     try:
@@ -1008,6 +1016,7 @@ def _collect_okx_snapshot(
 ) -> Optional[Tuple[Account, List[Balance], List[Position], List[Trade], List[OrderModel], float]]:
     account_id = meta.get("account_id") or f"okx_{account_key}"
     model_id = meta.get("model_id", account_key)
+    market_price: float = 0.0
     credentials = ExchangeCredentials(
         api_key=meta["api_key"],
         api_secret=meta["api_secret"],
@@ -1040,6 +1049,26 @@ def _collect_okx_snapshot(
             model_id=model_id,
             raw_orders=client.fetch_open_orders(limit=100),
         )
+        price_hint_instrument = (
+            meta.get("default_instrument")
+            or meta.get("instrument_id")
+            or _infer_instrument_from_positions(positions)
+            or (TRADABLE_INSTRUMENTS[0] if TRADABLE_INSTRUMENTS else None)
+        )
+        market_price = _infer_market_price(positions, trades, meta)
+        if price_hint_instrument and (not market_price or market_price <= 0):
+            try:
+                ticker = client.fetch_ticker(price_hint_instrument)
+                ticker_price = _try_float(
+                    ticker.get("last")
+                    or ticker.get("lastPx")
+                    or ticker.get("last_price")
+                    or ticker.get("px")
+                )
+                if ticker_price and ticker_price > 0:
+                    market_price = ticker_price
+            except Exception as exc:
+                logger.debug("Failed to fetch price hint for %s: %s", price_hint_instrument, exc)
     finally:
         client.close()
 
@@ -1054,8 +1083,6 @@ def _collect_okx_snapshot(
         pnl=equity - starting_equity,
         updated_at=datetime.now(tz=timezone.utc),
     )
-
-    market_price = _infer_market_price(positions, trades, meta)
 
     return account, balance_models, positions, trades, open_orders, market_price
 
@@ -1565,7 +1592,7 @@ def _infer_market_price(
             return float(meta["price_hint"])
         except (TypeError, ValueError):
             pass
-    return 100.0
+    return 0.0
 
 
 def _infer_instrument_from_positions(positions: Sequence[Position]) -> Optional[str]:
