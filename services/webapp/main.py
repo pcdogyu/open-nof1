@@ -108,7 +108,7 @@ def okx_manual_order(
             price=price,
             margin_mode=(margin_mode or "").strip() or None,
         )
-        detail = result.get("order_id") or ""
+        detail = result.get("message") or result.get("order_id") or ""
         return RedirectResponse(
             url=f"/okx?refresh=1&order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -552,10 +552,10 @@ def _render_okx_dashboard(summary: dict, order_status: str | None = None, order_
     flash_block = ""
     if order_status:
         kind = "success" if order_status == "success" else "error"
+        message_text = esc(order_detail) if order_detail else ("操作成功" if kind == "success" else "操作失败")
         flash_block = (
             f"<div class='flash {kind}'>"
-            f"{'下单成功' if kind == 'success' else '下单失败'}"
-            f"{'：' + esc(order_detail) if order_detail else ''}"
+            f"{message_text}"
             "</div>"
         )
 
@@ -600,7 +600,7 @@ def _render_okx_dashboard(summary: dict, order_status: str | None = None, order_
                     </table>
                 </header>
                 <div class="panel">
-                    <h3>持仓明细 <form method='post' action='/okx/close-all-positions' class='inline-form' style='margin-left: 10px;'><input type='hidden' name='account_id' value='{account_id}'><button type='submit' class='btn-close' onclick="return confirm('确认平仓该账户的所有仓位？');">一键平仓全部</button></form></h3>
+                    <h3>持仓明细</h3>
                     {positions_html}
                 </div>
                 <div class=\"panel\">
@@ -1025,6 +1025,11 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             if raw_side.lower() in {"short", "sell"}:
                 delta = -delta
             pnl_pct = (delta / entry_px) * 100
+        pnl_pct_cell = ""
+        if pnl_pct is not None:
+            pct_value = _format_number(pnl_pct)
+            pct_class = "pnl-positive" if pnl_pct >= 0 else "pnl-negative"
+            pnl_pct_cell = f"<span class='{pct_class}'>{pct_value}%</span>"
         action_html = (
             "<form method='post' action='/okx/close-position' class='inline-form'>"
             f"<input type='hidden' name='account_id' value='{account_value}'>"
@@ -1046,7 +1051,7 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             f"<td>{_format_number(pos.get('last_price') or pos.get('last') or pos.get('mark_price'))}</td>"
             f"<td>{_format_number(margin)}</td>"
             f"<td>{_format_number(pos.get('unrealized_pnl'))}</td>"
-            f"<td>{(_format_number(pnl_pct) + '%') if pnl_pct is not None else ''}</td>"
+            f"<td>{pnl_pct_cell}</td>"
             f"<td>{esc(_format_asia_shanghai(pos.get('created_at') or pos.get('updated_at')))}</td>"
             f"<td>{action_html}</td>"
             "</tr>"
@@ -1054,9 +1059,29 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
     if not rows:
         rows.append("<tr><td colspan='13'>当前无持仓</td></tr>")
 
+    close_all_header = "<th>操作</th>"
+    if account_id:
+        close_all_form = (
+            "<div style='display:flex; flex-direction:column; align-items:center; gap:6px;'>"
+            "<form method='post' action='/okx/close-all-positions' class='inline-form' "
+            "onsubmit=\"return confirm('确认平仓该账户的所有仓位？');\">"
+            f"<input type='hidden' name='account_id' value='{account_id}'>"
+            "<button type='submit' class='btn-close'>一键平仓全部</button>"
+            "</form>"
+            "<span style='font-size:14px;'>操作</span>"
+            "</div>"
+        )
+        close_all_header = (
+            "<th style='text-align:center;'>"
+            f"{close_all_form}"
+            "</th>"
+        )
+
     return (
         "<table class='dense'>"
-        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>最新价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th>操作</th></tr></thead>"
+        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>最新价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th>"
+        f"{close_all_header}"
+        "</tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )

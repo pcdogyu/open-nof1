@@ -1034,14 +1034,51 @@ def close_okx_position(
         passphrase=meta.get("passphrase"),
     )
     client = OkxPaperClient()
+    symbol = instrument_id.upper()
     try:
         client.authenticate(credentials)
-        margin_mode_value = _choose_margin_mode(instrument_id, meta, margin_mode)
+        margin_mode_value = _choose_margin_mode(symbol, meta, margin_mode)
+        pos_side_payload: str | None = pos_side
+        detected_side: str | None = None
+        detected_margin_mode: str | None = None
+        try:
+            live_positions = client.fetch_positions(symbols=[symbol])
+        except Exception:
+            live_positions = []
+        for entry in live_positions or []:
+            inst_id = (entry.get("instId") or "").upper()
+            if inst_id != symbol:
+                continue
+            try:
+                pos_qty = float(entry.get("pos", 0))
+            except (TypeError, ValueError):
+                pos_qty = 0.0
+            if pos_qty == 0:
+                continue
+            entry_side = (entry.get("posSide") or entry.get("side") or "").strip()
+            if not entry_side:
+                entry_side = "long" if pos_qty > 0 else "short"
+            detected_side = entry_side
+            raw_mode = (entry.get("mgnMode") or entry.get("marginMode") or "").strip()
+            if raw_mode:
+                detected_margin_mode = raw_mode.lower()
+            break
+        if detected_margin_mode:
+            margin_mode_value = detected_margin_mode
+        if detected_side:
+            if detected_side.lower() == "net":
+                pos_side_payload = None
+            else:
+                pos_side_payload = detected_side
         response = client.close_position(
-            instrument_id=instrument_id.upper(),
+            instrument_id=symbol,
             margin_mode=margin_mode_value,
-            pos_side=pos_side,
+            pos_side=pos_side_payload,
         )
+        try:
+            get_okx_summary(force_refresh=True, ttl_seconds=0)
+        except Exception as refresh_exc:  # pragma: no cover - cache refresh best-effort
+            logger.debug("Post-close summary refresh failed: %s", refresh_exc)
     except OkxClientError as exc:
         payload = getattr(exc, "payload", None) or {}
         code = payload.get("code")
@@ -1058,6 +1095,7 @@ def close_okx_position(
         "order_id": response.get("order_id"),
         "client_order_id": response.get("client_order_id"),
         "closed_side": close_side,
+        "message": f"平仓 {symbol} 成功",
         "raw": response.get("raw"),
     }
 
