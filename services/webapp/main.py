@@ -1031,7 +1031,7 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
             f"<input type='hidden' name='position_side' value='{side_value}'>"
             f"<input type='hidden' name='quantity' value='{quantity_value}'>"
-            "<button type='submit' class='btn-close' onclick=\"return confirm('确认平仓该仓位？');\">平仓</button>"
+            "<button type='submit' class='btn-close'>平仓</button>"
             "</form>"
         )
         rows.append(
@@ -3083,7 +3083,7 @@ ORDERBOOK_TEMPLATE = r"""
         }});
         window.addEventListener('resize', repaintCharts);
         refresh();
-        setInterval(refresh, 3000);
+        setInterval(refresh, 2000);
       }})();
     </script>
 </body>

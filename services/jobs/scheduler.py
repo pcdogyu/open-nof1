@@ -878,6 +878,7 @@ async def _process_account_signal(
         debug_entry["order_action"] = action_tag
         if isinstance(routed.intent.metadata, dict):
             routed.intent.metadata["order_action"] = action_tag
+    _assign_okx_position_side(routed.intent, positions)
 
     size_note = _align_size_to_lot(routed.intent)
     if size_note:
@@ -1549,9 +1550,15 @@ def _place_order(meta: Dict[str, str], intent: OrderIntent) -> tuple[Optional[Di
         }
         if intent.price:
             payload["price"] = intent.price
-        client_order_id = intent.metadata.get("client_order_id") if isinstance(intent.metadata, dict) else None
+        meta_payload = intent.metadata if isinstance(intent.metadata, dict) else {}
+        client_order_id = meta_payload.get("client_order_id")
         if client_order_id:
             payload["client_order_id"] = client_order_id
+        pos_side = meta_payload.get("pos_side")
+        if pos_side:
+            payload["pos_side"] = pos_side
+        if meta_payload.get("reduce_only"):
+            payload["reduce_only"] = True
         raw_response = None
         try:
             result = client.place_order(payload)
@@ -1840,16 +1847,10 @@ def _count_active_orders(open_orders: Sequence[object], instrument_id: str, side
     return count
 
 
-def _classify_order_action(intent: OrderIntent, positions: Sequence[Position]) -> Optional[str]:
-    """
-    Derive a human-friendly action tag for the order:
-    建仓/加仓/减仓/平仓/对冲单.
-    """
-    if intent is None or not intent.instrument_id:
-        return None
+def _compute_net_position(instrument_id: str, positions: Sequence[Position]) -> float:
     net_qty = 0.0
     for pos in positions or []:
-        if _get_attr(pos, "instrument_id") != intent.instrument_id:
+        if _get_attr(pos, "instrument_id") != instrument_id:
             continue
         qty = _get_attr(pos, "quantity") or 0.0
         try:
@@ -1858,6 +1859,35 @@ def _classify_order_action(intent: OrderIntent, positions: Sequence[Position]) -
             qty = 0.0
         side = (_get_attr(pos, "side") or "").lower()
         net_qty += qty if side in {"long", "buy"} else -qty
+    return net_qty
+
+
+def _assign_okx_position_side(intent: OrderIntent, positions: Sequence[Position]) -> None:
+    """Populate OKX metadata so hedge mode is disabled."""
+    if intent is None or not intent.instrument_id:
+        return
+    net_qty = _compute_net_position(intent.instrument_id, positions)
+    side = (intent.side or "buy").lower()
+    if abs(net_qty) < 1e-9:
+        pos_side = "long" if side == "buy" else "short"
+    else:
+        pos_side = "long" if net_qty > 0 else "short"
+    reduce_only = (pos_side == "long" and side == "sell") or (pos_side == "short" and side == "buy")
+    metadata = intent.metadata if isinstance(intent.metadata, dict) else {}
+    metadata["pos_side"] = pos_side
+    if reduce_only:
+        metadata["reduce_only"] = True
+    intent.metadata = metadata
+
+
+def _classify_order_action(intent: OrderIntent, positions: Sequence[Position]) -> Optional[str]:
+    """
+    Derive a human-friendly action tag for the order:
+    建仓/加仓/减仓/平仓/对冲单.
+    """
+    if intent is None or not intent.instrument_id:
+        return None
+    net_qty = _compute_net_position(intent.instrument_id, positions)
 
     incoming = float(intent.size or 0.0)
     incoming = incoming if intent.side.lower() == "buy" else -incoming

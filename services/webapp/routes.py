@@ -1009,22 +1009,24 @@ def close_okx_position(
     account_key, meta = _resolve_okx_account_meta(account_id)
     for field in ("api_key", "api_secret"):
         if not meta.get(field):
-            raise HTTPException(status_code=400, detail=f"账户 {account_key} 缺少 {field}")
+            raise HTTPException(status_code=400, detail=f"?? {account_key} ?? {field}")
 
     try:
         normalized_qty = float(quantity)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="仓位需要为有效正数")
+        raise HTTPException(status_code=400, detail="??????????")
     if normalized_qty <= 0:
-        raise HTTPException(status_code=400, detail="仓位数量应大于 0")
+        raise HTTPException(status_code=400, detail="?????? 0")
 
     side_lower = (position_side or "").lower()
     if side_lower in {"long", "buy"}:
         close_side = "sell"
+        pos_side = "long"
     elif side_lower in {"short", "sell"}:
         close_side = "buy"
+        pos_side = "short"
     else:
-        raise HTTPException(status_code=400, detail=f"未知的持仓方向：{position_side}")
+        raise HTTPException(status_code=400, detail=f"??????? {position_side}")
 
     payload = {
         "instrument_id": instrument_id.upper(),
@@ -1032,6 +1034,8 @@ def close_okx_position(
         "order_type": "market",
         "size": str(normalized_qty),
         "margin_mode": _choose_margin_mode(instrument_id, meta, margin_mode),
+        "pos_side": pos_side,
+        "reduce_only": True,
     }
     credentials = ExchangeCredentials(
         api_key=meta["api_key"],
@@ -1063,6 +1067,9 @@ def close_okx_position(
 
 
 
+
+
+
 @router.post("/okx/close-all-positions", include_in_schema=False)
 def okx_close_all_positions(
     account_id: str = Form(...),
@@ -1079,6 +1086,8 @@ def okx_close_all_positions(
                         quantity=position.get("quantity"),
                         margin_mode=position.get("margin_mode"),
                     )
+        # Refresh once more so repository + cache pick up the flattened positions.
+        get_okx_summary(force_refresh=True, ttl_seconds=0)
         return RedirectResponse(
             url=f"/okx?refresh=1&order_status=success&detail=All positions closed",
             status_code=status.HTTP_303_SEE_OTHER,
