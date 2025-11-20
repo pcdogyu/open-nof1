@@ -245,6 +245,7 @@ def submit_risk_settings(
     max_loss_absolute: float = Form(...),
     cooldown_seconds: int = Form(...),
     min_notional_usd: float = Form(0),
+    max_order_notional_usd: float = Form(0),
     take_profit_pct: float = Form(0),
     stop_loss_pct: float = Form(0),
     default_leverage: int = Form(1),
@@ -257,6 +258,7 @@ def submit_risk_settings(
         max_loss_absolute=max_loss_absolute,
         cooldown_seconds=cooldown_seconds,
         min_notional_usd=min_notional_usd,
+        max_order_notional_usd=max_order_notional_usd,
         take_profit_pct=take_profit_pct,
         stop_loss_pct=stop_loss_pct,
         default_leverage=default_leverage,
@@ -375,9 +377,11 @@ def _render_dashboard(metrics: dict) -> str:
         pnl_class = "pnl-positive" if (pnl or 0) >= 0 else "pnl-negative"
         quantity = trade.get("quantity", trade.get("size"))
         price = trade.get("price", trade.get("entry_price"))
-        exit_price = trade.get("exit_price")
-        if exit_price is None:
-            exit_price = price
+        exit_price = (
+            trade.get("close_price")
+            or trade.get("exit_price")
+            or price
+        )
         trade_rows.append(
             "<tr>"
             f"<td>{esc(_format_asia_shanghai(trade.get('executed_at')))}</td>"
@@ -393,25 +397,59 @@ def _render_dashboard(metrics: dict) -> str:
         )
     if not trade_rows:
         rows.append("<tr><td colspan='9'>暂无成交记录</td></tr>")
+    enabled_instruments = metrics.get("enabled_instruments") or []
+    recent_signals = metrics.get("recent_ai_signals", [])
+    latest_by_instrument: dict[str, dict] = {}
+    instrument_filter_set = {inst for inst in enabled_instruments if inst}
+    filter_enabled = bool(instrument_filter_set)
+    for signal in recent_signals:
+        instrument_id = signal.get("instrument_id")
+        if not instrument_id:
+            continue
+        if filter_enabled and instrument_id not in instrument_filter_set:
+            continue
+        if instrument_id in latest_by_instrument:
+            continue
+        latest_by_instrument[instrument_id] = signal
+
+    instruments_to_show = list(enabled_instruments)
+    if not instruments_to_show and not filter_enabled and latest_by_instrument:
+        instruments_to_show = list(latest_by_instrument.keys())
+
     signal_rows: list[str] = []
-    for signal in metrics.get("recent_ai_signals", []):
-        action_zh = signal.get("action_zh") or "未知"
-        action_en = signal.get("action_en") or "Unknown"
-        reason = signal.get("reason_zh") or signal.get("reason_en") or ""
-        hold_action = _is_hold_action(action_zh, action_en)
+    for instrument in instruments_to_show:
+        signal = latest_by_instrument.get(instrument)
+        if signal:
+            timestamp = _format_asia_shanghai(signal.get("timestamp") or signal.get("generated_at"))
+            model_id = signal.get("model_id")
+            action_zh = signal.get("action_zh") or "未知"
+            action_en = signal.get("action_en") or "Unknown"
+            reason = signal.get("reason_zh") or signal.get("reason_en") or ""
+            hold_action = _is_hold_action(action_zh, action_en)
+            confidence = _format_number(signal.get("confidence"), 2)
+            order_display = _format_order(signal.get("order"), hold_action=hold_action)
+        else:
+            timestamp = "-"
+            model_id = "-"
+            action_zh = "暂无"
+            action_en = "N/A"
+            reason = "等待信号"
+            hold_action = False
+            confidence = "-"
+            order_display = _format_order(None)
         signal_rows.append(
             "<tr>"
-            f"<td>{esc(_format_asia_shanghai(signal.get('timestamp')))}</td>"
-            f"<td>{esc(signal.get('model_id'))}</td>"
-            f"<td>{esc(signal.get('instrument_id'))}</td>"
+            f"<td>{esc(timestamp)}</td>"
+            f"<td>{esc(model_id)}</td>"
+            f"<td>{esc(instrument or '-')}</td>"
             f"<td>{esc(action_zh)} / {esc(action_en)}</td>"
-            f"<td>{_format_number(signal.get('confidence'), 2)}</td>"
+            f"<td>{confidence}</td>"
             f"<td>{esc(reason)}</td>"
-            f"<td>{_format_order(signal.get('order'), hold_action=hold_action)}</td>"
+            f"<td>{order_display}</td>"
             "</tr>"
         )
     if not signal_rows:
-        signal_rows.append("<tr><td colspan='7'>暂无 AI 信号</td></tr>")
+        signal_rows.append("<tr><td colspan='7' class='empty-state'>请在设置中配置交易对以查看 AI 信号。</td></tr>")
 
     return HTML_TEMPLATE.format(
         as_of=as_of,
@@ -561,8 +599,8 @@ def _render_okx_dashboard(summary: dict, order_status: str | None = None, order_
                         </tr>
                     </table>
                 </header>
-                <div class=\"panel\">
-                    <h3>持仓明细</h3>
+                <div class="panel">
+                    <h3>持仓明细 <form method='post' action='/okx/close-all-positions' class='inline-form' style='margin-left: 10px;'><input type='hidden' name='account_id' value='{account_id}'><button type='submit' class='btn-close' onclick="return confirm('确认平仓该账户的所有仓位？');">一键平仓全部</button></form></h3>
                     {positions_html}
                 </div>
                 <div class=\"panel\">
@@ -574,7 +612,7 @@ def _render_okx_dashboard(summary: dict, order_status: str | None = None, order_
                         <h3>余额信息</h3>
                         {balances_html}
                     </div>
-                    <div class=\"panel\">
+                    <div class=\"panel recent-trades-panel\">
                         <h3>近期成交</h3>
                         {trades_html}
                     </div>
@@ -881,6 +919,7 @@ def _render_risk_page(settings: dict) -> str:
     cooldown_seconds = int(settings.get("cooldown_seconds") or 600)
     cooldown_seconds = max(10, min(86400, cooldown_seconds))
     min_notional = max(0.0, float(settings.get("min_notional_usd") or 0.0))
+    max_order_notional = max(0.0, min(1_000_000.0, float(settings.get("max_order_notional_usd") or 0.0)))
     pyramid_max_orders = max(0, min(100, int(settings.get("pyramid_max_orders") or 0)))
     take_profit_pct = max(0.0, min(500.0, float(settings.get("take_profit_pct") or 0.0)))
     stop_loss_pct = max(0.0, min(95.0, float(settings.get("stop_loss_pct") or 0.0)))
@@ -903,6 +942,7 @@ def _render_risk_page(settings: dict) -> str:
     cooldown_minutes = cooldown_seconds / 60
     cooldown_minutes_text = _compact(cooldown_minutes, 1)
     pyramid_cap_text = _compact(pyramid_max_orders, 0)
+    max_order_notional_text = _compact(max_order_notional, 2)
     updated_at = esc(_format_asia_shanghai(settings.get("updated_at")))
 
     return RISK_TEMPLATE.format(
@@ -914,6 +954,8 @@ def _render_risk_page(settings: dict) -> str:
         max_loss_display=esc(loss_text),
         min_notional_usd=esc(f"{min_notional:.2f}"),
         min_notional_display=esc(min_notional_text),
+        max_order_notional_usd=esc(f"{max_order_notional:.2f}"),
+        max_order_notional_display=esc(max_order_notional_text),
         take_profit_pct=esc(f"{take_profit_pct:.2f}"),
         stop_loss_pct=esc(f"{stop_loss_pct:.2f}"),
         take_profit_display=esc(take_profit_text),
@@ -1001,6 +1043,7 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             f"<td>{_format_number(pos.get('quantity'))}</td>"
             f"<td>{_format_number(pos.get('entry_price'))}</td>"
             f"<td>{_format_number(pos.get('mark_price'))}</td>"
+            f"<td>{_format_number(pos.get('last_price') or pos.get('last') or pos.get('mark_price'))}</td>"
             f"<td>{_format_number(margin)}</td>"
             f"<td>{_format_number(pos.get('unrealized_pnl'))}</td>"
             f"<td>{(_format_number(pnl_pct) + '%') if pnl_pct is not None else ''}</td>"
@@ -1009,11 +1052,11 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='12'>当前无持仓</td></tr>")
+        rows.append("<tr><td colspan='13'>当前无持仓</td></tr>")
 
     return (
         "<table class='dense'>"
-        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th>操作</th></tr></thead>"
+        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>最新价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th>操作</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
@@ -1025,9 +1068,16 @@ def _render_trades_table(trades: Sequence[dict] | None) -> str:
         instrument = (trade.get("instrument_id") or "").upper()
         if instrument not in valid_symbols:
             continue
-        entry_price = trade.get("price")
-        exit_price = trade.get("exit_price") or trade.get("price")
+        entry_price = trade.get("entry_price") or trade.get("price")
+        exit_price = (
+            trade.get("close_price")
+            or trade.get("exit_price")
+            or trade.get("price")
+        )
         fee = trade.get("fee") or trade.get("feeCcy") or trade.get("feeUsd")
+        realized_pnl = trade.get("realized_pnl")
+        # 仅在平仓侧显示盈亏；开仓侧为空。非零才显示数值。
+        pnl_cell = _format_number(realized_pnl, digits=4) if realized_pnl not in (None, 0) else ""
         rows.append(
             "<tr>"
             f"<td>{esc(_format_asia_shanghai(trade.get('executed_at')))}</td>"
@@ -1038,8 +1088,8 @@ def _render_trades_table(trades: Sequence[dict] | None) -> str:
             f"<td>{_format_number(trade.get('quantity'))}</td>"
             f"<td>{_format_number(entry_price)}</td>"
             f"<td>{_format_number(exit_price)}</td>"
-            f"<td>{_format_number(fee)}</td>"
-            f"<td>{_format_number(trade.get('realized_pnl'))}</td>"
+            f"<td>{_format_number(fee, digits=4)}</td>"
+            f"<td>{pnl_cell}</td>"
             "</tr>"
         )
     if not rows:
@@ -1679,6 +1729,10 @@ RISK_TEMPLATE = r"""
                     <input id="min-notional" type="number" name="min_notional_usd" min="0" step="0.01" value="{min_notional_usd}" required>
                     <span class="hint">当前门槛：<span id="hint-min-notional">{min_notional_display}</span> USDT，0 表示关闭。</span>
                 </label>
+                <label for="max-order-notional">最大下单金额 (USDT)
+                    <input id="max-order-notional" type="number" name="max_order_notional_usd" min="0" step="0.01" value="{max_order_notional_usd}" required>
+                    <span class="hint">0 表示不限制；当前 <span id="hint-max-order-notional">{max_order_notional_display}</span> USDT。</span>
+                </label>
                 <label for="pyramid-max">金字塔单向上限（单币对）
                     <input id="pyramid-max" type="number" name="pyramid_max_orders" min="0" max="100" step="1" value="{pyramid_max_orders}" required>
                     <span class="hint">同向累计订单最多 <span id="hint-pyramid-value">{pyramid_max_display}</span> 笔，0 表示不限制。</span>
@@ -1823,8 +1877,11 @@ OKX_TEMPLATE = r"""
         .okx-card header {{ margin-bottom: 12px; }}
         .okx-card .meta {{ color: #94a3b8; font-size: 0.9rem; margin-top: 4px; }}
         .summary-table {{ margin-top: 12px; }}
-        .split {{ display: flex; gap: 20px; flex-wrap: wrap; }}
-        .panel {{ flex: 1 1 320px; }}
+        .split {{ display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }}
+        .panel {{ flex: 1 1 320px; min-width: 260px; }}
+        .split .panel:first-child {{ flex: 0.9 1 320px; }}
+        .split .panel:last-child {{ flex: 1.5 1 520px; min-width: 360px; }}
+        .recent-trades-panel table {{ table-layout: auto; }}
         table.dense {{ width: 100%; border-collapse: collapse; margin-top: 0.5rem; background-color: rgba(15, 23, 42, 0.6); border-radius: 6px; overflow: hidden; }}
         table.dense th, table.dense td {{ padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 0.9rem; }}
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
@@ -1847,6 +1904,31 @@ OKX_TEMPLATE = r"""
         .manual-form button {{ background-color: #38bdf8; color: #0f172a; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; }}
         .manual-form button:hover {{ background-color: #0ea5e9; }}
         .hint {{ color: #94a3b8; font-size: 0.85rem; margin: 0; }}
+        .btn-cancel {{ 
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 6px 16px;
+            border-radius: 999px;
+            border: 1px solid rgba(248, 113, 113, 0.6);
+            background-image: linear-gradient(135deg, #ef4444, #f97316);
+            color: #fff;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.15s ease;
+            box-shadow: 0 8px 18px rgba(239, 68, 68, 0.4);
+        }}
+        .btn-cancel:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 12px 26px rgba(239, 68, 68, 0.45);
+            opacity: 0.95;
+        }}
+        .btn-cancel:active {{
+            transform: translateY(1px);
+            box-shadow: 0 5px 12px rgba(239, 68, 68, 0.35);
+        }}
     </style>
 </head>
 <body>
@@ -3007,8 +3089,3 @@ ORDERBOOK_TEMPLATE = r"""
 </body>
 </html>
 """
-
-
-
-
-

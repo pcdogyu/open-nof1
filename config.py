@@ -10,7 +10,7 @@ INFLUX_ORG = "hy"
 INFLUX_BUCKET = "orderflow"
 
 # Auto-generated InfluxDB token (scope manually configure in Influx UI).
-INFLUX_TOKEN = "vL31cBS6KGLdiYuhCZ2dZ21YZaHdn5EeFWv7iLbiwAy0rkhsoNor1328rf3AWtpqV6JWVRlAJHR6ov3WXWfn3Q=="
+INFLUX_TOKEN = "xWPfArQsl8Kv-hyjjHI4zhl7CXsVDwSinjOqBEeuSfhKNB07TyvCjsNYxTGGkE7MAdsEfYPxn4zxpW1wGTQIwQ=="
 
 # Optional: admin credentials if needed for scripts (avoid using in production).
 INFLUX_USERNAME = "admin"
@@ -33,7 +33,7 @@ OKX_CACHE_TTL_SECONDS = 600
 
 # Scheduler defaults (seconds)
 MARKET_SYNC_INTERVAL = 60
-AI_INTERACTION_INTERVAL = 120
+AI_INTERACTION_INTERVAL = 180
 
 # OKX demo accounts (API keys / secrets / passphrases).
 # Populate secrets/passphrases when available.
@@ -81,9 +81,11 @@ MODEL_DEFAULTS = {   'deepseek-v1': {   'display_name': 'DeepSeek Reasoner (V3.2
 RISK_SETTINGS = {   'price_tolerance_pct': 0.02,
     'max_drawdown_pct': 8.0,
     'max_loss_absolute': 1500.0,
-    'cooldown_seconds': 600,
+    'cooldown_seconds': 28800,
     'min_notional_usd': 50.0,
+    'max_order_notional_usd': 999.98,
     'take_profit_pct': 8.0,
     'stop_loss_pct': 5.0,
     'default_leverage': 1,
-    'max_leverage': 125}
+    'max_leverage': 125,
+    'pyramid_max_orders': 100}

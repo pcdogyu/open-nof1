@@ -104,6 +104,7 @@ _DEFAULT_RISK_CONFIG = {
     "max_loss_absolute": 1500.0,
     "cooldown_seconds": 600,
     "min_notional_usd": 50.0,
+    "max_order_notional_usd": 0.0,
     "take_profit_pct": 0.0,
     "stop_loss_pct": 0.0,
     "pyramid_max_orders": 100,
@@ -119,6 +120,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
             "max_loss_absolute",
             "cooldown_seconds",
             "min_notional_usd",
+            "max_order_notional_usd",
             "pyramid_max_orders",
         ):
             if key in raw:
@@ -133,6 +135,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     drawdown = max(0.1, min(95.0, drawdown))
     max_loss = max(1.0, max_loss)
     cooldown = max(10, min(86400, cooldown))
+    max_order_notional = float(config.get("max_order_notional_usd", 0.0))
+    max_order_notional = max(0.0, min(1_000_000.0, max_order_notional))
     min_notional = max(0.0, min_notional)
     pyramid_max = max(0, min(100, pyramid_max))
     return {
@@ -141,6 +145,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
         "max_loss_absolute": max_loss,
         "cooldown_seconds": cooldown,
         "min_notional_usd": min_notional,
+        "max_order_notional_usd": max_order_notional,
         "pyramid_max_orders": pyramid_max,
     }
 
@@ -232,7 +237,7 @@ def update_risk_configuration(
     max_loss_absolute: float,
     cooldown_seconds: int,
     min_notional_usd: float,
-    max_order_notional: float = 0.0,  # deprecated placeholder
+    max_order_notional_usd: float = 0.0,
     take_profit_pct: float = 0.0,
     stop_loss_pct: float = 0.0,
     pyramid_max_orders: int = 0,
@@ -244,8 +249,8 @@ def update_risk_configuration(
             "max_drawdown_pct": max_drawdown_pct,
             "max_loss_absolute": max_loss_absolute,
             "cooldown_seconds": cooldown_seconds,
-            "min_notional_usd": min_notional_usd,
-            "max_order_notional": max_order_notional,
+        "min_notional_usd": min_notional_usd,
+            "max_order_notional_usd": max_order_notional_usd,
             "take_profit_pct": take_profit_pct,
             "stop_loss_pct": stop_loss_pct,
             "pyramid_max_orders": pyramid_max_orders,
@@ -268,7 +273,7 @@ def _build_risk_engine() -> RiskEngine:
     )
     notional_guard = OrderNotionalGuard(
         min_notional=float(config.get("min_notional_usd", 0.0)),
-        max_notional=0.0,
+        max_notional=float(config.get("max_order_notional_usd", 0.0)),
     )
     pnl_guard = ProfitLossGuard(
         take_profit_pct=float(config.get("take_profit_pct", 0.0)),
@@ -803,12 +808,11 @@ async def _process_account_signal(
         debug_entry["notes"] = "缺少可交易合约"
         _record_order_debug_entry(debug_entry)
         return False, None
-    override_signal = _build_liquidation_override(request)
-    if override_signal:
-        debug_entry["notes"] = "爆仓阈值触发直达信号"
-        response = override_signal
-    else:
-        response = await runtime.generate_signal(request)
+    liquidation_alert = _annotate_liquidation_hint(request)
+    if liquidation_alert:
+        debug_entry["liquidation_hint"] = liquidation_alert
+
+    response = await runtime.generate_signal(request)
     debug_entry["decision_actionable"] = (response.decision or "").lower() not in {"hold"}
     routed = router.route(
         response,
@@ -1183,13 +1187,10 @@ def _build_signal_request(
     )
 
 
-def _build_liquidation_override(request: SignalRequest) -> Optional[SignalResponse]:
+def _annotate_liquidation_hint(request: SignalRequest) -> Optional[str]:
     """
-    Generate a direct buy/sell signal when a single liquidation exceeds thresholds.
-
-    Rules:
-    - ETH: long liquidation > 5 triggers buy; short liquidation > 5 triggers sell.
-    - BTC: same thresholds.
+    Flag large liquidation events in the request so the model can reason on them
+    instead of pushing an immediate directional order.
     """
     meta = request.market.metadata or {}
     instrument = (request.market.instrument_id or "").upper()
@@ -1211,45 +1212,25 @@ def _build_liquidation_override(request: SignalRequest) -> Optional[SignalRespon
         short_qty = None
 
     threshold = 5.0
-    decision: Optional[str] = None
-    qty: Optional[float] = None
     reasoning: Optional[str] = None
+    alert: Optional[str] = None
 
     if long_qty is not None and long_qty > threshold:
-        decision = "buy"
-        qty = max(0.01, min(long_qty, threshold))
-        reasoning = f"{base} 多单爆仓 {long_qty:.2f} > {threshold} 触发买入信号"
+        reasoning = f"{base} 多单爆仓 {long_qty:.2f} > {threshold}"
+        alert = f"{reasoning}，请评估是否跟随或加仓"
     elif short_qty is not None and short_qty > threshold:
-        decision = "sell"
-        qty = max(0.01, min(short_qty, threshold))
-        reasoning = f"{base} 空单爆仓 {short_qty:.2f} > {threshold} 触发卖出信号"
+        reasoning = f"{base} 空单爆仓 {short_qty:.2f} > {threshold}"
+        alert = f"{reasoning}，请评估是否减仓或对冲"
 
-    if not decision or qty is None:
+    if not alert:
         return None
 
-    # If持仓方向与信号相反，补上平仓量，避免重复信号只是在原方向加仓。
-    try:
-        current_pos = float(request.risk.current_position or 0.0)
-    except Exception:
-        current_pos = 0.0
-    if decision == "buy" and current_pos < 0:
-        qty += abs(current_pos)
-    elif decision == "sell" and current_pos > 0:
-        qty += abs(current_pos)
-
-    return SignalResponse(
-        model_id=request.model_id,
-        decision=decision,
-        confidence=0.95,
-        reasoning=reasoning or "",
-        suggested_order={
-            "instrument_id": request.market.instrument_id,
-            "side": decision,
-            "size": qty,
-            "order_type": "market",
-        },
-        raw_output={"source": "liquidation_threshold", "long_qty": long_qty, "short_qty": short_qty},
-    )
+    request.market.metadata["liquidation_alert"] = alert
+    request.market.metadata["liq_long_qty"] = long_qty
+    request.market.metadata["liq_short_qty"] = short_qty
+    request.risk.notes["liquidation_alert"] = alert
+    request.metadata["liquidation_alert"] = alert
+    return alert
 
 
 async def _select_fallback_trade(

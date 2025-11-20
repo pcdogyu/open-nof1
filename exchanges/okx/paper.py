@@ -42,6 +42,7 @@ class OrderPayload:
     margin_mode: Literal["cash", "cross", "isolated"] = "cash"
     price: Optional[str] = None
     client_order_id: Optional[str] = None
+    pos_side: Optional[Literal["long", "short"]] = None
 
 
 class OkxPaperClient(ExchangeClient):
@@ -143,6 +144,8 @@ class OkxPaperClient(ExchangeClient):
             body["px"] = order.price
         if order.client_order_id:
             body["clOrdId"] = order.client_order_id
+        if order.pos_side:
+            body["posSide"] = order.pos_side
         response = self._request("POST", "/api/v5/trade/order", json_body=body)
         data = _single_item(response)
         return {
@@ -244,6 +247,7 @@ class OkxPaperClient(ExchangeClient):
                 margin_mode=raw.get("margin_mode", "cash"),
                 price=str(raw["price"]) if raw.get("price") else None,
                 client_order_id=raw.get("client_order_id"),
+                pos_side=raw.get("pos_side") or raw.get("posSide"),
             )
         except KeyError as exc:
             raise ValueError(f"Missing required order field: {exc}") from exc

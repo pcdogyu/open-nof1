@@ -159,6 +159,8 @@ class InfluxAccountRepository(AccountRepository):
             point = point.field("fee", trade.fee)
         if trade.realized_pnl is not None:
             point = point.field("realized_pnl", trade.realized_pnl)
+        if trade.close_price is not None:
+            point = point.field("close_price", trade.close_price)
         self._write_api.write(bucket=self._config.bucket, org=self._config.org, record=point)
 
     def record_equity_point(self, account: Account) -> None:
@@ -464,6 +466,7 @@ def _record_to_trade(record: FluxRecord) -> Trade:
         price=float(values.get("price", 0.0)),
         fee=_optional_float(values.get("fee")),
         realized_pnl=_optional_float(values.get("realized_pnl")),
+        close_price=_optional_float(values.get("close_price")),
         executed_at=executed_at,
     )
 
@@ -475,12 +478,15 @@ def _merge_trade_records(records: List[FluxRecord]) -> List[Trade]:
         v = rec.values
         tid = str(v.get("trade_id"))
         field = str(v.get("_field"))
-        by_id.setdefault(tid, {
-            "trade_id": tid,
-            "account_id": str(v.get("account_id")),
-            "model_id": str(v.get("model_id", "")),
-            "instrument_id": str(v.get("instrument_id", "")),
-        })
+        by_id.setdefault(
+            tid,
+            {
+                "trade_id": tid,
+                "account_id": str(v.get("account_id")),
+                "model_id": str(v.get("model_id", "")),
+                "instrument_id": str(v.get("instrument_id", "")),
+            },
+        )
         times[tid] = rec.get_time()
         by_id[tid][field] = rec.get_value()
     out: List[Trade] = []
@@ -496,6 +502,7 @@ def _merge_trade_records(records: List[FluxRecord]) -> List[Trade]:
                 price=float(data.get("price", 0.0) or 0.0),
                 fee=_optional_float(data.get("fee")),
                 realized_pnl=_optional_float(data.get("realized_pnl")),
+                close_price=_optional_float(data.get("close_price")),
                 executed_at=times.get(tid) or datetime.now(tz=timezone.utc),
             )
         )

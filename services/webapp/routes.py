@@ -11,6 +11,7 @@ import math
 import pprint
 import base64
 import asyncio
+import urllib.parse
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,7 +19,8 @@ from threading import Lock
 from typing import Dict, List, Optional, Sequence
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Form, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, validator
 
 from accounts.models import Account, AccountSnapshot, Balance, Order, Position, Trade
@@ -145,6 +147,7 @@ _DEFAULT_RISK_SETTINGS = {
     "max_loss_absolute": 1500.0,
     "cooldown_seconds": 600,
     "min_notional_usd": 50.0,
+    "max_order_notional_usd": 0.0,
     "take_profit_pct": 0.0,
     "stop_loss_pct": 0.0,
     "default_leverage": 1,
@@ -163,6 +166,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
             "max_loss_absolute",
             "cooldown_seconds",
             "min_notional_usd",
+            "max_order_notional_usd",
             "take_profit_pct",
             "stop_loss_pct",
             "default_leverage",
@@ -184,6 +188,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     drawdown = max(0.1, min(95.0, drawdown))
     max_loss = max(1.0, max_loss)
     cooldown = max(10, min(86400, cooldown))
+    max_order_notional = float(config.get("max_order_notional_usd", 0.0))
+    max_order_notional = max(0.0, min(1_000_000.0, max_order_notional))
     min_notional = max(0.0, min_notional)
     take_profit = max(0.0, min(500.0, take_profit))
     stop_loss = max(0.0, min(95.0, stop_loss))
@@ -199,6 +205,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
         "max_loss_absolute": max_loss,
         "cooldown_seconds": cooldown,
         "min_notional_usd": min_notional,
+        "max_order_notional_usd": max_order_notional,
         "take_profit_pct": take_profit,
         "stop_loss_pct": stop_loss,
         "default_leverage": default_leverage,
@@ -328,10 +335,11 @@ def get_risk_settings() -> dict:
         return {
             "price_tolerance_pct": float(_RISK_SETTINGS["price_tolerance_pct"]),
             "max_drawdown_pct": float(_RISK_SETTINGS["max_drawdown_pct"]),
-            "max_loss_absolute": float(_RISK_SETTINGS["max_loss_absolute"]),
-            "cooldown_seconds": int(_RISK_SETTINGS["cooldown_seconds"]),
-            "min_notional_usd": float(_RISK_SETTINGS.get("min_notional_usd", 0.0)),
-            "take_profit_pct": float(_RISK_SETTINGS.get("take_profit_pct", 0.0)),
+        "max_loss_absolute": float(_RISK_SETTINGS["max_loss_absolute"]),
+        "cooldown_seconds": int(_RISK_SETTINGS["cooldown_seconds"]),
+        "min_notional_usd": float(_RISK_SETTINGS.get("min_notional_usd", 0.0)),
+        "max_order_notional_usd": float(_RISK_SETTINGS.get("max_order_notional_usd", 0.0)),
+        "take_profit_pct": float(_RISK_SETTINGS.get("take_profit_pct", 0.0)),
             "stop_loss_pct": float(_RISK_SETTINGS.get("stop_loss_pct", 0.0)),
             "default_leverage": int(_RISK_SETTINGS.get("default_leverage", 1)),
             "max_leverage": int(_RISK_SETTINGS.get("max_leverage", 125)),
@@ -347,6 +355,7 @@ def update_risk_settings(
     max_loss_absolute: float,
     cooldown_seconds: int,
     min_notional_usd: float,
+    max_order_notional_usd: float,
     take_profit_pct: float,
     stop_loss_pct: float,
     default_leverage: int,
@@ -359,6 +368,7 @@ def update_risk_settings(
         drawdown = float(max_drawdown_pct)
         max_loss = float(max_loss_absolute)
         min_notional = float(min_notional_usd)
+        max_order_notional = float(max_order_notional_usd)
         take_profit = float(take_profit_pct)
         stop_loss = float(stop_loss_pct)
         default_leverage_val = int(default_leverage)
@@ -381,6 +391,8 @@ def update_risk_settings(
         raise HTTPException(status_code=400, detail="等待时间需在 10 秒 - 24 小时之间。")
     if min_notional < 0:
         raise HTTPException(status_code=400, detail="最小下单金额不能为负数。")
+    if max_order_notional < 0 or max_order_notional > 1_000_000:
+        raise HTTPException(status_code=400, detail="Maximum order amount must be between 0 and 1000000 USDT.")
     if take_profit < 0 or take_profit > 500:
         raise HTTPException(status_code=400, detail="止盈范围 0-500% 之间。")
     if stop_loss < 0 or stop_loss > 95:
@@ -400,6 +412,7 @@ def update_risk_settings(
         "max_loss_absolute": max_loss,
         "cooldown_seconds": cooldown,
         "min_notional_usd": min_notional,
+        "max_order_notional_usd": max_order_notional,
         "take_profit_pct": take_profit,
         "stop_loss_pct": stop_loss,
         "default_leverage": default_leverage_val,
@@ -636,11 +649,15 @@ def _collect_model_metrics(repository: AccountRepository | None = None) -> dict:
     )[:20]
 
     enabled_models = _get_enabled_model_ids()
+    pipeline_settings = get_pipeline_settings()
+    enabled_instruments = pipeline_settings.get("tradable_instruments", [])
+    recent_ai_signals = _load_recent_ai_signals(limit=20, enabled_model_ids=enabled_models)
     return {
         "as_of": now,
         "models": model_rows,
         "recent_trades": combined_trades,
-        "recent_ai_signals": _load_recent_ai_signals(limit=20, enabled_model_ids=enabled_models),
+        "recent_ai_signals": recent_ai_signals,
+        "enabled_instruments": enabled_instruments,
     }
 
 
@@ -992,14 +1009,14 @@ def close_okx_position(
     account_key, meta = _resolve_okx_account_meta(account_id)
     for field in ("api_key", "api_secret"):
         if not meta.get(field):
-            raise HTTPException(status_code=400, detail=f"�˻� {account_key} ȱ�� {field}")
+            raise HTTPException(status_code=400, detail=f"账户 {account_key} 缺少 {field}")
 
     try:
         normalized_qty = float(quantity)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="�ֲ���ҪΪ��Ч��������")
+        raise HTTPException(status_code=400, detail="仓位需要为有效正数")
     if normalized_qty <= 0:
-        raise HTTPException(status_code=400, detail="�ֲ�����Ӧ���� 0")
+        raise HTTPException(status_code=400, detail="仓位数量应大于 0")
 
     side_lower = (position_side or "").lower()
     if side_lower in {"long", "buy"}:
@@ -1007,7 +1024,7 @@ def close_okx_position(
     elif side_lower in {"short", "sell"}:
         close_side = "buy"
     else:
-        raise HTTPException(status_code=400, detail=f"δ֪�ĳ�Ʒ�˵�：{position_side}")
+        raise HTTPException(status_code=400, detail=f"未知的持仓方向：{position_side}")
 
     payload = {
         "instrument_id": instrument_id.upper(),
@@ -1045,6 +1062,34 @@ def close_okx_position(
     }
 
 
+
+@router.post("/okx/close-all-positions", include_in_schema=False)
+def okx_close_all_positions(
+    account_id: str = Form(...),
+) -> RedirectResponse:
+    try:
+        summary = get_okx_summary(force_refresh=True)
+        for bundle in summary.get("accounts", []):
+            if bundle.get("account", {}).get("account_id") == account_id:
+                for position in bundle.get("positions", []):
+                    close_okx_position(
+                        account_id=account_id,
+                        instrument_id=position.get("instrument_id"),
+                        position_side=position.get("side"),
+                        quantity=position.get("quantity"),
+                        margin_mode=position.get("margin_mode"),
+                    )
+        return RedirectResponse(
+            url=f"/okx?refresh=1&order_status=success&detail=All positions closed",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    except Exception as exc:
+        return RedirectResponse(
+            url=f"/okx?refresh=1&order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+
 def cancel_okx_order(
     *,
     account_id: str,
@@ -1055,13 +1100,13 @@ def cancel_okx_order(
     account_key, meta = _resolve_okx_account_meta(account_id)
     for field in ("api_key", "api_secret"):
         if not meta.get(field):
-            raise HTTPException(status_code=400, detail=f"�˻� {account_key} ȱ�� {field}")
+            raise HTTPException(status_code=400, detail=f"账户 {account_key} 缺少 {field}")
     symbol = (instrument_id or "").strip().upper()
     if not symbol:
-        raise HTTPException(status_code=400, detail="��Л�����Ϊ��")
+        raise HTTPException(status_code=400, detail="合约ID不能为空")
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
-        raise HTTPException(status_code=400, detail="��������ID")
+        raise HTTPException(status_code=400, detail="订单ID不能为空")
 
     credentials = ExchangeCredentials(
         api_key=meta["api_key"],
@@ -1234,8 +1279,8 @@ def get_orderbook_snapshot(
             ts = ts.replace(tzinfo=timezone.utc)
         net_depth = _coerce_float(row.get("net_depth"))
         if net_depth is None:
-            total_bid_qty = _coerce_float(row.get("total_bid_qty"))
-            total_ask_qty = _coerce_float(row.get("total_ask_qty"))
+            total_bid_qty = _coerce_float(row.get("total_bid_qty")),
+            total_ask_qty = _coerce_float(row.get("total_ask_qty")),
             if total_bid_qty is not None and total_ask_qty is not None:
                 net_depth = total_bid_qty - total_ask_qty
         hist_entry = {
@@ -1273,8 +1318,8 @@ def get_orderbook_snapshot(
             ts = ts.replace(tzinfo=timezone.utc)
         bids_raw = row.get("bids_json") or "[]"
         asks_raw = row.get("asks_json") or "[]"
-        total_bid_qty = _coerce_float(row.get("total_bid_qty"))
-        total_ask_qty = _coerce_float(row.get("total_ask_qty"))
+        total_bid_qty = _coerce_float(row.get("total_bid_qty")),
+        total_ask_qty = _coerce_float(row.get("total_ask_qty")),
         _append_history_entry(row)
         if instrument_filter and inst_id != instrument_filter:
             continue
@@ -1496,6 +1541,21 @@ def _persist_live_snapshot(
     # Persist recent trades
     for t in live.get("recent_trades", []) or []:
         try:
+            close_price_value = t.get("close_price")
+            if close_price_value in (None, ""):
+                close_price = None
+            else:
+                try:
+                    close_price = float(close_price_value)
+                except (TypeError, ValueError):
+                    close_price = None
+            executed_raw = (
+                t.get("executed_at")
+                or t.get("executedAt")
+                or t.get("timestamp")
+                or t.get("ts")
+            )
+            executed_at = _coerce_datetime(executed_raw, default=timestamp)
             trade = Trade(
                 trade_id=str(t.get("trade_id")),
                 account_id=str(t.get("account_id", account_model.account_id)),
@@ -1504,9 +1564,10 @@ def _persist_live_snapshot(
                 side=str(t.get("side", "")),
                 quantity=float(t.get("quantity", 0.0)),
                 price=float(t.get("price", 0.0)),
+                close_price=close_price,
                 fee=t.get("fee"),
                 realized_pnl=t.get("realized_pnl"),
-                executed_at=timestamp,
+                executed_at=executed_at,
             )
             repo.record_trade(trade)
         except Exception:
@@ -1752,7 +1813,7 @@ def _fetch_live_orderbooks(*, levels: int, instrument_filter: str | None) -> lis
                 asks = _sanitize_book_levels(snapshot.get("asks") or [], depth)
                 if not bids and not asks:
                     continue
-                timestamp = _parse_okx_timestamp(snapshot.get("ts"))
+                timestamp = _parse_okx_timestamp(snapshot.get("ts")),
                 if writer is not None:
                     try:
                         writer.write_orderbook(
@@ -1807,6 +1868,51 @@ def _parse_okx_timestamp(value: object) -> datetime:
         return datetime.fromtimestamp(millis / 1000.0, tz=timezone.utc)
     except (TypeError, ValueError):
         return datetime.now(tz=timezone.utc)
+
+
+def _coerce_datetime(value: object, *, default: datetime) -> datetime:
+    """
+    Convert an incoming timestamp to timezone-aware UTC datetime.
+    Falls back to the provided default when parsing fails.
+    """
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        epoch = float(value)
+        if epoch > 1e14:
+            epoch = epoch / 1e9
+        elif epoch > 1e11:
+            epoch = epoch / 1e3
+        try:
+            return datetime.fromtimestamp(epoch, tz=timezone.utc)
+        except (OverflowError, OSError):
+            return default
+    text = str(value).strip()
+    if not text:
+        return default
+    if text.isdigit():
+        try:
+            epoch = float(text)
+            if epoch > 1e14:
+                epoch = epoch / 1e9
+            elif epoch > 1e11:
+                epoch = epoch / 1e3
+            return datetime.fromtimestamp(epoch, tz=timezone.utc)
+        except Exception:
+            pass
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return parsed
+    except ValueError:
+        return default
 
 
 def _get_orderbook_writer() -> InfluxWriter | None:

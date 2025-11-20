@@ -3,7 +3,7 @@ uvicorn[standard]
 pydantic
 httpx
 python-multipart
-apscheduler
+apscheduler>=3.11.1
 influxdb-client
 numpy
 pandas

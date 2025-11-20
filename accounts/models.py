@@ -53,6 +53,7 @@ class Trade(BaseModel):
     side: str
     quantity: float = Field(..., gt=0)
     price: float = Field(..., gt=0)
+    close_price: Optional[float] = None
     fee: Optional[float] = None
     realized_pnl: Optional[float] = None
     executed_at: datetime = Field(default_factory=_utc_now)

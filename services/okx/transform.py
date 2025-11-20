@@ -150,6 +150,13 @@ def normalize_trades(
             price = float(raw_price or 0.0)
         except (TypeError, ValueError):
             price = 0.0
+        raw_close = (
+            fill.get("close_price")
+            or fill.get("closePrice")
+            or fill.get("close_px")
+            or fill.get("closePx")
+        )
+        close_price = _optional_float(raw_close)
         # Skip invalid fills that would violate pydantic constraints.
         if quantity <= 0 or price <= 0:
             continue
@@ -162,6 +169,7 @@ def normalize_trades(
                 side=fill.get("side", ""),
                 quantity=quantity,
                 price=price,
+                close_price=close_price,
                 fee=_optional_float(fill.get("fee")),
                 realized_pnl=_optional_float(fill.get("pnl") or fill.get("fillPnl")),
                 executed_at=executed_at,
