@@ -1031,6 +1031,7 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             pct_class = "pnl-positive" if pnl_pct >= 0 else "pnl-negative"
             pnl_pct_cell = f"<span class='{pct_class}'>{pct_value}%</span>"
         action_html = (
+            "<div style='display:flex; justify-content:center;'>"
             "<form method='post' action='/okx/close-position' class='inline-form'>"
             f"<input type='hidden' name='account_id' value='{account_value}'>"
             f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
@@ -1038,6 +1039,7 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             f"<input type='hidden' name='quantity' value='{quantity_value}'>"
             "<button type='submit' class='btn-close'>平仓</button>"
             "</form>"
+            "</div>"
         )
         rows.append(
             "<tr>"
@@ -1059,32 +1061,24 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
     if not rows:
         rows.append("<tr><td colspan='13'>当前无持仓</td></tr>")
 
-    close_all_header = "<th>操作</th>"
+    table_html = (
+        "<table class='dense'>"
+        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>最新价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th>操作</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+    )
+    close_all_wrapper = ""
     if account_id:
-        close_all_form = (
-            "<div style='display:flex; flex-direction:column; align-items:center; gap:6px;'>"
+        close_all_wrapper = (
+            "<div style='display:flex; justify-content:flex-end; align-items:flex-end; margin-bottom:8px;'>"
             "<form method='post' action='/okx/close-all-positions' class='inline-form' "
             "onsubmit=\"return confirm('确认平仓该账户的所有仓位？');\">"
             f"<input type='hidden' name='account_id' value='{account_id}'>"
             "<button type='submit' class='btn-close'>一键平仓全部</button>"
             "</form>"
-            "<span style='font-size:14px;'>操作</span>"
             "</div>"
         )
-        close_all_header = (
-            "<th style='text-align:center;'>"
-            f"{close_all_form}"
-            "</th>"
-        )
-
-    return (
-        "<table class='dense'>"
-        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>最新价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th>"
-        f"{close_all_header}"
-        "</tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody>"
-        "</table>"
-    )
+    return f"<div class='positions-table-wrapper'>{close_all_wrapper}{table_html}</div>"
 def _render_trades_table(trades: Sequence[dict] | None) -> str:
     esc = _escape
     valid_symbols = {"ETH-USDT-SWAP", "BTC-USDT-SWAP"}
