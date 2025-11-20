@@ -16,11 +16,14 @@ DEFAULT_PROMPT_TEMPLATE: Final = (
     "Current position: {current_position}\n"
     "Max position: {max_position}\n"
     "Cash available: {cash_available}\n"
+    "Market intelligence (volume, closing price action, liquidation flow, orderbook depth):\n"
+    "{market_metadata}\n"
     "Open positions:\n"
     "{positions}\n"
     "Risk notes:\n"
     "{risk_notes}\n"
     "Strategy hint: {strategy_hint}\n"
+    "Feed the volume trend, last closing prices, liquidation feed, and orderbook depth snapshots into your reasoning, then determine whether to place a trade and describe the exact order details to execute.\n"
     "Respond with structured JSON describing decision, confidence, reasoning, and order parameters.\n"
 )
 

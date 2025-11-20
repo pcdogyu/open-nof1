@@ -8,7 +8,7 @@ import asyncio
 import logging
 import math
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -165,6 +165,11 @@ _EXECUTION_LOG = deque(maxlen=100)
 _ORDER_DEBUG_LOG = deque(maxlen=50)
 _ORDER_DEBUG_WRITER: Optional["InfluxWriter"] = None
 _EXEC_LOG_WRITER: Optional["InfluxWriter"] = None
+
+_LIQUIDATION_REVERSAL_WATCH: Dict[str, Dict[str, object]] = {}
+_LIQUIDATION_SILENCE_SECONDS = 60
+_LIQUIDATION_ABS_THRESHOLD = 5.0
+_LIQUIDATION_MAX_EVENT_LOOKBACK = 15 * 60
 
 
 def _get_pipeline() -> MarketDataPipeline:
@@ -794,25 +799,41 @@ async def _process_account_signal(
         "notes": "",
     }
 
-    request = _build_signal_request(
-        model_id=account.model_id,
-        meta=meta,
+    manual_signal = _maybe_generate_liquidation_reversal(
         account=account,
         positions=positions,
-        market_price=market_price,
+        meta=meta,
     )
+    response: Optional[SignalResponse] = None
+    if manual_signal:
+        request, response = manual_signal
+        debug_entry["decision_actionable"] = True
+        debug_entry["automation"] = "liquidation_reversal"
+        debug_entry["notes"] = "净爆仓静默 60s 触发自动下单"
+    else:
+        request = _build_signal_request(
+            model_id=account.model_id,
+            meta=meta,
+            account=account,
+            positions=positions,
+            market_price=market_price,
+        )
 
+        if request is None:
+            logger.debug("Unable to build signal request for %s; skipping", account_key)
+            debug_entry["notes"] = "缺少可交易合约"
+            _record_order_debug_entry(debug_entry)
+            return False, None
+        liquidation_alert = _annotate_liquidation_hint(request)
+        if liquidation_alert:
+            debug_entry["liquidation_hint"] = liquidation_alert
 
-    if request is None:
-        logger.debug("Unable to build signal request for %s; skipping", account_key)
-        debug_entry["notes"] = "缺少可交易合约"
+    if response is None:
+        logger.debug("No signal generated for %s after liquidation scan.", account_key)
+        debug_entry["notes"] = "无法生成信号"
         _record_order_debug_entry(debug_entry)
         return False, None
-    liquidation_alert = _annotate_liquidation_hint(request)
-    if liquidation_alert:
-        debug_entry["liquidation_hint"] = liquidation_alert
 
-    response = await runtime.generate_signal(request)
     debug_entry["decision_actionable"] = (response.decision or "").lower() not in {"hold"}
     routed = router.route(
         response,
@@ -1233,6 +1254,144 @@ def _annotate_liquidation_hint(request: SignalRequest) -> Optional[str]:
     return alert
 
 
+def _maybe_generate_liquidation_reversal(
+    *,
+    account: Account,
+    positions: Sequence[Position],
+    meta: Dict[str, str],
+) -> Optional[Tuple[SignalRequest, SignalResponse]]:
+    """
+    Scan all enabled instruments for the exhaustion pattern described on the
+    liquidation dashboard and synthesize an order without consulting the LLM.
+    """
+    now = datetime.now(tz=timezone.utc)
+    for instrument in _iter_liquidation_watch_instruments(meta):
+        features = _load_market_features(instrument)
+        decision = _evaluate_liquidation_reversal_state(instrument, features, now)
+        if not decision:
+            continue
+        direction, notional_qty, event_time = decision
+        request = _build_signal_request(
+            model_id=account.model_id,
+            meta=meta,
+            account=account,
+            positions=positions,
+            market_price=features.get("liq_last_price") or 0.0,
+            instrument_override=instrument,
+        )
+        if request is None:
+            continue
+        size = _estimate_reversal_order_size(request, direction)
+        if size <= 0:
+            continue
+        side = "buy" if direction == "long" else "sell"
+        reasoning = (
+            f"{instrument} 净爆仓{('多单' if direction == 'long' else '空单')}数量 {notional_qty:.2f} "
+            f"在 {int((now - event_time).total_seconds())} 秒前停止，触发自动{('抄底做多' if direction == 'long' else '逢顶做空')}。"
+        )
+        response = SignalResponse(
+            model_id=account.model_id,
+            decision="open_long" if direction == "long" else "open_short",
+            confidence=0.72,
+            reasoning=reasoning,
+            suggested_order={
+                "instrument_id": instrument,
+                "side": side,
+                "size": size,
+            },
+            raw_output={
+                "automation": "liquidation_reversal",
+                "instrument_id": instrument,
+                "liq_net_qty": notional_qty,
+                "liq_event_time": event_time.isoformat(),
+            },
+        )
+        return request, response
+    return None
+
+
+def _iter_liquidation_watch_instruments(meta: Dict[str, str]) -> Iterable[str]:
+    preferred = [
+        meta.get("default_instrument"),
+        meta.get("instrument_id"),
+    ]
+    preferred.extend(TRADABLE_INSTRUMENTS or [])
+    seen: set[str] = set()
+    for inst in preferred:
+        if not inst:
+            continue
+        symbol = str(inst).strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        yield symbol
+
+
+def _evaluate_liquidation_reversal_state(
+    instrument: str,
+    features: Dict[str, float],
+    now: datetime,
+) -> Optional[Tuple[str, float, datetime]]:
+    net_qty = features.get("liq_net_qty")
+    timestamp_value = features.get("liq_timestamp")
+    if net_qty is None or timestamp_value is None or net_qty == 0:
+        return None
+    abs_qty = abs(net_qty)
+    if abs_qty < _LIQUIDATION_ABS_THRESHOLD:
+        return None
+    event_time = _coerce_timestamp(timestamp_value)
+    if event_time is None:
+        return None
+    silence = (now - event_time).total_seconds()
+    if silence < _LIQUIDATION_SILENCE_SECONDS or silence > _LIQUIDATION_MAX_EVENT_LOOKBACK:
+        return None
+    symbol = instrument.upper()
+    state = _LIQUIDATION_REVERSAL_WATCH.setdefault(
+        symbol,
+        {"last_seen_time": None, "last_sign": 0, "triggered_event": None},
+    )
+    last_time = state.get("last_seen_time")
+    if not isinstance(last_time, datetime) or event_time > last_time:
+        state["last_seen_time"] = event_time
+        state["last_sign"] = 1 if net_qty > 0 else -1
+        state["triggered_event"] = None
+    elif event_time < last_time:
+        return None  # ignore stale records
+    sign = 1 if net_qty > 0 else -1
+    if state.get("last_sign") != sign:
+        state["last_sign"] = sign
+        state["triggered_event"] = None
+    if state.get("triggered_event") == event_time:
+        return None
+    state["triggered_event"] = event_time
+    return ("long" if sign > 0 else "short", abs_qty, event_time)
+
+
+def _estimate_reversal_order_size(request: SignalRequest, direction: str) -> float:
+    max_position = float(max(request.risk.max_position or 0.0, 0.0))
+    if max_position <= 0:
+        return 0.0
+    current = float(request.risk.current_position or 0.0)
+    if direction == "long":
+        used = max(0.0, current)
+    else:
+        used = max(0.0, -current)
+    capacity = max(0.0, max_position - used)
+    if capacity <= 0:
+        return 0.0
+    clip = max(max_position * 0.25, 0.001)
+    return round(min(capacity, clip), 6)
+
+
+def _coerce_timestamp(value: float | int | None) -> Optional[datetime]:
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
 async def _select_fallback_trade(
     *,
     runtime: SignalRuntime,
@@ -1486,7 +1645,11 @@ from(bucket: "{config.bucket}")
         indicator_vals = _flux_tables_to_dict(query_api.query(indicator_query))
         for key, value in indicator_vals.items():
             features[f"15m_{key}"] = value
-        features.update(_flux_tables_to_dict(query_api.query(liquidation_query), prefix="liq_"))
+        liquidation_tables = query_api.query(liquidation_query)
+        features.update(_flux_tables_to_dict(liquidation_tables, prefix="liq_"))
+        liq_timestamp = _extract_latest_timestamp(liquidation_tables)
+        if liq_timestamp:
+            features["liq_timestamp"] = liq_timestamp.timestamp()
         features.update(_flux_tables_to_dict(query_api.query(orderbook_query), prefix="orderbook_"))
 
         bid_depth = features.get("orderbook_total_bid_qty")
@@ -1520,6 +1683,28 @@ def _get_feature_query_api() -> Tuple[Optional[object], Optional["InfluxConfig"]
         _FEATURE_CLIENT = InfluxDBClient(url=cfg.url, token=cfg.token, org=cfg.org)
         _FEATURE_CONFIG = cfg
     return _FEATURE_CLIENT.query_api(), _FEATURE_CONFIG
+
+
+def _extract_latest_timestamp(tables: Iterable[object]) -> Optional[datetime]:
+    latest: Optional[datetime] = None
+    if not tables:
+        return None
+    for table in tables:
+        records = getattr(table, "records", None)
+        if not records:
+            continue
+        for record in records:
+            getter = getattr(record, "get_time", None)
+            if not callable(getter):
+                continue
+            try:
+                timestamp = getter()
+            except Exception:
+                continue
+            if isinstance(timestamp, datetime):
+                if latest is None or timestamp > latest:
+                    latest = timestamp
+    return latest
 
 
 def _flux_tables_to_dict(tables: Iterable[object], *, prefix: str = "") -> Dict[str, float]:

@@ -1,4 +1,8 @@
 config.py
+# Virtual environments created on this machine, keep them local
+.vopennof/
+.vopennof13/
+
 # Python caches
 __pycache__/
 *.py[cod]
@@ -7,3 +11,7 @@ __pycache__/
 *.whl
 *.egg-info/
 *.egg
+
+# Names that include "test" should stay local
+*test*
+*[Tt]est*

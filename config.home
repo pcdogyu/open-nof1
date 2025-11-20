@@ -10,7 +10,7 @@ INFLUX_ORG = "hy"
 INFLUX_BUCKET = "orderflow"
 
 # Auto-generated InfluxDB token (scope manually configure in Influx UI).
-INFLUX_TOKEN = "BQlMKRvcAhf1lowliQFAC4BVWl6tatpz2mQH3STL2ugupHqSK1jyVY0ys1aHg6tkK_KE-j80isHqhFmJPKnNYA=="
+INFLUX_TOKEN = "xWPfArQsl8Kv-hyjjHI4zhl7CXsVDwSinjOqBEeuSfhKNB07TyvCjsNYxTGGkE7MAdsEfYPxn4zxpW1wGTQIwQ=="
 
 # Optional: admin credentials if needed for scripts (avoid using in production).
 INFLUX_USERNAME = "admin"
@@ -33,7 +33,7 @@ OKX_CACHE_TTL_SECONDS = 600
 
 # Scheduler defaults (seconds)
 MARKET_SYNC_INTERVAL = 60
-AI_INTERACTION_INTERVAL = 120
+AI_INTERACTION_INTERVAL = 180
 
 # OKX demo accounts (API keys / secrets / passphrases).
 # Populate secrets/passphrases when available.
