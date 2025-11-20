@@ -66,6 +66,8 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_LIQUIDATION_INTERVAL = 120
+
 try:  # pragma: no cover - config is optional for tests
     from config import (
         AI_INTERACTION_INTERVAL,
@@ -73,6 +75,12 @@ try:  # pragma: no cover - config is optional for tests
         OKX_ACCOUNTS,
         TRADABLE_INSTRUMENTS,
     )
+    try:
+        from config import LIQUIDATION_CHECK_INTERVAL as _LIQ_INTERVAL
+    except Exception:
+        LIQUIDATION_CHECK_INTERVAL = _DEFAULT_LIQUIDATION_INTERVAL
+    else:
+        LIQUIDATION_CHECK_INTERVAL = _LIQ_INTERVAL
     try:
         from config import RISK_SETTINGS as _RISK_DEFAULTS  # type: ignore[attr-defined]
     except Exception:
@@ -82,6 +90,7 @@ except ImportError:  # pragma: no cover
     TRADABLE_INSTRUMENTS: Sequence[str] = ()
     MARKET_SYNC_INTERVAL = 60
     AI_INTERACTION_INTERVAL = 300
+    LIQUIDATION_CHECK_INTERVAL = _DEFAULT_LIQUIDATION_INTERVAL
     _RISK_DEFAULTS = {}
 
 _SCHEDULER: Optional["AsyncIOScheduler"] = None
@@ -92,6 +101,7 @@ _OKX_INSTRUMENT_MAP: Optional[Dict[str, dict]] = None
 _ANALYTICS_JOB_ID = "refresh_leaderboard_and_equity_curve"
 _MARKET_JOB_ID = "market_data_sync"
 _EXECUTION_JOB_ID = "execute_model_signals"
+_LIQUIDATION_JOB_ID = "scan_liquidation_orderflow"
 
 
 def _sanitize_interval(value: int, minimum: int, maximum: int = 3600) -> int:
@@ -152,6 +162,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
 
 _MARKET_INTERVAL = _sanitize_interval(int(MARKET_SYNC_INTERVAL), 30)
 _AI_INTERVAL = _sanitize_interval(int(AI_INTERACTION_INTERVAL), 60)
+_LIQUIDATION_INTERVAL = _sanitize_interval(int(LIQUIDATION_CHECK_INTERVAL), 30)
 AI_SIGNAL_LOG_PATH = Path("data/logs/ai_signals.jsonl")
 AI_SIGNAL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 _PIPELINE_SETTINGS = PipelineSettings(
@@ -539,20 +550,37 @@ def start_scheduler() -> None:
         max_instances=1,
         coalesce=True,
     )
+    scheduler.add_job(
+        _scan_liquidation_flow_job,
+        trigger=IntervalTrigger(seconds=_LIQUIDATION_INTERVAL),
+        id=_LIQUIDATION_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
     _SCHEDULER = scheduler
-    logger.info("Background scheduler started with analytics and execution jobs.")
+    logger.info(
+        "Background scheduler started with analytics, market, execution, and liquidation jobs."
+    )
 
 
-def update_task_intervals(*, market_interval: Optional[int] = None, ai_interval: Optional[int] = None) -> None:
+def update_task_intervals(
+    *,
+    market_interval: Optional[int] = None,
+    ai_interval: Optional[int] = None,
+    liquidation_interval: Optional[int] = None,
+) -> None:
     """Update scheduled job intervals at runtime."""
-    global _MARKET_INTERVAL, _AI_INTERVAL
+    global _MARKET_INTERVAL, _AI_INTERVAL, _LIQUIDATION_INTERVAL
     scheduler = _SCHEDULER
     if scheduler is None or IntervalTrigger is None:
         if market_interval is not None:
             _MARKET_INTERVAL = _sanitize_interval(market_interval, 30)
         if ai_interval is not None:
             _AI_INTERVAL = _sanitize_interval(ai_interval, 60)
+        if liquidation_interval is not None:
+            _LIQUIDATION_INTERVAL = _sanitize_interval(liquidation_interval, 30)
         return
 
     if market_interval is not None:
@@ -587,6 +615,22 @@ def update_task_intervals(*, market_interval: Optional[int] = None, ai_interval:
             )
         logger.info("Updated AI execution interval to %ds", _AI_INTERVAL)
 
+    if liquidation_interval is not None:
+        _LIQUIDATION_INTERVAL = _sanitize_interval(liquidation_interval, 30)
+        trigger = IntervalTrigger(seconds=_LIQUIDATION_INTERVAL)
+        try:
+            scheduler.reschedule_job(_LIQUIDATION_JOB_ID, trigger=trigger)
+        except Exception:
+            scheduler.add_job(
+                _scan_liquidation_flow_job,
+                trigger=trigger,
+                id=_LIQUIDATION_JOB_ID,
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+        logger.info("Updated liquidation scan interval to %ds", _LIQUIDATION_INTERVAL)
+
 
 async def run_market_job_once() -> Dict[str, str]:
     """Manually trigger the market data ingestion job."""
@@ -596,6 +640,11 @@ async def run_market_job_once() -> Dict[str, str]:
 async def run_ai_job_once() -> Dict[str, str]:
     """Manually trigger the AI execution workflow job."""
     return await _execute_model_workflow_job()
+
+
+async def run_liquidation_job_once() -> Dict[str, str]:
+    """Manually trigger the liquidation order flow scan job."""
+    return await _scan_liquidation_flow_job()
 
 def shutdown_scheduler() -> None:
     """Stop the scheduler when the application shuts down."""
@@ -652,6 +701,62 @@ async def _market_data_ingestion_job() -> Dict[str, str]:
         message = str(exc)
         duration = (datetime.now(tz=timezone.utc) - started).total_seconds()
         _append_execution_log("market", "error", message, duration_seconds=duration)
+        return {"status": "error", "detail": message}
+
+
+
+
+async def _scan_liquidation_flow_job() -> Dict[str, str]:
+    '''Scan recent liquidation flow features from InfluxDB.'''
+    instruments = [
+        inst.strip().upper()
+        for inst in (TRADABLE_INSTRUMENTS or [])
+        if inst and inst.strip()
+    ]
+    if not instruments:
+        detail = "未配置可巡检的合约"
+        _append_execution_log("liquidation", "skipped", detail)
+        return {"status": "skipped", "detail": detail}
+
+    query_api, config = _get_feature_query_api()
+    if query_api is None or config is None:
+        detail = "爆仓订单流数据源未配置"
+        _append_execution_log("liquidation", "skipped", detail)
+        return {"status": "skipped", "detail": detail}
+
+    started = datetime.now(tz=timezone.utc)
+    try:
+        highlights: list[str] = []
+        now = datetime.now(tz=timezone.utc)
+        for instrument in instruments:
+            features = _load_market_features(instrument)
+            net_qty = features.get("liq_net_qty")
+            if not isinstance(net_qty, (int, float)) or net_qty == 0:
+                continue
+            ts_value = features.get("liq_timestamp")
+            ts = None
+            if isinstance(ts_value, (int, float)):
+                ts = _coerce_timestamp(ts_value)
+            age_label = ""
+            if isinstance(ts, datetime):
+                age = max(0, int((now - ts).total_seconds()))
+                age_label = f"@{age}s"
+            highlights.append(f"{instrument}:{net_qty:+.2f}{age_label}")
+        if highlights:
+            preview = " | ".join(highlights[:4])
+            if len(highlights) > 4:
+                preview += " | ..."
+            detail = f"扫描 {len(instruments)} 个合约，检测到 {len(highlights)} 条爆仓流：{preview}"
+        else:
+            detail = f"扫描 {len(instruments)} 个合约，暂无爆仓流事件"
+        duration = (datetime.now(tz=timezone.utc) - started).total_seconds()
+        _append_execution_log("liquidation", "success", detail, duration_seconds=duration)
+        return {"status": "success", "detail": detail}
+    except Exception as exc:
+        duration = (datetime.now(tz=timezone.utc) - started).total_seconds()
+        message = str(exc)
+        logger.warning("Liquidation scan job failed: %s", exc)
+        _append_execution_log("liquidation", "error", message, duration_seconds=duration)
         return {"status": "error", "detail": message}
 
 
@@ -799,10 +904,11 @@ async def _process_account_signal(
         "notes": "",
     }
 
-    manual_signal = _maybe_generate_liquidation_reversal(
+    manual_signal = await _maybe_generate_liquidation_reversal(
         account=account,
         positions=positions,
         meta=meta,
+        runtime=runtime,
     )
     response: Optional[SignalResponse] = None
     if manual_signal:
@@ -878,7 +984,7 @@ async def _process_account_signal(
         debug_entry["order_action"] = action_tag
         if isinstance(routed.intent.metadata, dict):
             routed.intent.metadata["order_action"] = action_tag
-    _assign_okx_position_side(routed.intent, positions)
+    _assign_okx_position_side(routed.intent, positions, meta)
 
     size_note = _align_size_to_lot(routed.intent)
     if size_note:
@@ -1255,20 +1361,21 @@ def _annotate_liquidation_hint(request: SignalRequest) -> Optional[str]:
     return alert
 
 
-def _maybe_generate_liquidation_reversal(
+async def _maybe_generate_liquidation_reversal(
     *,
     account: Account,
     positions: Sequence[Position],
     meta: Dict[str, str],
+    runtime: SignalRuntime,
 ) -> Optional[Tuple[SignalRequest, SignalResponse]]:
     """
-    Scan all enabled instruments for the exhaustion pattern described on the
-    liquidation dashboard and synthesize an order without consulting the LLM.
+    Scan liquidation flow extremes and let the AI runtime evaluate whether to
+    increase, trim, or close exposure before placing an automated trade.
     """
-    now = datetime.now(tz=timezone.utc)
+    detected_at = datetime.now(tz=timezone.utc)
     for instrument in _iter_liquidation_watch_instruments(meta):
         features = _load_market_features(instrument)
-        decision = _evaluate_liquidation_reversal_state(instrument, features, now)
+        decision = _evaluate_liquidation_reversal_state(instrument, features, detected_at)
         if not decision:
             continue
         direction, notional_qty, event_time = decision
@@ -1282,31 +1389,28 @@ def _maybe_generate_liquidation_reversal(
         )
         if request is None:
             continue
-        size = _estimate_reversal_order_size(request, direction)
-        if size <= 0:
+        _attach_liquidation_metadata(
+            request=request,
+            direction=direction,
+            notional_qty=notional_qty,
+            event_time=event_time,
+            detected_at=detected_at,
+        )
+        try:
+            response = await runtime.generate_signal(request)
+        except Exception as exc:
+            logger.warning("AI evaluation for liquidation reversal failed: %s", exc)
+            response = None
+        response = _finalize_liquidation_response(
+            request=request,
+            response=response,
+            direction=direction,
+            notional_qty=notional_qty,
+            event_time=event_time,
+            detected_at=detected_at,
+        )
+        if response is None:
             continue
-        side = "buy" if direction == "long" else "sell"
-        reasoning = (
-            f"{instrument} 净爆仓{('多单' if direction == 'long' else '空单')}数量 {notional_qty:.2f} "
-            f"在 {int((now - event_time).total_seconds())} 秒前停止，触发自动{('抄底做多' if direction == 'long' else '逢顶做空')}。"
-        )
-        response = SignalResponse(
-            model_id=account.model_id,
-            decision="open_long" if direction == "long" else "open_short",
-            confidence=0.72,
-            reasoning=reasoning,
-            suggested_order={
-                "instrument_id": instrument,
-                "side": side,
-                "size": size,
-            },
-            raw_output={
-                "automation": "liquidation_reversal",
-                "instrument_id": instrument,
-                "liq_net_qty": notional_qty,
-                "liq_event_time": event_time.isoformat(),
-            },
-        )
         return request, response
     return None
 
@@ -1326,6 +1430,88 @@ def _iter_liquidation_watch_instruments(meta: Dict[str, str]) -> Iterable[str]:
             continue
         seen.add(symbol)
         yield symbol
+
+
+def _attach_liquidation_metadata(
+    *,
+    request: SignalRequest,
+    direction: str,
+    notional_qty: float,
+    event_time: datetime,
+    detected_at: datetime,
+) -> None:
+    request.strategy_hint = "liquidation_reversal"
+    metadata = request.metadata
+    metadata["automation"] = "liquidation_reversal"
+    metadata["liquidation_direction"] = direction
+    metadata["liquidation_notional"] = notional_qty
+    metadata["liquidation_event_time"] = event_time.isoformat()
+    metadata["liquidation_detected_at"] = detected_at.isoformat()
+    request.market.metadata["liquidation_direction"] = direction
+    request.market.metadata["liquidation_signal"] = True
+    request.market.metadata["liquidation_event_time"] = event_time.isoformat()
+    request.risk.notes["liquidation_direction"] = direction
+    request.risk.notes["liquidation_notional"] = notional_qty
+
+
+def _finalize_liquidation_response(
+    *,
+    request: SignalRequest,
+    response: Optional[SignalResponse],
+    direction: str,
+    notional_qty: float,
+    event_time: datetime,
+    detected_at: datetime,
+) -> Optional[SignalResponse]:
+    instrument = request.market.instrument_id
+    side = "buy" if direction == "long" else "sell"
+    base_response = response
+    suggested = dict(base_response.suggested_order) if base_response and base_response.suggested_order else {}
+    if not suggested.get("instrument_id"):
+        suggested["instrument_id"] = instrument
+    if not suggested.get("side"):
+        suggested["side"] = side
+    size = None
+    try:
+        size = float(suggested.get("size", 0.0))
+    except (TypeError, ValueError):
+        size = None
+    if size is None or size <= 0:
+        size = _estimate_reversal_order_size(request, direction)
+    if size <= 0:
+        return None
+    suggested["size"] = size
+    suggested.setdefault("order_type", "market")
+
+    reasoning = (
+        f"{instrument} 净爆仓{('多单' if direction == 'long' else '空单')}数量 {notional_qty:.2f} "
+        f"在 {int((detected_at - event_time).total_seconds())} 秒前触发，AI 建议执行 {suggested['side']} {size}."
+    )
+
+    forced_decision = "open_long" if direction == "long" else "open_short"
+    if base_response is None:
+        base_response = SignalResponse(
+            model_id=request.model_id,
+            decision=forced_decision,
+            confidence=0.72,
+            reasoning=reasoning,
+            suggested_order=suggested,
+            raw_output={},
+        )
+    else:
+        base_response.decision = forced_decision
+        base_response.confidence = base_response.confidence or 0.72
+        base_response.reasoning = base_response.reasoning or reasoning
+        base_response.suggested_order = suggested
+
+    raw_output = base_response.raw_output or {}
+    raw_output["automation"] = "liquidation_reversal"
+    raw_output["liquidation_direction"] = direction
+    raw_output["liquidation_notional"] = notional_qty
+    raw_output["liquidation_event_time"] = event_time.isoformat()
+    raw_output["liquidation_detected_at"] = detected_at.isoformat()
+    base_response.raw_output = raw_output
+    return base_response
 
 
 def _evaluate_liquidation_reversal_state(
@@ -1862,8 +2048,26 @@ def _compute_net_position(instrument_id: str, positions: Sequence[Position]) -> 
     return net_qty
 
 
-def _assign_okx_position_side(intent: OrderIntent, positions: Sequence[Position]) -> None:
-    """Populate OKX metadata so hedge mode is disabled."""
+def _instrument_side_profile(instrument_id: str, positions: Sequence[Position]) -> tuple[bool, bool]:
+    has_long = False
+    has_short = False
+    for pos in positions or []:
+        if _get_attr(pos, "instrument_id") != instrument_id:
+            continue
+        side = (_get_attr(pos, "side") or "").lower()
+        if side in {"long", "buy"}:
+            has_long = True
+        elif side in {"short", "sell"}:
+            has_short = True
+    return has_long, has_short
+
+
+def _assign_okx_position_side(
+    intent: OrderIntent,
+    positions: Sequence[Position],
+    account_meta: Optional[Dict[str, str]] = None,
+) -> None:
+    """Populate OKX metadata for accounts that explicitly use hedge mode."""
     if intent is None or not intent.instrument_id:
         return
     net_qty = _compute_net_position(intent.instrument_id, positions)
@@ -1875,7 +2079,23 @@ def _assign_okx_position_side(intent: OrderIntent, positions: Sequence[Position]
     reduce_only = (pos_side == "long" and side == "sell") or (pos_side == "short" and side == "buy")
     pos_side_api = "LONG" if pos_side == "long" else "SHORT"
     metadata = intent.metadata if isinstance(intent.metadata, dict) else {}
-    metadata["pos_side"] = pos_side_api
+
+    hedge_mode = False
+    explicit_mode = str((account_meta or {}).get("position_mode") or "").lower()
+    if explicit_mode in {"hedge", "long_short"}:
+        hedge_mode = True
+    elif explicit_mode in {"net", "oneway"}:
+        hedge_mode = False
+    else:
+        has_long, has_short = _instrument_side_profile(intent.instrument_id, positions)
+        hedge_mode = has_long and has_short
+
+    if hedge_mode:
+        metadata["pos_side"] = pos_side_api
+    else:
+        metadata.pop("pos_side", None)
+        metadata.pop("posSide", None)
+
     if reduce_only:
         metadata["reduce_only"] = True
     intent.metadata = metadata

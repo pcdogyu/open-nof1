@@ -53,15 +53,16 @@ except ImportError:  # pragma: no cover
 
 CONFIG_PATH = Path("config.py")
 MARKET_DEPTH_ATTACHMENT_DIR = Path("data/attachments/market_depth")
+_DEFAULT_LIQUIDATION_INTERVAL = 120
 
 try:
     from config import (
         MODEL_DEFAULTS,
         AI_INTERACTION_INTERVAL,
-    MARKET_SYNC_INTERVAL,
-    OKX_ACCOUNTS,
-    PIPELINE_POLL_INTERVAL,
-    TRADABLE_INSTRUMENTS,
+        MARKET_SYNC_INTERVAL,
+        OKX_ACCOUNTS,
+        PIPELINE_POLL_INTERVAL,
+        TRADABLE_INSTRUMENTS,
     )
     try:
         from config import OKX_CACHE_TTL_SECONDS as _OKX_TTL
@@ -71,6 +72,12 @@ try:
         from config import RISK_SETTINGS as _RISK_DEFAULTS  # type: ignore[attr-defined]
     except Exception:
         _RISK_DEFAULTS = {}
+    try:
+        from config import LIQUIDATION_CHECK_INTERVAL as _LIQ_INTERVAL
+    except Exception:
+        LIQUIDATION_CHECK_INTERVAL = _DEFAULT_LIQUIDATION_INTERVAL
+    else:
+        LIQUIDATION_CHECK_INTERVAL = _LIQ_INTERVAL
 except ImportError:  # pragma: no cover - fallback for test envs
     MODEL_DEFAULTS = {
         "deepseek-v1": {
@@ -98,6 +105,7 @@ except ImportError:  # pragma: no cover - fallback for test envs
     PIPELINE_POLL_INTERVAL = 120
     MARKET_SYNC_INTERVAL = 60
     AI_INTERACTION_INTERVAL = 300
+    LIQUIDATION_CHECK_INTERVAL = _DEFAULT_LIQUIDATION_INTERVAL
     _OKX_TTL = 600
     _RISK_DEFAULTS = {}
 router = APIRouter()
@@ -135,6 +143,7 @@ _SCHEDULER_SETTINGS_LOCK = Lock()
 _SCHEDULER_SETTINGS: dict[str, object] = {
     "market_interval": int(MARKET_SYNC_INTERVAL),
     "ai_interval": int(AI_INTERACTION_INTERVAL),
+    "liquidation_interval": int(LIQUIDATION_CHECK_INTERVAL),
     "updated_at": datetime.now(tz=timezone.utc).isoformat(),
 }
 
@@ -296,28 +305,39 @@ def get_scheduler_settings() -> dict:
         return {
             "market_interval": int(_SCHEDULER_SETTINGS["market_interval"]),
             "ai_interval": int(_SCHEDULER_SETTINGS["ai_interval"]),
+            "liquidation_interval": int(
+                _SCHEDULER_SETTINGS.get("liquidation_interval", LIQUIDATION_CHECK_INTERVAL)
+            ),
             "updated_at": _SCHEDULER_SETTINGS["updated_at"],
             "execution_log": scheduler_module.get_execution_log(limit=25),
         }
 
 
-def update_scheduler_settings(market_interval: int, ai_interval: int) -> dict:
+def update_scheduler_settings(market_interval: int, ai_interval: int, liquidation_interval: int) -> dict:
     """Update scheduler intervals and persist configuration."""
     market = int(market_interval)
     ai = int(ai_interval)
+    liquidation = int(liquidation_interval)
     if market < 30 or market > 3600:
         raise HTTPException(status_code=400, detail="市场行情抽取频率需在 30-3600 秒之间。")
     if ai < 60 or ai > 7200:
         raise HTTPException(status_code=400, detail="AI 交互频率需在 60-7200 秒之间。")
+    if liquidation < 30 or liquidation > 3600:
+        raise HTTPException(status_code=400, detail="爆仓订单流检查频率需在 30-3600 秒之间。")
 
     with _SCHEDULER_SETTINGS_LOCK:
         _SCHEDULER_SETTINGS["market_interval"] = market
         _SCHEDULER_SETTINGS["ai_interval"] = ai
+        _SCHEDULER_SETTINGS["liquidation_interval"] = liquidation
         _SCHEDULER_SETTINGS["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
-        _persist_scheduler_settings(market, ai)
+        _persist_scheduler_settings(market, ai, liquidation)
 
     try:
-        scheduler_module.update_task_intervals(market_interval=market, ai_interval=ai)
+        scheduler_module.update_task_intervals(
+            market_interval=market,
+            ai_interval=ai,
+            liquidation_interval=liquidation,
+        )
     except Exception as exc:  # pragma: no cover - scheduler optional
         logger.debug("Failed to notify scheduler of interval change: %s", exc)
 
@@ -460,6 +480,23 @@ async def trigger_ai_job_api() -> dict:
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Manual AI job failed: %s", exc)
         raise HTTPException(status_code=500, detail="触发 AI 测试失败")
+    return {
+        "status": result.get("status", "unknown"),
+        "detail": result.get("detail") or "",
+        "executed_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+@router.post(
+    "/api/scheduler/test-liquidation",
+    summary="Trigger the liquidation order flow scan once for testing",
+)
+async def trigger_liquidation_job_api() -> dict:
+    try:
+        result = await scheduler_module.run_liquidation_job_once()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Manual liquidation scan failed: %s", exc)
+        raise HTTPException(status_code=500, detail="触发爆仓检查失败")
     return {
         "status": result.get("status", "unknown"),
         "detail": result.get("detail") or "",
@@ -2020,15 +2057,17 @@ def _persist_model_defaults() -> None:
         pass
 
 
-def _persist_scheduler_settings(market_interval: int, ai_interval: int) -> None:
+def _persist_scheduler_settings(market_interval: int, ai_interval: int, liquidation_interval: int) -> None:
     """Persist scheduler intervals to config.py."""
     _replace_config_assignment("MARKET_SYNC_INTERVAL", market_interval)
     _replace_config_assignment("AI_INTERACTION_INTERVAL", ai_interval)
+    _replace_config_assignment("LIQUIDATION_CHECK_INTERVAL", liquidation_interval)
     try:
         import config as config_module  # type: ignore
 
         config_module.MARKET_SYNC_INTERVAL = market_interval  # type: ignore[attr-defined]
         config_module.AI_INTERACTION_INTERVAL = ai_interval  # type: ignore[attr-defined]
+        config_module.LIQUIDATION_CHECK_INTERVAL = liquidation_interval  # type: ignore[attr-defined]
     except ImportError:
         pass
 

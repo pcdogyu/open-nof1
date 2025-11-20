@@ -284,8 +284,9 @@ def scheduler_settings_page() -> HTMLResponse:
 def submit_scheduler_settings(
     market_interval: int = Form(...),
     ai_interval: int = Form(...),
+    liquidation_interval: int = Form(...),
 ) -> RedirectResponse:
-    routes.update_scheduler_settings(market_interval, ai_interval)
+    routes.update_scheduler_settings(market_interval, ai_interval, liquidation_interval)
     return RedirectResponse(url="/scheduler", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -2143,12 +2144,20 @@ SCHEDULER_TEMPLATE = r"""
                 </div>
                 <span class="hint">触发 LLM 信号 → 风控 → 模拟下单流程的周期。</span>
             </label>
+            <label for="liquidation-interval">
+                爆仓订单流检查间隔（秒）
+                <div class="control-line">
+                    <input id="liquidation-interval" name="liquidation_interval" type="number" min="30" max="3600" value="{liquidation_interval}" required>
+                    <button type="button" class="test-trigger" id="liquidation-test-btn" data-url="/api/scheduler/test-liquidation" data-label="爆仓流巡检">爆仓流巡检</button>
+                </div>
+                <span class="hint">扫描 Influx 爆仓流特征，校验自动抄底/摸顶守护逻辑。</span>
+            </label>
             <button type="submit">保存调度设置</button>
         </form>
         <div class="meta">
             最近更新：<span class="timestamp">{updated_at}</span>
         </div>
-        <p class="hint test-status" id="scheduler-test-status">点击按钮会立即触发行情或 AI 任务，可用于验证调度逻辑。</p>
+        <p class="hint test-status" id="scheduler-test-status">点击按钮会立即触发行情、AI 或爆仓巡检任务，用于验证调度逻辑。</p>
     </section>
     <section class="card log-card">
         <h2>最近执行记录</h2>
@@ -2325,6 +2334,7 @@ def _render_scheduler_page(settings: dict) -> str:
         "market": "行情采集",
         "ai": "AI 交互",
         "analytics": "指标刷新",
+        "liquidation": "爆仓巡检",
     }
     status_labels = {
         "success": "成功",
@@ -2356,6 +2366,7 @@ def _render_scheduler_page(settings: dict) -> str:
     return SCHEDULER_TEMPLATE.format(
         market_interval=esc(settings.get("market_interval")),
         ai_interval=esc(settings.get("ai_interval")),
+        liquidation_interval=esc(settings.get("liquidation_interval")),
         updated_at=esc(updated_at),
         log_rows="\n".join(log_rows),
     )
