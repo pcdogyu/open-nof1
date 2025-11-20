@@ -42,7 +42,7 @@ class OrderPayload:
     margin_mode: Literal["cash", "cross", "isolated"] = "cash"
     price: Optional[str] = None
     client_order_id: Optional[str] = None
-    pos_side: Optional[Literal["long", "short"]] = None
+    pos_side: Optional[str] = None
     reduce_only: Optional[bool] = None
 
 
@@ -172,6 +172,32 @@ class OkxPaperClient(ExchangeClient):
             "status": "cancelled",
             "order_id": data.get("ordId"),
             "instrument_id": instrument_id,
+            "raw": response,
+        }
+
+    def close_position(
+        self,
+        *,
+        instrument_id: str,
+        margin_mode: Literal["cash", "cross", "isolated"] = "cross",
+        pos_side: Optional[str] = None,
+    ) -> dict:
+        """
+        Force-close an open position using OKX's close-position endpoint.
+        """
+        body = {
+            "instId": instrument_id,
+            "mgnMode": margin_mode,
+        }
+        if pos_side:
+            # OKX expects lowercase long/short identifiers for posSide.
+            body["posSide"] = pos_side.strip().lower()
+        response = self._request("POST", "/api/v5/trade/close-position", json_body=body)
+        data = _single_item(response)
+        return {
+            "status": data.get("state") or "submitted",
+            "instrument_id": instrument_id,
+            "pos_side": pos_side,
             "raw": response,
         }
 

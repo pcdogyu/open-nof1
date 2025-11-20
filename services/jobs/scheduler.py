@@ -1556,7 +1556,7 @@ def _place_order(meta: Dict[str, str], intent: OrderIntent) -> tuple[Optional[Di
             payload["client_order_id"] = client_order_id
         pos_side = meta_payload.get("pos_side")
         if pos_side:
-            payload["pos_side"] = pos_side
+            payload["pos_side"] = str(pos_side).upper()
         if meta_payload.get("reduce_only"):
             payload["reduce_only"] = True
         raw_response = None
@@ -1873,8 +1873,9 @@ def _assign_okx_position_side(intent: OrderIntent, positions: Sequence[Position]
     else:
         pos_side = "long" if net_qty > 0 else "short"
     reduce_only = (pos_side == "long" and side == "sell") or (pos_side == "short" and side == "buy")
+    pos_side_api = "LONG" if pos_side == "long" else "SHORT"
     metadata = intent.metadata if isinstance(intent.metadata, dict) else {}
-    metadata["pos_side"] = pos_side
+    metadata["pos_side"] = pos_side_api
     if reduce_only:
         metadata["reduce_only"] = True
     intent.metadata = metadata

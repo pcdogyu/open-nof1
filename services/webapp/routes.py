@@ -1021,22 +1021,13 @@ def close_okx_position(
     side_lower = (position_side or "").lower()
     if side_lower in {"long", "buy"}:
         close_side = "sell"
-        pos_side = "long"
+        pos_side = "LONG"
     elif side_lower in {"short", "sell"}:
         close_side = "buy"
-        pos_side = "short"
+        pos_side = "SHORT"
     else:
         raise HTTPException(status_code=400, detail=f"??????? {position_side}")
 
-    payload = {
-        "instrument_id": instrument_id.upper(),
-        "side": close_side,
-        "order_type": "market",
-        "size": str(normalized_qty),
-        "margin_mode": _choose_margin_mode(instrument_id, meta, margin_mode),
-        "pos_side": pos_side,
-        "reduce_only": True,
-    }
     credentials = ExchangeCredentials(
         api_key=meta["api_key"],
         api_secret=meta["api_secret"],
@@ -1045,7 +1036,12 @@ def close_okx_position(
     client = OkxPaperClient()
     try:
         client.authenticate(credentials)
-        response = client.place_order(payload)
+        margin_mode_value = _choose_margin_mode(instrument_id, meta, margin_mode)
+        response = client.close_position(
+            instrument_id=instrument_id.upper(),
+            margin_mode=margin_mode_value,
+            pos_side=pos_side,
+        )
     except OkxClientError as exc:
         payload = getattr(exc, "payload", None) or {}
         code = payload.get("code")
