@@ -1279,8 +1279,8 @@ def get_orderbook_snapshot(
             ts = ts.replace(tzinfo=timezone.utc)
         net_depth = _coerce_float(row.get("net_depth"))
         if net_depth is None:
-            total_bid_qty = _coerce_float(row.get("total_bid_qty")),
-            total_ask_qty = _coerce_float(row.get("total_ask_qty")),
+            total_bid_qty = _coerce_float(row.get("total_bid_qty"))
+            total_ask_qty = _coerce_float(row.get("total_ask_qty"))
             if total_bid_qty is not None and total_ask_qty is not None:
                 net_depth = total_bid_qty - total_ask_qty
         hist_entry = {
@@ -1318,8 +1318,8 @@ def get_orderbook_snapshot(
             ts = ts.replace(tzinfo=timezone.utc)
         bids_raw = row.get("bids_json") or "[]"
         asks_raw = row.get("asks_json") or "[]"
-        total_bid_qty = _coerce_float(row.get("total_bid_qty")),
-        total_ask_qty = _coerce_float(row.get("total_ask_qty")),
+        total_bid_qty = _coerce_float(row.get("total_bid_qty"))
+        total_ask_qty = _coerce_float(row.get("total_ask_qty"))
         _append_history_entry(row)
         if instrument_filter and inst_id != instrument_filter:
             continue
