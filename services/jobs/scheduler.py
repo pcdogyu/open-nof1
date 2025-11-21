@@ -122,6 +122,9 @@ _DEFAULT_RISK_CONFIG = {
     "pyramid_max_orders": 5,
     "pyramid_reentry_pct": 2.0,
     "liquidation_notional_threshold": 50_000.0,
+    "liquidation_same_direction_count": 4,
+    "liquidation_opposite_count": 3,
+    "liquidation_silence_seconds": 300,
 }
 
 
@@ -141,6 +144,9 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
             "stop_loss_pct",
             "pyramid_reentry_pct",
             "liquidation_notional_threshold",
+            "liquidation_same_direction_count",
+            "liquidation_opposite_count",
+            "liquidation_silence_seconds",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -155,6 +161,9 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     stop_loss = float(config.get("stop_loss_pct", 0.0))
     reentry_pct = float(config.get("pyramid_reentry_pct", 0.0))
     liquidation_notional = float(config.get("liquidation_notional_threshold", 50_000.0))
+    same_direction_count = int(config.get("liquidation_same_direction_count", 4))
+    opposite_direction_count = int(config.get("liquidation_opposite_count", 3))
+    silence_seconds = float(config.get("liquidation_silence_seconds", 300))
     price = max(0.001, min(0.5, price))
     drawdown = max(0.1, min(95.0, drawdown))
     max_loss = max(1.0, max_loss)
@@ -168,6 +177,9 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     reentry_pct = max(0.0, min(50.0, reentry_pct))
     liquidation_notional = max(0.0, liquidation_notional)
     pyramid_max = max(0, min(100, pyramid_max))
+    same_direction_count = max(1, min(20, same_direction_count))
+    opposite_direction_count = max(1, min(20, opposite_direction_count))
+    silence_seconds = max(60.0, min(3600.0, silence_seconds))
     return {
         "price_tolerance_pct": price,
         "max_drawdown_pct": drawdown,
@@ -181,6 +193,9 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
         "pyramid_max_orders": pyramid_max,
         "pyramid_reentry_pct": reentry_pct,
         "liquidation_notional_threshold": liquidation_notional,
+        "liquidation_same_direction_count": same_direction_count,
+        "liquidation_opposite_count": opposite_direction_count,
+        "liquidation_silence_seconds": silence_seconds,
     }
 
 
@@ -283,6 +298,9 @@ def update_risk_configuration(
     pyramid_max_orders: int = 0,
     pyramid_reentry_pct: float = 0.0,
     liquidation_notional_threshold: float = 50_000.0,
+    liquidation_same_direction_count: int = 4,
+    liquidation_opposite_count: int = 3,
+    liquidation_silence_seconds: float = 300.0,
 ) -> None:
     """Refresh the in-memory risk configuration."""
     normalized = _sanitize_risk_config(
@@ -299,6 +317,9 @@ def update_risk_configuration(
             "pyramid_max_orders": pyramid_max_orders,
             "pyramid_reentry_pct": pyramid_reentry_pct,
             "liquidation_notional_threshold": liquidation_notional_threshold,
+            "liquidation_same_direction_count": liquidation_same_direction_count,
+            "liquidation_opposite_count": liquidation_opposite_count,
+            "liquidation_silence_seconds": liquidation_silence_seconds,
         }
     )
     with _RISK_CONFIG_LOCK:
@@ -1731,9 +1752,10 @@ def _evaluate_liquidation_reversal_state(
             notional = abs(net_qty) * price_hint
     with _RISK_CONFIG_LOCK:
         liq_threshold = float(_RISK_CONFIG.get("liquidation_notional_threshold", 50_000.0))
+        same_required = int(_RISK_CONFIG.get("liquidation_same_direction_count", 4))
+        opposite_required = int(_RISK_CONFIG.get("liquidation_opposite_count", 3))
+        silence_required = float(_RISK_CONFIG.get("liquidation_silence_seconds", 300.0))
     if liq_threshold <= 0:
-        return None
-    if notional is None or notional < liq_threshold:
         return None
     event_time = _coerce_timestamp(timestamp_value)
     if event_time is None:
@@ -1744,22 +1766,63 @@ def _evaluate_liquidation_reversal_state(
     symbol = instrument.upper()
     state = _LIQUIDATION_REVERSAL_WATCH.setdefault(
         symbol,
-        {"last_seen_time": None, "last_sign": 0, "triggered_event": None},
+        {
+            "history": deque(),
+            "candidate_direction": None,
+            "last_same_time": None,
+            "opposite_count": 0,
+        },
     )
-    last_time = state.get("last_seen_time")
-    if not isinstance(last_time, datetime) or event_time > last_time:
-        state["last_seen_time"] = event_time
-        state["last_sign"] = 1 if net_qty > 0 else -1
-        state["triggered_event"] = None
-    elif event_time < last_time:
-        return None  # ignore stale records
+    history: deque = state["history"]
+    cutoff = event_time - timedelta(minutes=15)
+    while history and history[0][0] < cutoff:
+        history.popleft()
+
     sign = 1 if net_qty > 0 else -1
-    if state.get("last_sign") != sign:
-        state["last_sign"] = sign
-        state["triggered_event"] = None
-    if state.get("triggered_event") == event_time:
+    candidate_dir = state.get("candidate_direction")
+    eligible_same = notional is not None and notional >= liq_threshold
+
+    if eligible_same:
+        history.append((event_time, sign))
+        same_count = sum(1 for ts, sg in history if sg == sign)
+        if same_count >= same_required and (candidate_dir is None or candidate_dir == sign):
+            state["candidate_direction"] = sign
+            state["last_same_time"] = event_time
+            state["opposite_count"] = 0
+            return None
+        if candidate_dir == sign:
+            state["last_same_time"] = event_time
+            state["opposite_count"] = 0
+            return None
+    elif candidate_dir is None:
         return None
-    state["triggered_event"] = event_time
+
+    candidate_dir = state.get("candidate_direction")
+    if candidate_dir is None:
+        return None
+    if sign == candidate_dir and not eligible_same:
+        state["opposite_count"] = 0
+        return None
+    if sign != -candidate_dir:
+        state["opposite_count"] = 0
+        return None
+
+    last_same = state.get("last_same_time")
+    if not isinstance(last_same, datetime):
+        return None
+    silence = (event_time - last_same).total_seconds()
+    if silence < silence_required:
+        state["opposite_count"] = 0
+        return None
+
+    state["opposite_count"] = int(state.get("opposite_count") or 0) + 1
+    if state["opposite_count"] < opposite_required:
+        return None
+
+    state["candidate_direction"] = None
+    state["last_same_time"] = None
+    state["opposite_count"] = 0
+    history.clear()
     return ("long" if sign > 0 else "short", abs_qty, event_time)
 
 

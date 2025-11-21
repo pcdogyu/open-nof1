@@ -91,4 +91,7 @@ RISK_SETTINGS = {   'price_tolerance_pct': 0.02,
     'max_leverage': 125,
     'pyramid_max_orders': 5,
     'pyramid_reentry_pct': 2.0,
-    'liquidation_notional_threshold': 50000.0}
+    'liquidation_notional_threshold': 50000.0,
+    'liquidation_same_direction_count': 3,
+    'liquidation_opposite_count': 3,
+    'liquidation_silence_seconds': 120}

@@ -167,6 +167,9 @@ _DEFAULT_RISK_SETTINGS = {
     "pyramid_max_orders": 5,
     "pyramid_reentry_pct": 2.0,
     "liquidation_notional_threshold": 50_000.0,
+    "liquidation_same_direction_count": 4,
+    "liquidation_opposite_count": 3,
+    "liquidation_silence_seconds": 300,
 }
 
 
@@ -213,6 +216,9 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
             "pyramid_max_orders",
             "pyramid_reentry_pct",
             "liquidation_notional_threshold",
+            "liquidation_same_direction_count",
+            "liquidation_opposite_count",
+            "liquidation_silence_seconds",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -227,6 +233,9 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     max_leverage = int(config.get("max_leverage", 125))
     pyramid_reentry = float(config.get("pyramid_reentry_pct", 0.0))
     liquidation_threshold = float(config.get("liquidation_notional_threshold", 50_000.0))
+    same_direction_count = int(config.get("liquidation_same_direction_count", 4))
+    opposite_count = int(config.get("liquidation_opposite_count", 3))
+    silence_seconds = float(config.get("liquidation_silence_seconds", 300.0))
     price = max(0.001, min(0.5, price))
     drawdown = max(0.1, min(95.0, drawdown))
     max_loss = max(1.0, max_loss)
@@ -246,6 +255,9 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     pyramid_max = max(0, min(100, pyramid_max))
     pyramid_reentry = max(0.0, min(50.0, pyramid_reentry))
     liquidation_threshold = max(0.0, liquidation_threshold)
+    same_direction_count = max(1, min(20, same_direction_count))
+    opposite_count = max(1, min(20, opposite_count))
+    silence_seconds = max(60.0, min(3600.0, silence_seconds))
     return {
         "price_tolerance_pct": price,
         "max_drawdown_pct": drawdown,
@@ -261,6 +273,9 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
         "pyramid_max_orders": pyramid_max,
         "pyramid_reentry_pct": pyramid_reentry,
         "liquidation_notional_threshold": liquidation_threshold,
+        "liquidation_same_direction_count": same_direction_count,
+        "liquidation_opposite_count": opposite_count,
+        "liquidation_silence_seconds": silence_seconds,
     }
 
 
@@ -408,6 +423,9 @@ def get_risk_settings() -> dict:
             "pyramid_max_orders": int(_RISK_SETTINGS.get("pyramid_max_orders", 0)),
             "pyramid_reentry_pct": float(_RISK_SETTINGS.get("pyramid_reentry_pct", 0.0)),
             "liquidation_notional_threshold": float(_RISK_SETTINGS.get("liquidation_notional_threshold", 0.0)),
+            "liquidation_same_direction_count": int(_RISK_SETTINGS.get("liquidation_same_direction_count", 4)),
+            "liquidation_opposite_count": int(_RISK_SETTINGS.get("liquidation_opposite_count", 3)),
+            "liquidation_silence_seconds": int(_RISK_SETTINGS.get("liquidation_silence_seconds", 300)),
             "updated_at": _RISK_SETTINGS["updated_at"],
         }
 
@@ -428,6 +446,9 @@ def update_risk_settings(
     pyramid_max_orders: int,
     pyramid_reentry_pct: float,
     liquidation_notional_threshold: float,
+    liquidation_same_direction_count: int,
+    liquidation_opposite_count: int,
+    liquidation_silence_seconds: int,
 ) -> dict:
     """Update risk parameters and persist them to config.py."""
     try:
@@ -444,6 +465,9 @@ def update_risk_settings(
         pyramid_max_val = int(pyramid_max_orders)
         pyramid_reentry_val = float(pyramid_reentry_pct)
         liquidation_threshold_val = float(liquidation_notional_threshold)
+        same_direction_val = int(liquidation_same_direction_count)
+        opposite_count_val = int(liquidation_opposite_count)
+        silence_seconds_val = int(liquidation_silence_seconds)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="数值需要为数字。")
     try:
@@ -481,6 +505,12 @@ def update_risk_settings(
         raise HTTPException(status_code=400, detail="�������۸�ƫ����Ӧ�� 0-50% ֮�䡣")
     if liquidation_threshold_val < 0:
         raise HTTPException(status_code=400, detail="爆仓金额阈值必须为非负数。")
+    if same_direction_val < 1 or same_direction_val > 20:
+        raise HTTPException(status_code=400, detail="同向爆仓笔数需在 1-20 之间。")
+    if opposite_count_val < 1 or opposite_count_val > 20:
+        raise HTTPException(status_code=400, detail="逆向爆仓笔数需在 1-20 之间。")
+    if silence_seconds_val < 60 or silence_seconds_val > 3600:
+        raise HTTPException(status_code=400, detail="冷静时长需在 60-3600 秒之间。")
 
     normalized = {
         "price_tolerance_pct": price,
@@ -497,6 +527,9 @@ def update_risk_settings(
         "pyramid_max_orders": pyramid_max_val,
         "pyramid_reentry_pct": pyramid_reentry_val,
         "liquidation_notional_threshold": liquidation_threshold_val,
+        "liquidation_same_direction_count": same_direction_val,
+        "liquidation_opposite_count": opposite_count_val,
+        "liquidation_silence_seconds": silence_seconds_val,
     }
     with _RISK_SETTINGS_LOCK:
         for key, value in normalized.items():
@@ -1130,6 +1163,114 @@ def place_manual_okx_order(
     }
 
 
+def scale_okx_position(
+    *,
+    account_id: str,
+    instrument_id: str,
+    position_side: str,
+    quantity: float,
+    margin_mode: str | None = None,
+) -> dict:
+    """Increase an existing position by sending a market order."""
+    try:
+        normalized_qty = float(quantity)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="补仓数量必须为数字。")
+    if normalized_qty <= 0:
+        raise HTTPException(status_code=400, detail="补仓数量需要大于 0。")
+
+    side_lower = (position_side or "").lower()
+    if side_lower in {"long", "buy"}:
+        open_side = "buy"
+    elif side_lower in {"short", "sell"}:
+        open_side = "sell"
+    else:
+        raise HTTPException(status_code=400, detail=f"未知的持仓方向 {position_side}")
+
+    account_key, meta = _resolve_okx_account_meta(account_id)
+    for field in ("api_key", "api_secret"):
+        if not meta.get(field):
+            raise HTTPException(status_code=400, detail=f"账户 {account_key} 缺少 {field}")
+
+    symbol = (instrument_id or "").upper()
+    instrument_meta = _get_okx_instrument_meta(symbol)
+    lot_size = _try_float(instrument_meta.get("lotSz")) if instrument_meta else None
+    min_size = _try_float(instrument_meta.get("minSz")) if instrument_meta else None
+    max_size = _try_float(instrument_meta.get("maxSz")) if instrument_meta else None
+    adjusted_qty = normalized_qty
+    if lot_size and lot_size > 0:
+        multiples = math.ceil(adjusted_qty / lot_size)
+        adjusted_qty = max(lot_size, multiples * lot_size)
+    if min_size and min_size > 0 and adjusted_qty < min_size:
+        adjusted_qty = min_size
+    if max_size and max_size > 0 and adjusted_qty > max_size:
+        adjusted_qty = max_size
+    if adjusted_qty <= 0:
+        raise HTTPException(status_code=400, detail="补仓数量未达到最小下单限制。")
+
+    credentials = ExchangeCredentials(
+        api_key=meta["api_key"],
+        api_secret=meta["api_secret"],
+        passphrase=meta.get("passphrase"),
+    )
+    client = OkxPaperClient()
+    try:
+        client.authenticate(credentials)
+        margin_mode_value = _choose_margin_mode(symbol, meta, margin_mode)
+        pos_side_payload: str | None = None
+        try:
+            live_positions = client.fetch_positions(symbols=[symbol])
+        except Exception:
+            live_positions = []
+        for entry in live_positions or []:
+            inst_id = (entry.get("instId") or "").upper()
+            if inst_id != symbol:
+                continue
+            detected_side = (entry.get("posSide") or entry.get("side") or "").strip().lower()
+            if detected_side == "net":
+                pos_side_payload = None
+            elif detected_side:
+                pos_side_payload = detected_side.upper()
+            raw_mode = (entry.get("mgnMode") or entry.get("marginMode") or "").strip()
+            if raw_mode:
+                margin_mode_value = raw_mode.lower()
+            break
+
+        size_text = f"{adjusted_qty:.8f}".rstrip("0").rstrip(".")
+        if not size_text:
+            size_text = "0"
+        response = client.place_order(
+            {
+                "instrument_id": symbol,
+                "side": open_side,
+                "order_type": "market",
+                "size": size_text,
+                "margin_mode": margin_mode_value,
+                "pos_side": pos_side_payload,
+            }
+        )
+        try:
+            get_okx_summary(force_refresh=True, ttl_seconds=0)
+        except Exception as refresh_exc:  # pragma: no cover
+            logger.debug("Post-scale summary refresh failed: %s", refresh_exc)
+    except OkxClientError as exc:
+        payload = getattr(exc, "payload", None) or {}
+        code = payload.get("code")
+        msg = payload.get("msg") or payload.get("sMsg")
+        detail = str(exc)
+        if code or msg:
+            detail = f"{detail} (code={code}, msg={msg})"
+        raise HTTPException(status_code=400, detail=detail)
+    finally:
+        client.close()
+    return {
+        "status": response.get("status"),
+        "order_id": response.get("order_id"),
+        "client_order_id": response.get("client_order_id"),
+        "raw": response.get("raw"),
+    }
+
+
 def close_okx_position(
     *,
     account_id: str,
@@ -1390,8 +1531,8 @@ def get_liquidation_snapshot(limit: int = 50, instrument: Optional[str] = None) 
             ts = ts.replace(tzinfo=timezone.utc)
         net_qty = _coerce_float(row.get("net_qty"))
         last_price = _coerce_float(row.get("last_price"))
-        notional_value = None
-        if net_qty is not None and last_price is not None:
+        notional_value = _coerce_float(row.get("notional_value"))
+        if notional_value is None and net_qty is not None and last_price is not None:
             notional_value = abs(net_qty) * last_price
         record_payload = {
             "instrument_id": inst_id,

@@ -148,6 +148,34 @@ def okx_close_position(
         )
 
 
+@app.post("/okx/scale-position", include_in_schema=False)
+def okx_scale_position(
+    account_id: str = Form(...),
+    instrument_id: str = Form(...),
+    position_side: str = Form(...),
+    quantity: float = Form(...),
+    margin_mode: Optional[str] = Form(None),
+) -> RedirectResponse:
+    try:
+        result = routes.scale_okx_position(
+            account_id=account_id.strip(),
+            instrument_id=instrument_id.strip(),
+            position_side=position_side.strip(),
+            quantity=quantity,
+            margin_mode=(margin_mode or "").strip() or None,
+        )
+        detail = result.get("order_id") or ""
+        return RedirectResponse(
+            url=f"/okx?refresh=1&order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    except Exception as exc:
+        return RedirectResponse(
+            url=f"/okx?refresh=1&order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+
 @app.post("/okx/cancel-order", include_in_schema=False)
 def okx_cancel_order(
     account_id: str = Form(...),
@@ -254,6 +282,9 @@ def submit_risk_settings(
     pyramid_max_orders: int = Form(5),
     pyramid_reentry_pct: float = Form(2),
     liquidation_notional_threshold: float = Form(50000),
+    liquidation_same_direction_count: int = Form(4),
+    liquidation_opposite_count: int = Form(3),
+    liquidation_silence_seconds: int = Form(300),
 ) -> RedirectResponse:
     routes.update_risk_settings(
         price_tolerance_pct=price_tolerance_pct / 100.0,
@@ -270,6 +301,9 @@ def submit_risk_settings(
         pyramid_max_orders=pyramid_max_orders,
         pyramid_reentry_pct=pyramid_reentry_pct,
         liquidation_notional_threshold=liquidation_notional_threshold,
+        liquidation_same_direction_count=liquidation_same_direction_count,
+        liquidation_opposite_count=liquidation_opposite_count,
+        liquidation_silence_seconds=liquidation_silence_seconds,
     )
     return RedirectResponse(url="/risk", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -954,6 +988,9 @@ def _render_risk_page(settings: dict) -> str:
     max_leverage = max(default_leverage, min(125, int(settings.get("max_leverage") or default_leverage)))
     pyramid_reentry_pct = max(0.0, min(50.0, float(settings.get("pyramid_reentry_pct") or 0.0)))
     liquidation_threshold = max(0.0, float(settings.get("liquidation_notional_threshold") or 0.0))
+    liquidation_same_count = max(1, int(settings.get("liquidation_same_direction_count") or 4))
+    liquidation_opposite_count = max(1, int(settings.get("liquidation_opposite_count") or 3))
+    liquidation_silence_seconds = max(60, int(settings.get("liquidation_silence_seconds") or 300))
 
     def _compact(value: float, digits: int = 2) -> str:
         text = f"{value:.{digits}f}"
@@ -975,6 +1012,7 @@ def _render_risk_page(settings: dict) -> str:
     max_order_notional_text = _compact(max_order_notional, 2)
     pyramid_reentry_text = _compact(pyramid_reentry_pct, 2)
     liquidation_threshold_text = _compact(liquidation_threshold, 2)
+    silence_minutes_text = _compact(liquidation_silence_seconds / 60.0, 1)
     updated_at = esc(_format_asia_shanghai(settings.get("updated_at")))
 
     return RISK_TEMPLATE.format(
@@ -1006,6 +1044,10 @@ def _render_risk_page(settings: dict) -> str:
         pyramid_max_display=esc(pyramid_cap_text),
         cooldown_seconds=esc(str(cooldown_seconds)),
         cooldown_minutes=esc(cooldown_minutes_text),
+        liquidation_same_direction_count=esc(str(liquidation_same_count)),
+        liquidation_opposite_count=esc(str(liquidation_opposite_count)),
+        liquidation_silence_seconds=esc(str(liquidation_silence_seconds)),
+        liquidation_silence_minutes=esc(silence_minutes_text),
         updated_at=updated_at,
     )
 
@@ -1098,25 +1140,54 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             pnl_pct_cell = f"<span class='{pct_class}'>{pct_value}%</span>"
 
         def _close_form(label: str, qty_value: str) -> str:
+            btn_class = "btn-close"
+            if label == "全部平仓":
+                btn_class += " btn-close-full"
             return (
                 "<form method='post' action='/okx/close-position' class='inline-form'>"
                 f"<input type='hidden' name='account_id' value='{account_value}'>"
                 f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
                 f"<input type='hidden' name='position_side' value='{side_value}'>"
                 f"<input type='hidden' name='quantity' value='{qty_value}'>"
-                f"<button type='submit' class='btn-close'>{label}</button>"
+                f"<button type='submit' class='{btn_class}'>{label}</button>"
                 "</form>"
             )
 
-        close_forms: list[str] = []
+        def _scale_form(label: str, qty_value: str) -> str:
+            return (
+                "<form method='post' action='/okx/scale-position' class='inline-form'>"
+                f"<input type='hidden' name='account_id' value='{account_value}'>"
+                f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
+                f"<input type='hidden' name='position_side' value='{side_value}'>"
+                f"<input type='hidden' name='quantity' value='{qty_value}'>"
+                f"<button type='submit' class='btn-scale'>{label}</button>"
+                "</form>"
+            )
+
+        action_pairs: list[str] = []
         if qty > 0:
-            for portion, label in ((0.1, "平仓10%"), (0.2, "平仓20%"), (0.5, "平仓50%")):
+            for portion, close_label, scale_label in (
+                (0.1, "平仓10%", "补仓10%"),
+                (0.2, "平仓20%", "补仓20%"),
+                (0.5, "平仓50%", "补仓50%"),
+            ):
                 partial_qty = max(qty * portion, 0.0001)
-                close_forms.append(_close_form(label, esc(_fmt_quantity(partial_qty))))
-        close_forms.append(_close_form("全部平仓", quantity_value))
+                qty_value = esc(_fmt_quantity(partial_qty))
+                stack = (
+                    "<div class='action-pair'>"
+                    f"{_scale_form(scale_label, qty_value)}"
+                    f"{_close_form(close_label, qty_value)}"
+                    "</div>"
+                )
+                action_pairs.append(stack)
+        action_pairs.append(
+            "<div class='action-pair full'>"
+            f"{_close_form('全部平仓', quantity_value)}"
+            "</div>"
+        )
         action_html = (
-            "<div class='close-actions' style='display:flex; flex-wrap:wrap; gap:6px; justify-content:flex-end;'>"
-            f"{''.join(close_forms)}"
+            "<div class='close-actions' style='display:flex; flex-wrap:wrap; gap:10px; justify-content:flex-end;'>"
+            f"{''.join(action_pairs)}"
             "</div>"
         )
         rows.append(
@@ -1780,20 +1851,21 @@ RISK_TEMPLATE = r"""
         header .hint {{ color: #94a3b8; margin: 0; }}
         .risk-grid {{ display: flex; flex-wrap: wrap; gap: 24px; }}
         .risk-card {{ flex: 1 1 320px; background-color: #1e293b; border-radius: 16px; padding: 24px; box-shadow: 0 8px 24px rgba(2, 6, 23, 0.65); }}
-        .risk-card.secondary {{ background-color: rgba(15, 23, 42, 0.8); border: 1px solid rgba(59, 130, 246, 0.2); }}
         .risk-card h2 {{ margin-top: 0; margin-bottom: 1rem; }}
-        form label {{ display: flex; flex-direction: column; gap: 6px; font-weight: 600; margin-top: 1rem; }}
-        form label:first-of-type {{ margin-top: 0; }}
+        .parameter-grid {{ display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px; }}
+        .parameter-grid label {{ display: flex; flex-direction: column; gap: 6px; font-weight: 600; margin: 0; }}
         input[type="number"] {{ border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.4); background-color: rgba(15, 23, 42, 0.9); padding: 10px 12px; color: #e2e8f0; font-size: 1rem; }}
         input[type="number"]:focus {{ outline: none; border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2); }}
         button {{ margin-top: 1.5rem; width: 100%; padding: 12px 0; border: none; border-radius: 10px; font-size: 1rem; background-color: #38bdf8; color: #0f172a; cursor: pointer; font-weight: 600; }}
         button:hover {{ background-color: #0ea5e9; }}
         .hint {{ color: #94a3b8; font-size: 0.9rem; margin-top: 0.3rem; }}
         .timestamp {{ color: #38bdf8; }}
-        .rule-list {{ list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 12px; }}
-        .rule-list li {{ padding: 12px; border-radius: 10px; background-color: rgba(30, 41, 59, 0.8); border: 1px solid rgba(56, 189, 248, 0.18); font-size: 0.95rem; }}
+        @media (max-width: 1280px) {{
+            .parameter-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+        }}
         @media (max-width: 768px) {{
             .risk-card {{ flex: 1 1 100%; }}
+            .parameter-grid {{ grid-template-columns: repeat(1, minmax(0, 1fr)); }}
         }}
     </style>
 </head>
@@ -1822,87 +1894,88 @@ RISK_TEMPLATE = r"""
         <section class="risk-card primary">
             <h2>风险参数</h2>
             <form method="post" action="/risk/update">
-                <label for="price-tolerance">价格波动容忍度（%）
-                    <input id="price-tolerance" type="number" name="price_tolerance_pct" min="0.1" max="50" step="0.1" value="{price_tolerance_pct}" required>
-                    <span class="hint">剧烈波动时参考价 ±<span id="hint-price-value">{price_tolerance_display}</span>% 内。</span>
-                </label>
-                <label for="min-notional">最小下单金额（USDT）
-                    <input id="min-notional" type="number" name="min_notional_usd" min="0" step="0.01" value="{min_notional_usd}" required>
-                    <span class="hint">当前门槛：<span id="hint-min-notional">{min_notional_display}</span> USDT，0 表示关闭。</span>
-                </label>
-                <label for="max-order-notional">最大下单金额 (USDT)
-                    <input id="max-order-notional" type="number" name="max_order_notional_usd" min="0" step="0.01" value="{max_order_notional_usd}" required>
-                    <span class="hint">0 表示不限制；当前 <span id="hint-max-order-notional">{max_order_notional_display}</span> USDT。</span>
-                </label>
-                <label for="liquidation-threshold">爆仓金额阈值 (USDT)
-                    <input id="liquidation-threshold" type="number" name="liquidation_notional_threshold" min="0" step="1" value="{liquidation_notional_threshold}" required>
-                    <span class="hint">15 分钟内净爆仓金额 ≥ <span id="hint-liq-threshold">{liquidation_notional_display}</span> USDT 时自动触发逆向防守。</span>
-                </label>
-                <label for="max-position">最大持仓数量
-                    <input id="max-position" type="number" name="max_position" min="0" step="0.0001" value="{max_position}" required>
-                    <span class="hint">0 表示按权益自动推算；当前 <span id="hint-max-position">{max_position_display}</span> 张/币。</span>
-                </label>
-                <label for="pyramid-max">金字塔单向上限（单币对）
-                    <input id="pyramid-max" type="number" name="pyramid_max_orders" min="0" max="100" step="1" value="{pyramid_max_orders}" required>
-                    <span class="hint">同向累计订单最多 <span id="hint-pyramid-value">{pyramid_max_display}</span> 笔，0 表示不限制。</span>
-                </label>
-                <label for="pyramid-reentry">金字塔加仓偏离（%）
-                    <input id="pyramid-reentry" type="number" name="pyramid_reentry_pct" min="0" max="50" step="0.1" value="{pyramid_reentry_pct}" required>
-                    <span class="hint">最新收盘价偏离入场价超过 <span id="hint-reentry-value">{pyramid_reentry_display}</span>% 时继续同向加仓。</span>
-                </label>
-                <label for="max-drawdown">最大回撤（%）
-                    <input id="max-drawdown" type="number" name="max_drawdown_pct" min="0.1" max="95" step="0.1" value="{max_drawdown_pct}" required>
-                </label>
-                <label for="loss-limit">累计亏损上限（USDT）
-                    <input id="loss-limit" type="number" name="max_loss_absolute" min="1" step="1" value="{max_loss_absolute}" required>
-                </label>
-                <label for="default-leverage">默认杠杆（倍）
-                    <input id="default-leverage" type="number" name="default_leverage" min="1" max="125" step="1" value="{default_leverage}" required>
-                    <span class="hint">建仓时默认杠杆，范围 1-125。</span>
-                </label>
-                <label for="max-leverage">最大杠杆（倍）
-                    <input id="max-leverage" type="number" name="max_leverage" min="1" max="125" step="1" value="{max_leverage}" required>
-                    <span class="hint">不得低于默认杠杆，范围 1-125。</span>
-                </label>
-                <label for="take-profit">止盈阈值（%）
-                    <input id="take-profit" type="number" name="take_profit_pct" min="0" max="500" step="0.1" value="{take_profit_pct}" required>
-                    <span class="hint">未实现收益达到阈值时停止开仓，0 表示关闭。</span>
-                </label>
-                <label for="stop-loss">止损阈值（%）
-                    <input id="stop-loss" type="number" name="stop_loss_pct" min="0" max="95" step="0.1" value="{stop_loss_pct}" required>
-                    <span class="hint">未实现亏损达到 -阈值 时停止开仓，0 表示关闭。</span>
-                </label>
-                <label for="cooldown-seconds">冷静时间（秒）
-                    <input id="cooldown-seconds" type="number" name="cooldown_seconds" min="10" max="86400" step="10" value="{cooldown_seconds}" required>
-                    <span class="hint">相当于暂停 <span id="hint-cooldown-value">{cooldown_minutes}</span> 分钟后再恢复（最短 10 秒，提高下单频率）</span>
-                </label>
+                <div class="parameter-grid">
+                    <label for="price-tolerance">价格波动容忍度（%）
+                        <input id="price-tolerance" type="number" name="price_tolerance_pct" min="0.1" max="50" step="0.1" value="{price_tolerance_pct}" required>
+                        <span class="hint">允许委托价格落在参考价 ±<span id="hint-price-value">{price_tolerance_display}</span>% 的范围内。</span>
+                    </label>
+                    <label for="min-notional">最小下单金额（USDT）
+                        <input id="min-notional" type="number" name="min_notional_usd" min="0" step="0.01" value="{min_notional_usd}" required>
+                        <span class="hint">当前门槛：<span id="hint-min-notional">{min_notional_display}</span> USDT，0 表示关闭。</span>
+                    </label>
+                    <label for="max-order-notional">最大下单金额（USDT）
+                        <input id="max-order-notional" type="number" name="max_order_notional_usd" min="0" step="0.01" value="{max_order_notional_usd}" required>
+                        <span class="hint">上限：<span id="hint-max-order-notional">{max_order_notional_display}</span> USDT，0 表示不限制。</span>
+                    </label>
+                    <label for="liquidation-threshold">爆仓金额阈值（USDT）
+                        <input id="liquidation-threshold" type="number" name="liquidation_notional_threshold" min="0" step="1" value="{liquidation_notional_threshold}" required>
+                        <span class="hint">若 15 分钟内净爆仓金额 ≥ <span id="hint-liq-threshold">{liquidation_notional_display}</span> USDT 则满足触发条件之一。</span>
+                    </label>
+                    <label for="liquidation-same-count">同向爆仓笔数
+                        <input id="liquidation-same-count" type="number" name="liquidation_same_direction_count" min="1" max="20" step="1" value="{liquidation_same_direction_count}" required>
+                        <span class="hint">15 分钟内净爆仓金额≥50k USDT 且同方向数量超过 {liquidation_same_direction_count} 笔时才进入防守。</span>
+                    </label>
+                    <label for="liquidation-opposite-count">逆向爆仓确认
+                        <input id="liquidation-opposite-count" type="number" name="liquidation_opposite_count" min="1" max="20" step="1" value="{liquidation_opposite_count}" required>
+                        <span class="hint">逆向方向需要累计 {liquidation_opposite_count} 笔才执行逆向防守。</span>
+                    </label>
+                    <label for="liquidation-silence">同向冷静期（秒）
+                        <input id="liquidation-silence" type="number" name="liquidation_silence_seconds" min="60" max="3600" step="30" value="{liquidation_silence_seconds}" required>
+                        <span class="hint">至少等待 {liquidation_silence_minutes} 分钟 (≈{liquidation_silence_seconds} 秒) 未再出现同向爆仓。</span>
+                    </label>
+                    <label for="max-position">最大持仓数量
+                        <input id="max-position" type="number" name="max_position" min="0" step="0.0001" value="{max_position}" required>
+                        <span class="hint">当前限制：<span id="hint-max-position">{max_position_display}</span> 张/币，0 表示按权益估算。</span>
+                    </label>
+                    <label for="pyramid-max">金字塔单向上限（单币对）
+                        <input id="pyramid-max" type="number" name="pyramid_max_orders" min="0" max="100" step="1" value="{pyramid_max_orders}" required>
+                        <span class="hint">同向挂单最多 <span id="hint-pyramid-value">{pyramid_max_display}</span> 笔。</span>
+                    </label>
+                    <label for="pyramid-reentry">金字塔加仓偏离（%）
+                        <input id="pyramid-reentry" type="number" name="pyramid_reentry_pct" min="0" max="50" step="0.1" value="{pyramid_reentry_pct}" required>
+                        <span class="hint">价差达到 <span id="hint-reentry-value">{pyramid_reentry_display}</span>% 时允许继续加仓。</span>
+                    </label>
+                    <label for="max-drawdown">最大回撤（%）
+                        <input id="max-drawdown" type="number" name="max_drawdown_pct" min="0.1" max="95" step="0.1" value="{max_drawdown_pct}" required>
+                    </label>
+                    <label for="loss-limit">累计亏损上限（USDT）
+                        <input id="loss-limit" type="number" name="max_loss_absolute" min="1" step="1" value="{max_loss_absolute}" required>
+                    </label>
+                    <label for="default-leverage">默认杠杆（倍）
+                        <input id="default-leverage" type="number" name="default_leverage" min="1" max="125" step="1" value="{default_leverage}" required>
+                        <span class="hint">建仓初始杠杆，范围 1-125。</span>
+                    </label>
+                    <label for="max-leverage">最大杠杆（倍）
+                        <input id="max-leverage" type="number" name="max_leverage" min="1" max="125" step="1" value="{max_leverage}" required>
+                        <span class="hint">不得低于默认杠杆。</span>
+                    </label>
+                    <label for="take-profit">止盈阈值（%）
+                        <input id="take-profit" type="number" name="take_profit_pct" min="0" max="500" step="0.1" value="{take_profit_pct}" required>
+                        <span class="hint">未实现收益 ≥ <span id="hint-take-profit-value">{take_profit_display}</span>% 时停止开仓。</span>
+                    </label>
+                    <label for="stop-loss">止损阈值（%）
+                        <input id="stop-loss" type="number" name="stop_loss_pct" min="0" max="95" step="0.1" value="{stop_loss_pct}" required>
+                        <span class="hint">未实现亏损 ≤ -<span id="hint-stop-loss-value">{stop_loss_display}</span>% 时停止开仓。</span>
+                    </label>
+                    <label for="cooldown-seconds">冷静时间（秒）
+                        <input id="cooldown-seconds" type="number" name="cooldown_seconds" min="10" max="86400" step="10" value="{cooldown_seconds}" required>
+                        <span class="hint">冷静期 <span id="hint-cooldown-value">{cooldown_minutes}</span> 分钟后再恢复。</span>
+                    </label>
+                </div>
                 <button type="submit">保存策略参数</button>
             </form>
         </section>
-        <section class="risk-card secondary">
-            <h2>规则说明</h2>
-            <ul class="rule-list">
-                <li>价格限制：委托价格需落在参考价 ±<span id="rule-price-value">{price_tolerance_display}</span>% 内。</li>
-                <li>最小名义：下单金额须 ≥ <span id="rule-min-notional-value">{min_notional_display}</span> USDT，0 表示不限制。</li>
-                <li>��������ͬ����ͬ������� <span id="rule-pyramid-value">{pyramid_max_display}</span> �ʣ�ƫ�����ﵽ <span id="rule-reentry-value">{pyramid_reentry_display}</span>% ʱ�Զ������Ӳ�ƽ̨��</li>
-                <li>回撤保护：账户回撤超过 <span id="rule-drawdown-value">{drawdown_display}</span>% 时进入冷静期。</li>
-                <li>亏损限制：累计亏损超出 <span id="rule-loss-value">{max_loss_display}</span> USDT 时停止交易。</li>
-                <li>杠杆限制：默认 <span id="rule-default-lev">{default_leverage_display}</span>x，最大 <span id="rule-max-lev">{max_leverage_display}</span>x。</li>
-                <li>止盈止损：未实现盈亏 ≥ <span id="rule-take-profit-value">{take_profit_display}</span>% 或 ≤ -<span id="rule-stop-loss-value">{stop_loss_display}</span>% 时停止开仓。</li>
-                <li>等待时长：冷静后等待 <span id="rule-cooldown-value">{cooldown_minutes}</span> 分钟或手动恢复。</li>
-                <li>数据馈送：盘口深度、爆仓流数据将注入模型特征辅助人工/AI决策。</li>
-                <li>爆仓反向：15 分钟内净爆仓金额 ≥ <span id="rule-liq-threshold">{liquidation_notional_display}</span> USDT ʱ�Զ�����ԭʼ�����ɣ�</li>
-            </ul>
-            <p class="hint">保存后写入 config.py 并通知调度任务</p>
-        </section>
+        
     </div>
     <script>
       (function() {{{{
         const priceInput = document.getElementById('price-tolerance');
-        const drawdownInput = document.getElementById('drawdown-limit');
+        const drawdownInput = document.getElementById('max-drawdown');
         const lossInput = document.getElementById('loss-limit');
         const cooldownInput = document.getElementById('cooldown-seconds');
         const minNotionalInput = document.getElementById('min-notional');
+        const maxOrderInput = document.getElementById('max-order-notional');
+        const maxPositionInput = document.getElementById('max-position');
         const pyramidInput = document.getElementById('pyramid-max');
         const liquidationInput = document.getElementById('liquidation-threshold');
         const pyramidReentryInput = document.getElementById('pyramid-reentry');
@@ -1921,7 +1994,7 @@ RISK_TEMPLATE = r"""
           const fixed = num.toFixed(digits);
           return fixed.replace(/\.?0+$/, '') || '0';
         }}}};
-        const updateRules = () => {{
+        const updateHints = () => {{
           const priceValue = Number(priceInput.value) || 0;
           const drawdownValue = Number(drawdownInput.value) || 0;
           const lossValue = Number(lossInput.value) || 0;
@@ -1929,6 +2002,8 @@ RISK_TEMPLATE = r"""
           const cooldownMinutes = cooldownSeconds / 60;
           const minNotional = Number(minNotionalInput.value) || 0;
           const pyramidCap = Number(pyramidInput.value) || 0;
+          const maxOrderVal = Number(maxOrderInput.value) || 0;
+          const maxPositionVal = Number(maxPositionInput.value) || 0;
           const liqThreshold = Number(liquidationInput.value) || 0;
           const reentryPct = Number(pyramidReentryInput.value) || 0;
           const takeProfit = Number(takeProfitInput.value) || 0;
@@ -1941,37 +2016,35 @@ RISK_TEMPLATE = r"""
           const cooldownText = formatCompact(cooldownMinutes, 1);
           const minNotionalText = formatCompact(minNotional, 2);
           const pyramidCapText = formatCompact(pyramidCap, 0);
+          const maxOrderText = formatCompact(maxOrderVal, 2);
+          const maxPositionText = formatCompact(maxPositionVal, 4);
           const liqThresholdText = formatCompact(liqThreshold, 2);
           const reentryText = formatCompact(reentryPct, 2);
           const takeProfitText = formatCompact(takeProfit, 2);
           const stopLossText = formatCompact(stopLoss, 2);
           const defaultLevText = formatCompact(defaultLev, 0);
           const maxLevText = formatCompact(maxLev, 0);
-          document.getElementById('hint-price-value').textContent = priceText;
-          document.getElementById('rule-price-value').textContent = priceText;
-          document.getElementById('rule-drawdown-value').textContent = drawdownText;
-          document.getElementById('rule-loss-value').textContent = lossText;
-          document.getElementById('hint-cooldown-value').textContent = cooldownText;
-          document.getElementById('rule-cooldown-value').textContent = cooldownText;
-          document.getElementById('hint-min-notional').textContent = minNotionalText;
-          document.getElementById('rule-min-notional-value').textContent = minNotionalText;
-          document.getElementById('hint-pyramid-value').textContent = pyramidCapText;
-          document.getElementById('rule-pyramid-value').textContent = pyramidCapText;
-          document.getElementById('hint-liq-threshold').textContent = liqThresholdText;
-          document.getElementById('rule-liq-threshold').textContent = liqThresholdText;
-          document.getElementById('hint-reentry-value').textContent = reentryText;
-          document.getElementById('rule-reentry-value').textContent = reentryText;
-          document.getElementById('rule-take-profit-value').textContent = takeProfitText;
-          document.getElementById('rule-stop-loss-value').textContent = stopLossText;
-          document.getElementById('rule-default-lev').textContent = defaultLevText;
-          document.getElementById('rule-max-lev').textContent = maxLevText;
+          const setText = (id, value) => {{
+            const el = document.getElementById(id);
+            if (el) el.textContent = value;
+          }};
+          setText('hint-price-value', priceText);
+          setText('hint-min-notional', minNotionalText);
+          setText('hint-max-order-notional', maxOrderText);
+          setText('hint-max-position', maxPositionText);
+          setText('hint-liq-threshold', liqThresholdText);
+          setText('hint-pyramid-value', pyramidCapText);
+          setText('hint-reentry-value', reentryText);
+          setText('hint-take-profit-value', takeProfitText);
+          setText('hint-stop-loss-value', stopLossText);
+          setText('hint-cooldown-value', cooldownText);
         }};
         ['input', 'change'].forEach((eventName) => {{{{
-          [priceInput, drawdownInput, lossInput, cooldownInput, minNotionalInput, pyramidInput, liquidationInput, pyramidReentryInput, takeProfitInput, stopLossInput, defaultLevInput, maxLevInput].forEach((input) => {{{{
-            input.addEventListener(eventName, updateRules);
+          [priceInput, drawdownInput, lossInput, cooldownInput, minNotionalInput, maxOrderInput, maxPositionInput, pyramidInput, liquidationInput, pyramidReentryInput, takeProfitInput, stopLossInput, defaultLevInput, maxLevInput].forEach((input) => {{{{
+            input.addEventListener(eventName, updateHints);
           }}}});
         }}}});
-        updateRules();
+        updateHints();
       }}}})();
     </script>
 </body>
@@ -2015,8 +2088,38 @@ OKX_TEMPLATE = r"""
         .inline-form {{ display: inline-flex; align-items: center; margin: 0; }}
         .btn-refresh {{ font-size: 12px; padding: 4px 8px; border-radius: 6px; border: 1px solid #38bdf8; color: #38bdf8; text-decoration: none; background: transparent; }}
         .btn-refresh:hover {{ background-color: rgba(56, 189, 248, 0.15); }}
-        .btn-close {{ background-color: #f87171; color: #0f172a; border: none; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-weight: 600; }}
-        .btn-close:hover {{ background-color: #ef4444; }}
+        .btn-close {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 6px 18px;
+            border-radius: 999px;
+            border: 1px solid rgba(248, 113, 113, 0.6);
+            background-image: linear-gradient(135deg, #f87171, #f43f5e);
+            color: #fff;
+            font-weight: 600;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.15s ease;
+            box-shadow: 0 8px 18px rgba(248, 113, 113, 0.35);
+        }}
+        .btn-close:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 12px 24px rgba(248, 113, 113, 0.45);
+            opacity: 0.95;
+        }}
+        .btn-close:active {{
+            transform: translateY(1px);
+            box-shadow: 0 5px 12px rgba(248, 113, 113, 0.3);
+        }}
+        .btn-close-full {{
+            padding-top: 18px;
+            padding-bottom: 18px;
+            background-image: linear-gradient(135deg, #fb923c, #f97316);
+            border-color: rgba(251, 146, 60, 0.8);
+            box-shadow: 0 10px 24px rgba(251, 146, 60, 0.45);
+        }}
         .local-time {{ color: #94a3b8; font-size: 0.9rem; }}
         .flash {{ margin: 12px 0; padding: 12px 16px; border-radius: 10px; font-size: 0.95rem; }}
         .flash.success {{ background-color: rgba(74, 222, 128, 0.12); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.3); }}
@@ -2032,7 +2135,7 @@ OKX_TEMPLATE = r"""
         .manual-action button {{ margin: 0; white-space: nowrap; }}
         .panel-head {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 0.5rem; }}
         .hint {{ color: #94a3b8; font-size: 0.85rem; margin: 0; }}
-        .btn-cancel {{ 
+        .btn-cancel {{
             display: inline-flex;
             align-items: center;
             justify-content: center;
@@ -2056,6 +2159,40 @@ OKX_TEMPLATE = r"""
         .btn-cancel:active {{
             transform: translateY(1px);
             box-shadow: 0 5px 12px rgba(239, 68, 68, 0.35);
+        }}
+        .btn-scale {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 6px 16px;
+            border-radius: 999px;
+            border: 1px solid rgba(34, 197, 94, 0.6);
+            background-image: linear-gradient(135deg, #22c55e, #16a34a);
+            color: #fff;
+            font-weight: 600;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.15s ease;
+            box-shadow: 0 8px 18px rgba(34, 197, 94, 0.35);
+        }}
+        .btn-scale:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 12px 24px rgba(34, 197, 94, 0.45);
+            opacity: 0.95;
+        }}
+        .btn-scale:active {{
+            transform: translateY(1px);
+            box-shadow: 0 5px 12px rgba(34, 197, 94, 0.3);
+        }}
+        .action-pair {{
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }}
+        .action-pair.full {{
+            justify-content: space-between;
+            min-height: 96px;
         }}
     </style>
 </head>
