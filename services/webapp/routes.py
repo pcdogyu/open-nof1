@@ -150,6 +150,7 @@ _SCHEDULER_SETTINGS: dict[str, object] = {
 
 # Cache for boot-time orderbook priming so first requests can avoid hitting upstreams.
 _ORDERBOOK_WARM_CACHE: dict | None = None
+_OKX_INSTRUMENT_MAP: dict[str, dict] | None = None
 
 _DEFAULT_RISK_SETTINGS = {
     "price_tolerance_pct": 0.02,
@@ -167,6 +168,30 @@ _DEFAULT_RISK_SETTINGS = {
     "pyramid_reentry_pct": 2.0,
     "liquidation_notional_threshold": 50_000.0,
 }
+
+
+def _get_okx_instrument_meta(inst_id: str) -> dict | None:
+    """Return cached OKX instrument metadata such as lot/min size."""
+    global _OKX_INSTRUMENT_MAP
+    if not inst_id:
+        return None
+    if _OKX_INSTRUMENT_MAP is None:
+        try:
+            _OKX_INSTRUMENT_MAP = {
+                str(entry.get("instId", "")).upper(): entry
+                for entry in load_catalog_cache()
+                if entry.get("instId")
+            }
+        except Exception:
+            _OKX_INSTRUMENT_MAP = {}
+    return _OKX_INSTRUMENT_MAP.get(str(inst_id).upper())
+
+
+def _try_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float | int]:
@@ -1143,6 +1168,7 @@ def close_okx_position(
     )
     client = OkxPaperClient()
     symbol = instrument_id.upper()
+    position_size: float | None = None
     try:
         client.authenticate(credentials)
         margin_mode_value = _choose_margin_mode(symbol, meta, margin_mode)
@@ -1153,6 +1179,7 @@ def close_okx_position(
             live_positions = client.fetch_positions(symbols=[symbol])
         except Exception:
             live_positions = []
+        net_position = False
         for entry in live_positions or []:
             inst_id = (entry.get("instId") or "").upper()
             if inst_id != symbol:
@@ -1163,7 +1190,7 @@ def close_okx_position(
                 pos_qty = 0.0
             if pos_qty == 0:
                 continue
-            entry_side = (entry.get("posSide") or entry.get("side") or "").strip()
+            entry_side = (entry.get("posSide") or entry.get("side") or "").strip().lower()
             if not entry_side:
                 entry_side = "long" if pos_qty > 0 else "short"
             detected_side = entry_side
@@ -1174,15 +1201,60 @@ def close_okx_position(
         if detected_margin_mode:
             margin_mode_value = detected_margin_mode
         if detected_side:
-            if detected_side.lower() == "net":
+            if detected_side == "net":
                 pos_side_payload = None
+                net_position = True
             else:
-                pos_side_payload = detected_side
-        response = client.close_position(
-            instrument_id=symbol,
-            margin_mode=margin_mode_value,
-            pos_side=pos_side_payload,
+                pos_side_payload = detected_side.upper()
+            try:
+                position_size = abs(float(entry.get("pos", 0.0)))
+            except Exception:
+                position_size = None
+
+        effective_qty = normalized_qty
+        if position_size is not None:
+            effective_qty = min(effective_qty, position_size)
+        instrument_meta = _get_okx_instrument_meta(symbol)
+        lot_size = _try_float(instrument_meta.get("lotSz")) if instrument_meta else None
+        min_size = _try_float(instrument_meta.get("minSz")) if instrument_meta else None
+        if lot_size and lot_size > 0:
+            multiples = math.floor(effective_qty / lot_size)
+            if multiples <= 0:
+                multiples = 1
+            effective_qty = multiples * lot_size
+        if min_size and min_size > 0 and effective_qty < min_size:
+            effective_qty = min_size
+        if position_size is not None and effective_qty > position_size:
+            effective_qty = position_size
+        effective_qty = max(effective_qty, 0.0)
+        if effective_qty <= 0:
+            raise HTTPException(status_code=400, detail="无法计算有效的平仓数量。")
+        normalized_size_str = str(effective_qty)
+        use_market_reduce = (
+            net_position
+            or pos_side_payload is None
+            or position_size is None
+            or normalized_qty < position_size
         )
+        if use_market_reduce:
+            reduce_pos_side = (pos_side_payload or "").lower() or None
+            response = client.place_order(
+                {
+                    "instrument_id": symbol,
+                    "side": close_side,
+                    "order_type": "market",
+                    "size": normalized_size_str,
+                    "margin_mode": margin_mode_value,
+                    "pos_side": reduce_pos_side,
+                    "reduce_only": True,
+                }
+            )
+        else:
+            response = client.close_position(
+                instrument_id=symbol,
+                margin_mode=margin_mode_value,
+                pos_side=pos_side_payload,
+            )
         try:
             get_okx_summary(force_refresh=True, ttl_seconds=0)
         except Exception as refresh_exc:  # pragma: no cover - cache refresh best-effort

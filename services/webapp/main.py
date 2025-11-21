@@ -1,4 +1,4 @@
-﻿# Trigger reloader
+# Trigger reloader
 """
 Entrypoint for the open-nof1.ai user-facing web service.
 """
@@ -569,7 +569,8 @@ def _render_okx_dashboard(summary: dict, order_status: str | None = None, order_
     account_sections: list[str] = []
     for bundle in summary.get("accounts", []):
         account = bundle.get("account", {}) or {}
-        account_id = esc(account.get("account_id"))
+        raw_account_id = account.get("account_id")
+        account_id_display = esc(raw_account_id)
         model_id = esc(account.get("model_id"))
         equity = _format_number(account.get("equity"))
         cash_balance = _format_number(account.get("cash_balance"))
@@ -579,16 +580,17 @@ def _render_okx_dashboard(summary: dict, order_status: str | None = None, order_
         starting_equity = _format_number(account.get("starting_equity"))
 
         balances_html = _render_balances_table(bundle.get("balances", []))
-        positions_html = _render_positions_table(bundle.get("positions", []), account_id=account_id)
+        positions_html = _render_positions_table(bundle.get("positions", []), account_id=raw_account_id)
         trades_html = _render_trades_table(bundle.get("recent_trades", []))
-        orders_html = _render_orders_table(bundle.get("open_orders", []), account_id=account_id)
+        orders_html = _render_orders_table(bundle.get("open_orders", []), account_id=raw_account_id)
         curve_html = _render_equity_curve(bundle.get("equity_curve", []))
+        close_all_html = _render_close_all_button(raw_account_id)
 
         account_sections.append(
             f"""
-            <section class=\"okx-card\">
+            <section class="okx-card">
                 <header>
-                    <h2>{account_id or '未命名账户'}</h2>
+                    <h2>{account_id_display or 'δ�����˻�'}</h2>
                     <table class='dense summary-table'>
                         <tr>
                             <th>模型</th>
@@ -602,29 +604,32 @@ def _render_okx_dashboard(summary: dict, order_status: str | None = None, order_
                             <td>{starting_equity} USD</td>
                             <td>{equity} USD</td>
                             <td>{cash_balance} USD</td>
-                            <td><span class=\"{pnl_class}\">{pnl} USD</span></td>
+                            <td><span class="{pnl_class}">{pnl} USD</span></td>
                         </tr>
                     </table>
                 </header>
                 <div class="panel">
-                    <h3>持仓明细</h3>
+                    <div class="panel-head">
+                        <h3>持仓明细</h3>
+                        {close_all_html}
+                    </div>
                     {positions_html}
                 </div>
-                <div class=\"panel\">
+                <div class="panel">
                     <h3>挂单列表</h3>
                     {orders_html}
                 </div>
-                <div class=\"split\">
-                    <div class=\"panel\">
+                <div class="split">
+                    <div class="panel">
                         <h3>余额信息</h3>
                         {balances_html}
                     </div>
-                    <div class=\"panel recent-trades-panel\">
+                    <div class="panel recent-trades-panel">
                         <h3>近期成交</h3>
                         {trades_html}
                     </div>
                 </div>
-                <div class=\"panel\">
+                <div class="panel">
                     <h3>资产曲线</h3>
                     {curve_html}
                 </div>
@@ -1033,6 +1038,12 @@ def _render_balances_table(balances: Sequence[dict] | None) -> str:
 def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str | None = None) -> str:
     esc = _escape
     rows: list[str] = []
+
+    def _fmt_quantity(value: float) -> str:
+        text = f"{value:.8f}"
+        text = text.rstrip("0").rstrip(".")
+        return text or "0"
+
     for pos in positions or []:
         account_value = esc(account_id or pos.get("account_id") or "")
         instrument_value = esc(pos.get("instrument_id"))
@@ -1065,6 +1076,15 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
                     margin = None
         if margin is None and qty > 0 and mark_px > 0 and leverage > 0:
             margin = (qty * mark_px) / leverage
+        frozen_amount = None
+        raw_frozen = pos.get("initial_margin")
+        if raw_frozen not in (None, ""):
+            try:
+                frozen_amount = float(raw_frozen)
+            except (TypeError, ValueError):
+                frozen_amount = None
+        if frozen_amount is None:
+            frozen_amount = margin
         pnl_pct = None
         if entry_px > 0 and mark_px > 0:
             delta = (mark_px - entry_px)
@@ -1076,15 +1096,27 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             pct_value = _format_number(pnl_pct)
             pct_class = "pnl-positive" if pnl_pct >= 0 else "pnl-negative"
             pnl_pct_cell = f"<span class='{pct_class}'>{pct_value}%</span>"
+
+        def _close_form(label: str, qty_value: str) -> str:
+            return (
+                "<form method='post' action='/okx/close-position' class='inline-form'>"
+                f"<input type='hidden' name='account_id' value='{account_value}'>"
+                f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
+                f"<input type='hidden' name='position_side' value='{side_value}'>"
+                f"<input type='hidden' name='quantity' value='{qty_value}'>"
+                f"<button type='submit' class='btn-close'>{label}</button>"
+                "</form>"
+            )
+
+        close_forms: list[str] = []
+        if qty > 0:
+            for portion, label in ((0.1, "平仓10%"), (0.2, "平仓20%"), (0.5, "平仓50%")):
+                partial_qty = max(qty * portion, 0.0001)
+                close_forms.append(_close_form(label, esc(_fmt_quantity(partial_qty))))
+        close_forms.append(_close_form("全部平仓", quantity_value))
         action_html = (
-            "<div style='display:flex; justify-content:center;'>"
-            "<form method='post' action='/okx/close-position' class='inline-form'>"
-            f"<input type='hidden' name='account_id' value='{account_value}'>"
-            f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
-            f"<input type='hidden' name='position_side' value='{side_value}'>"
-            f"<input type='hidden' name='quantity' value='{quantity_value}'>"
-            "<button type='submit' class='btn-close'>平仓</button>"
-            "</form>"
+            "<div class='close-actions' style='display:flex; flex-wrap:wrap; gap:6px; justify-content:flex-end;'>"
+            f"{''.join(close_forms)}"
             "</div>"
         )
         rows.append(
@@ -1095,13 +1127,13 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             f"<td>{leverage_display}</td>"
             f"<td>{_format_number(pos.get('quantity'))}</td>"
             f"<td>{_format_number(pos.get('entry_price'))}</td>"
-            f"<td>{_format_number(pos.get('mark_price'))}</td>"
             f"<td>{_format_number(pos.get('last_price') or pos.get('last') or pos.get('mark_price'))}</td>"
             f"<td>{_format_number(margin)}</td>"
+            f"<td>{_format_number(frozen_amount)}</td>"
             f"<td>{_format_number(pos.get('unrealized_pnl'))}</td>"
             f"<td>{pnl_pct_cell}</td>"
             f"<td>{esc(_format_asia_shanghai(pos.get('created_at') or pos.get('updated_at')))}</td>"
-            f"<td>{action_html}</td>"
+            f"<td class='action-col'>{action_html}</td>"
             "</tr>"
         )
     if not rows:
@@ -1109,22 +1141,25 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
 
     table_html = (
         "<table class='dense'>"
-        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>标记价格</th><th>最新价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th>操作</th></tr></thead>"
+        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>最新价格</th><th>保证金</th><th>资金冻结</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th class='action-col'>操作</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
-    close_all_wrapper = ""
-    if account_id:
-        close_all_wrapper = (
-            "<div style='display:flex; justify-content:flex-end; align-items:flex-end; margin-bottom:8px;'>"
-            "<form method='post' action='/okx/close-all-positions' class='inline-form' "
-            "onsubmit=\"return confirm('确认平仓该账户的所有仓位？');\">"
-            f"<input type='hidden' name='account_id' value='{account_id}'>"
-            "<button type='submit' class='btn-close'>一键平仓全部</button>"
-            "</form>"
-            "</div>"
-        )
-    return f"<div class='positions-table-wrapper'>{close_all_wrapper}{table_html}</div>"
+    return table_html
+
+
+def _render_close_all_button(account_id: str | None) -> str:
+    if not account_id:
+        return ""
+    esc = _escape
+    return (
+        "<form method='post' action='/okx/close-all-positions' class='inline-form close-all-form' "
+        "onsubmit=\"return confirm('确认平仓该账户的所有仓位？');\">"
+        f"<input type='hidden' name='account_id' value='{esc(account_id)}'>"
+        "<button type='submit' class='btn-close'>一键平仓全部</button>"
+        "</form>"
+    )
+
 def _render_trades_table(trades: Sequence[dict] | None) -> str:
     esc = _escape
     valid_symbols = {"ETH-USDT-SWAP", "BTC-USDT-SWAP"}
@@ -1973,6 +2008,7 @@ OKX_TEMPLATE = r"""
         .recent-trades-panel table {{ table-layout: auto; }}
         table.dense {{ width: 100%; border-collapse: collapse; margin-top: 0.5rem; background-color: rgba(15, 23, 42, 0.6); border-radius: 6px; overflow: hidden; }}
         table.dense th, table.dense td {{ padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 0.9rem; }}
+        table.dense th.action-col, table.dense td.action-col {{ text-align: center; }}
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
         ul.curve-list li {{ padding: 6px 0; border-bottom: 1px dashed #334155; font-size: 0.9rem; }}
         .inline-row {{ display: inline-flex; align-items: center; gap: 10px; margin: 0; }}
@@ -1985,13 +2021,16 @@ OKX_TEMPLATE = r"""
         .flash {{ margin: 12px 0; padding: 12px 16px; border-radius: 10px; font-size: 0.95rem; }}
         .flash.success {{ background-color: rgba(74, 222, 128, 0.12); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.3); }}
         .flash.error {{ background-color: rgba(248, 113, 113, 0.12); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.3); }}
-        .manual-card {{ background-color: #1e293b; border-radius: 12px; padding: 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); }}
-        .manual-form {{ display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }}
-        .manual-form label {{ display: flex; flex-direction: column; gap: 6px; color: #94a3b8; font-size: 0.9rem; }}
+        .manual-card {{ background-color: #1e293b; border-radius: 12px; padding: 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); margin-top: 1.5rem; }}
+        .manual-form {{ display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; }}
+        .manual-field {{ display: flex; flex-direction: column; gap: 6px; color: #94a3b8; font-size: 0.9rem; min-width: 160px; flex: 0 0 auto; }}
+        .manual-field.flex {{ flex: 1 1 220px; }}
         .manual-form input, .manual-form select {{ border-radius: 8px; border: 1px solid #334155; background-color: #0f172a; color: #e2e8f0; padding: 10px; font-size: 0.95rem; }}
-        .manual-form .actions {{ grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; }}
         .manual-form button {{ background-color: #38bdf8; color: #0f172a; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; }}
         .manual-form button:hover {{ background-color: #0ea5e9; }}
+        .manual-action {{ display: flex; align-items: center; }}
+        .manual-action button {{ margin: 0; white-space: nowrap; }}
+        .panel-head {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 0.5rem; }}
         .hint {{ color: #94a3b8; font-size: 0.85rem; margin: 0; }}
         .btn-cancel {{ 
             display: inline-flex;
@@ -2040,35 +2079,35 @@ OKX_TEMPLATE = r"""
     <section class="manual-card">
       <h2>手动下单</h2>
       <form class="manual-form" method="post" action="/okx/manual-order">
-        <label>账户
+        <label class="manual-field">账户
           <select name="account_id" required>
             {manual_account_options}
           </select>
         </label>
-        <label>合约
+        <label class="manual-field">合约
           <select name="instrument_id" required>
             {manual_instrument_options}
           </select>
         </label>
-        <label>方向
+        <label class="manual-field">方向
           <select name="side" required>
             <option value="buy">买入</option>
             <option value="sell">卖出</option>
           </select>
         </label>
-        <label>类型
+        <label class="manual-field">类型
           <select name="order_type" id="order-type" required>
             <option value="limit">限价</option>
             <option value="market">市价</option>
           </select>
         </label>
-        <label>数量
+        <label class="manual-field">数量
           <input type="number" step="any" min="0" name="size" required>
         </label>
-        <label>价格（限价必填）
+        <label class="manual-field flex">价格（限价必填）
           <input type="number" step="any" min="0" name="price" id="price-input" placeholder="市价单可留空">
         </label>
-        <label>保证金模式
+        <label class="manual-field">保证金模式
           <select name="margin_mode">
             <option value="">自动</option>
             <option value="cross">全仓</option>
@@ -2076,9 +2115,8 @@ OKX_TEMPLATE = r"""
             <option value="cash">现货</option>
           </select>
         </label>
-        <div class="actions">
+        <div class="manual-action">
           <button type="submit">提交订单</button>
-          <p class="hint">使用 OKX 模拟接口下单，自动补充账户 API 密钥。</p>
         </div>
       </form>
     </section>
@@ -3190,3 +3228,4 @@ ORDERBOOK_TEMPLATE = r"""
 </body>
 </html>
 """
+
