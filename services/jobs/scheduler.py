@@ -119,6 +119,8 @@ _DEFAULT_RISK_CONFIG = {
     "max_position": 0.0,
     "take_profit_pct": 0.0,
     "stop_loss_pct": 0.0,
+    "position_take_profit_pct": 5.0,
+    "position_stop_loss_pct": 3.0,
     "pyramid_max_orders": 5,
     "pyramid_reentry_pct": 2.0,
     "liquidation_notional_threshold": 50_000.0,
@@ -139,9 +141,11 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
             "min_notional_usd",
             "max_order_notional_usd",
             "max_position",
-            "pyramid_max_orders",
             "take_profit_pct",
             "stop_loss_pct",
+            "position_take_profit_pct",
+            "position_stop_loss_pct",
+            "pyramid_max_orders",
             "pyramid_reentry_pct",
             "liquidation_notional_threshold",
             "liquidation_same_direction_count",
@@ -159,6 +163,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     pyramid_max = int(config.get("pyramid_max_orders", 0))
     take_profit = float(config.get("take_profit_pct", 0.0))
     stop_loss = float(config.get("stop_loss_pct", 0.0))
+    position_take_profit = float(config.get("position_take_profit_pct", 5.0))
+    position_stop_loss = float(config.get("position_stop_loss_pct", 3.0))
     reentry_pct = float(config.get("pyramid_reentry_pct", 0.0))
     liquidation_notional = float(config.get("liquidation_notional_threshold", 50_000.0))
     same_direction_count = int(config.get("liquidation_same_direction_count", 4))
@@ -174,6 +180,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     max_position = max(0.0, max_position)
     take_profit = max(0.0, min(500.0, take_profit))
     stop_loss = max(0.0, min(95.0, stop_loss))
+    position_take_profit = max(0.0, min(500.0, position_take_profit))
+    position_stop_loss = max(0.0, min(95.0, position_stop_loss))
     reentry_pct = max(0.0, min(50.0, reentry_pct))
     liquidation_notional = max(0.0, liquidation_notional)
     pyramid_max = max(0, min(100, pyramid_max))
@@ -190,6 +198,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
         "max_position": max_position,
         "take_profit_pct": take_profit,
         "stop_loss_pct": stop_loss,
+        "position_take_profit_pct": position_take_profit,
+        "position_stop_loss_pct": position_stop_loss,
         "pyramid_max_orders": pyramid_max,
         "pyramid_reentry_pct": reentry_pct,
         "liquidation_notional_threshold": liquidation_notional,
@@ -295,6 +305,8 @@ def update_risk_configuration(
     max_position: float = 0.0,
     take_profit_pct: float = 0.0,
     stop_loss_pct: float = 0.0,
+    position_take_profit_pct: float = 5.0,
+    position_stop_loss_pct: float = 3.0,
     pyramid_max_orders: int = 0,
     pyramid_reentry_pct: float = 0.0,
     liquidation_notional_threshold: float = 50_000.0,
@@ -314,6 +326,8 @@ def update_risk_configuration(
             "max_position": max_position,
             "take_profit_pct": take_profit_pct,
             "stop_loss_pct": stop_loss_pct,
+            "position_take_profit_pct": position_take_profit_pct,
+            "position_stop_loss_pct": position_stop_loss_pct,
             "pyramid_max_orders": pyramid_max_orders,
             "pyramid_reentry_pct": pyramid_reentry_pct,
             "liquidation_notional_threshold": liquidation_notional_threshold,
@@ -777,7 +791,7 @@ async def _scan_liquidation_flow_job() -> Dict[str, str]:
     started = datetime.now(tz=timezone.utc)
     try:
         highlights: list[str] = []
-        records: list[tuple[str, float, str]] = []
+        records: list[tuple[str, float, str, Optional[float]]] = []
         now = datetime.now(tz=timezone.utc)
         for instrument in instruments:
             features = _load_market_features(instrument)
@@ -793,22 +807,24 @@ async def _scan_liquidation_flow_job() -> Dict[str, str]:
                 age = max(0, int((now - ts).total_seconds()))
                 age_label = f"@{age}s"
             highlights.append(f"{instrument}:{net_qty:+.2f}{age_label}")
-            records.append((instrument, float(net_qty), age_label))
+            liq_notional = _try_float(features.get("liq_notional"))
+            records.append((instrument, float(net_qty), age_label, liq_notional))
         if highlights:
             preview = " | ".join(highlights[:4])
             if len(highlights) > 4:
                 preview += " | ..."
             suggestions = []
-            for inst, qty, label in records[:3]:
-                direction_hint = "逢低加多" if qty > 0 else "逢高做空"
-                suggestions.append(f"{inst}：{direction_hint}，净爆仓 {qty:+.2f}{label}")
+            for inst, qty, label, notional_value in records[:3]:
+                direction_hint = "建议逢低加多" if qty > 0 else "建议逢高做空"
+                notional_hint = f"，约 {notional_value:,.0f} USDT" if notional_value else ""
+                suggestions.append(f"{direction_hint} {inst}，净爆仓 {qty:+.2f}{label}{notional_hint}")
             advice = " | ".join(suggestions)
             detail = (
-                f"扫描 {len(instruments)} 个合约，检测到 {len(highlights)} 条爆仓流：{preview}"
+                f"扫描 {len(instruments)} 个合约，检测到 {len(highlights)} 条爆仓簇：{preview}"
                 f"{' | ' + advice if advice else ''}"
             )
         else:
-            detail = f"扫描 {len(instruments)} 个合约，暂无爆仓流事件"
+            detail = f"扫描 {len(instruments)} 个合约，暂无新的爆仓信号。"
         duration = (datetime.now(tz=timezone.utc) - started).total_seconds()
         _append_execution_log("liquidation", "success", detail, duration_seconds=duration)
         return {"status": "success", "detail": detail}
@@ -975,7 +991,7 @@ async def _process_account_signal(
         request, response = manual_signal
         debug_entry["decision_actionable"] = True
         debug_entry["automation"] = "liquidation_reversal"
-        debug_entry["notes"] = "净爆仓静默 60s 触发自动下单"
+        debug_entry["notes"] = "爆仓逆转由人工触发，默认 60 秒后自动复位。"
     else:
         request = _build_signal_request(
             model_id=account.model_id,
@@ -987,7 +1003,7 @@ async def _process_account_signal(
 
         if request is None:
             logger.debug("Unable to build signal request for %s; skipping", account_key)
-            debug_entry["notes"] = "缺少可交易合约"
+            debug_entry["notes"] = "缺乏可交易合约或行情，无法生成信号。"
             _record_order_debug_entry(debug_entry)
             return False, None
         liquidation_alert = _annotate_liquidation_hint(request)
@@ -1209,9 +1225,10 @@ def _format_liquidation_debug_summary(
     )
     notional = meta.get("liquidation_notional")
     try:
-        notional_text = f"{float(notional):+.2f}"
+        notional_value = abs(float(notional))
+        notional_text = f"{notional_value:,.0f} USDT"
     except (TypeError, ValueError):
-        notional_text = str(notional) if notional is not None else "-"
+        notional_text = str(notional) if notional is not None else "--"
     if routed and routed.intent:
         side = routed.intent.side
         size = routed.intent.size
@@ -1219,13 +1236,14 @@ def _format_liquidation_debug_summary(
         suggested = response.suggested_order or {}
         side = suggested.get("side", "-")
         size = suggested.get("size", "-")
-    side_lower = str(side).lower()
-    action = "加多" if side_lower == "buy" else "加空"
     size_text = "-" if size in (None, "") else str(size)
+    direction_label = "????" if direction == "short" else "????"
+    guidance = "??????" if direction == "short" else "??????"
     return (
-        f"爆仓巡检：处理 1 个合约（{instrument}），提交 {side or '-'} {size_text}，"
-        f"建议{action}，净爆仓 {notional_text}（{direction}）"
+        f"?? 1 ?????? {side or '-'} {size_text}?"
+        f"?????{instrument} {direction_label}???? {notional_text}?{guidance}?"
     )
+
 
 
 def _record_ai_signal_entry(
@@ -1391,6 +1409,8 @@ def _build_signal_request(
     )
     with _RISK_CONFIG_LOCK:
         risk_max_position = float(_RISK_CONFIG.get("max_position", 0.0))
+        risk_position_tp = float(_RISK_CONFIG.get("position_take_profit_pct", 5.0))
+        risk_position_sl = float(_RISK_CONFIG.get("position_stop_loss_pct", 3.0))
     try:
         meta_max_position = float(meta.get("max_position")) if "max_position" in meta else 0.0
     except (TypeError, ValueError):
@@ -1405,6 +1425,8 @@ def _build_signal_request(
         notes={
             "account_id": account.account_id,
             "equity": account.equity,
+            "position_take_profit_pct": risk_position_tp,
+            "position_stop_loss_pct": risk_position_sl,
         },
     )
     for key in ("funding_rate", "orderbook_imbalance", "cvd"):
@@ -1753,7 +1775,7 @@ def _evaluate_liquidation_reversal_state(
     with _RISK_CONFIG_LOCK:
         liq_threshold = float(_RISK_CONFIG.get("liquidation_notional_threshold", 50_000.0))
         same_required = int(_RISK_CONFIG.get("liquidation_same_direction_count", 4))
-        opposite_required = int(_RISK_CONFIG.get("liquidation_opposite_count", 3))
+        confirmation_required = int(_RISK_CONFIG.get("liquidation_opposite_count", 3))
         silence_required = float(_RISK_CONFIG.get("liquidation_silence_seconds", 300.0))
     if liq_threshold <= 0:
         return None
@@ -1771,6 +1793,9 @@ def _evaluate_liquidation_reversal_state(
             "candidate_direction": None,
             "last_same_time": None,
             "opposite_count": 0,
+            "last_large_event": None,
+            "silence_armed": False,
+            "post_silence_same_count": 0,
         },
     )
     history: deque = state["history"]
@@ -1782,6 +1807,17 @@ def _evaluate_liquidation_reversal_state(
     candidate_dir = state.get("candidate_direction")
     eligible_same = notional is not None and notional >= liq_threshold
 
+    previous_large = state.get("last_large_event")
+    if eligible_same:
+        if isinstance(previous_large, datetime):
+            gap = (event_time - previous_large).total_seconds()
+            if candidate_dir is not None and not state.get("silence_armed") and gap >= silence_required:
+                state["silence_armed"] = True
+                state["post_silence_same_count"] = 0
+        state["last_large_event"] = event_time
+    silence_armed = bool(state.get("silence_armed"))
+    post_silence_same = int(state.get("post_silence_same_count") or 0)
+
     if eligible_same:
         history.append((event_time, sign))
         same_count = sum(1 for ts, sg in history if sg == sign)
@@ -1789,10 +1825,24 @@ def _evaluate_liquidation_reversal_state(
             state["candidate_direction"] = sign
             state["last_same_time"] = event_time
             state["opposite_count"] = 0
+            state["silence_armed"] = False
+            state["post_silence_same_count"] = 0
             return None
         if candidate_dir == sign:
             state["last_same_time"] = event_time
             state["opposite_count"] = 0
+            if silence_armed:
+                post_silence_same += 1
+                state["post_silence_same_count"] = post_silence_same
+                if post_silence_same >= confirmation_required:
+                    state["candidate_direction"] = None
+                    state["last_same_time"] = None
+                    state["opposite_count"] = 0
+                    state["silence_armed"] = False
+                    state["post_silence_same_count"] = 0
+                    state["last_large_event"] = event_time
+                    history.clear()
+                    return ("long" if sign > 0 else "short", abs_qty, event_time)
             return None
     elif candidate_dir is None:
         return None
@@ -1816,12 +1866,15 @@ def _evaluate_liquidation_reversal_state(
         return None
 
     state["opposite_count"] = int(state.get("opposite_count") or 0) + 1
-    if state["opposite_count"] < opposite_required:
+    if state["opposite_count"] < confirmation_required:
         return None
 
     state["candidate_direction"] = None
     state["last_same_time"] = None
     state["opposite_count"] = 0
+    state["silence_armed"] = False
+    state["post_silence_same_count"] = 0
+    state["last_large_event"] = event_time
     history.clear()
     return ("long" if sign > 0 else "short", abs_qty, event_time)
 

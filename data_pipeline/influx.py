@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List
 import json
 import os
+import random
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 
@@ -28,14 +29,54 @@ class InfluxConfig:
         url = os.getenv("INFLUX_URL")
         org = os.getenv("INFLUX_ORG")
         bucket = os.getenv("INFLUX_BUCKET")
+        tokens_env = os.getenv("INFLUX_TOKENS")
+        if tokens_env:
+            candidates = [
+                t.strip()
+                for t in tokens_env.split(",")
+                if t.strip() and not t.upper().startswith("REPLACE")
+            ]
+            if candidates:
+                token = random.choice(candidates)
+
+        chosen_profile: dict[str, str] | None = None
+
         if not token:
             try:  # fallback to config.py
-                from config import INFLUX_TOKEN, INFLUX_URL, INFLUX_ORG, INFLUX_BUCKET  # type: ignore
+                import config as config_module  # type: ignore
 
-                token = INFLUX_TOKEN
-                url = url or INFLUX_URL
-                org = org or INFLUX_ORG
-                bucket = bucket or INFLUX_BUCKET
+                profile_pool: list[dict[str, str]] = []
+                if hasattr(config_module, "INFLUX_PROFILES"):
+                    raw_profiles = getattr(config_module, "INFLUX_PROFILES")
+                    if isinstance(raw_profiles, (list, tuple)):
+                        for profile in raw_profiles:
+                            if not isinstance(profile, dict):
+                                continue
+                            if not profile.get("enabled", True):
+                                continue
+                            token_candidate = profile.get("token")
+                            if token_candidate and not str(token_candidate).upper().startswith("REPLACE"):
+                                profile_pool.append(profile)
+                if profile_pool:
+                    chosen_profile = random.choice(profile_pool)
+                    token = chosen_profile.get("token")
+                else:
+                    token_pool = []
+                    if hasattr(config_module, "INFLUX_TOKENS"):
+                        raw_tokens = getattr(config_module, "INFLUX_TOKENS")
+                        if isinstance(raw_tokens, (list, tuple)):
+                            token_pool.extend(
+                                [t for t in raw_tokens if t and not str(t).upper().startswith("REPLACE")]
+                            )
+                    if hasattr(config_module, "INFLUX_TOKEN"):
+                        default_token = getattr(config_module, "INFLUX_TOKEN")
+                        if default_token and not str(default_token).upper().startswith("REPLACE"):
+                            token_pool.append(default_token)
+                    if token_pool:
+                        token = random.choice(token_pool)
+                url = (chosen_profile or {}).get("url") or url or getattr(config_module, "INFLUX_URL", None)
+                org = (chosen_profile or {}).get("org") or org or getattr(config_module, "INFLUX_ORG", None)
+                bucket = (chosen_profile or {}).get("bucket") or bucket or getattr(config_module, "INFLUX_BUCKET", None)
             except ModuleNotFoundError:
                 pass
         return InfluxConfig(

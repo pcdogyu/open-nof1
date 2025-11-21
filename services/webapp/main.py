@@ -277,6 +277,8 @@ def submit_risk_settings(
     max_position: float = Form(0),
     take_profit_pct: float = Form(0),
     stop_loss_pct: float = Form(0),
+    position_take_profit_pct: float = Form(5),
+    position_stop_loss_pct: float = Form(3),
     default_leverage: int = Form(1),
     max_leverage: int = Form(125),
     pyramid_max_orders: int = Form(5),
@@ -296,6 +298,8 @@ def submit_risk_settings(
         max_position=max_position,
         take_profit_pct=take_profit_pct,
         stop_loss_pct=stop_loss_pct,
+        position_take_profit_pct=position_take_profit_pct,
+        position_stop_loss_pct=position_stop_loss_pct,
         default_leverage=default_leverage,
         max_leverage=max_leverage,
         pyramid_max_orders=pyramid_max_orders,
@@ -941,6 +945,8 @@ def _render_order_debug_page(entries: Sequence[dict]) -> str:
                 summaries.append(str(auto_summary))
         elif entry.get("signal_summary"):
             summaries.append(str(entry.get("signal_summary")))
+        if entry.get("liquidation_hint"):
+            summaries.append(f"提示：{entry.get('liquidation_hint')}")
         if entry.get("notes"):
             summaries.append(str(entry.get("notes")))
         note_content = "<br>".join(esc(item) for item in summaries if item)
@@ -982,8 +988,10 @@ def _render_risk_page(settings: dict) -> str:
     max_order_notional = max(0.0, min(1_000_000.0, float(settings.get("max_order_notional_usd") or 0.0)))
     max_position_val = max(0.0, float(settings.get("max_position") or 0.0))
     pyramid_max_orders = max(0, min(100, int(settings.get("pyramid_max_orders") or 0)))
-    take_profit_pct = max(0.0, min(500.0, float(settings.get("take_profit_pct") or 0.0)))
-    stop_loss_pct = max(0.0, min(95.0, float(settings.get("stop_loss_pct") or 0.0)))
+    take_profit_pct = max(0.0, min(500.0, float(settings.get("take_profit_pct") or settings.get("portfolio_take_profit_pct") or 0.0)))
+    stop_loss_pct = max(0.0, min(95.0, float(settings.get("stop_loss_pct") or settings.get("portfolio_stop_loss_pct") or 0.0)))
+    position_take_profit_pct = max(0.0, min(500.0, float(settings.get("position_take_profit_pct") or 5.0)))
+    position_stop_loss_pct = max(0.0, min(95.0, float(settings.get("position_stop_loss_pct") or 3.0)))
     default_leverage = max(1, min(125, int(settings.get("default_leverage") or 1)))
     max_leverage = max(default_leverage, min(125, int(settings.get("max_leverage") or default_leverage)))
     pyramid_reentry_pct = max(0.0, min(50.0, float(settings.get("pyramid_reentry_pct") or 0.0)))
@@ -1003,6 +1011,8 @@ def _render_risk_page(settings: dict) -> str:
     min_notional_text = _compact(min_notional, 2)
     take_profit_text = _compact(take_profit_pct, 2)
     stop_loss_text = _compact(stop_loss_pct, 2)
+    position_take_profit_text = _compact(position_take_profit_pct, 2)
+    position_stop_loss_text = _compact(position_stop_loss_pct, 2)
     max_position_text = _compact(max_position_val, 4)
     default_leverage_text = _compact(default_leverage, 0)
     max_leverage_text = _compact(max_leverage, 0)
@@ -1036,6 +1046,10 @@ def _render_risk_page(settings: dict) -> str:
         stop_loss_pct=esc(f"{stop_loss_pct:.2f}"),
         take_profit_display=esc(take_profit_text),
         stop_loss_display=esc(stop_loss_text),
+        position_take_profit_pct=esc(f"{position_take_profit_pct:.2f}"),
+        position_stop_loss_pct=esc(f"{position_stop_loss_pct:.2f}"),
+        position_take_profit_display=esc(position_take_profit_text),
+        position_stop_loss_display=esc(position_stop_loss_text),
         default_leverage=esc(str(default_leverage)),
         max_leverage=esc(str(max_leverage)),
         default_leverage_display=esc(default_leverage_text),
@@ -1949,13 +1963,21 @@ RISK_TEMPLATE = r"""
                         <input id="max-leverage" type="number" name="max_leverage" min="1" max="125" step="1" value="{max_leverage}" required>
                         <span class="hint">不得低于默认杠杆。</span>
                     </label>
-                    <label for="take-profit">止盈阈值（%）
+                    <label for="take-profit">组合止盈阈值（%）
                         <input id="take-profit" type="number" name="take_profit_pct" min="0" max="500" step="0.1" value="{take_profit_pct}" required>
-                        <span class="hint">未实现收益 ≥ <span id="hint-take-profit-value">{take_profit_display}</span>% 时停止开仓。</span>
+                        <span class="hint">组合未实现收益 ≥ <span id="hint-take-profit-value">{take_profit_display}</span>% 时停止加仓。</span>
                     </label>
-                    <label for="stop-loss">止损阈值（%）
+                    <label for="stop-loss">组合止损阈值（%）
                         <input id="stop-loss" type="number" name="stop_loss_pct" min="0" max="95" step="0.1" value="{stop_loss_pct}" required>
-                        <span class="hint">未实现亏损 ≤ -<span id="hint-stop-loss-value">{stop_loss_display}</span>% 时停止开仓。</span>
+                        <span class="hint">组合未实现亏损 ≤ -<span id="hint-stop-loss-value">{stop_loss_display}</span>% 时停止加仓。</span>
+                    </label>
+                    <label for="position-take-profit">单笔/仓位止盈（%）
+                        <input id="position-take-profit" type="number" name="position_take_profit_pct" min="0" max="500" step="0.1" value="{position_take_profit_pct}" required>
+                        <span class="hint">默认 <span id="hint-position-tp">{position_take_profit_display}</span>%；用于仓位级别的止盈挂单。</span>
+                    </label>
+                    <label for="position-stop-loss">单笔/仓位止损（%）
+                        <input id="position-stop-loss" type="number" name="position_stop_loss_pct" min="0" max="95" step="0.1" value="{position_stop_loss_pct}" required>
+                        <span class="hint">默认 <span id="hint-position-sl">{position_stop_loss_display}</span>%；用于仓位级别的止损挂单。</span>
                     </label>
                     <label for="cooldown-seconds">冷静时间（秒）
                         <input id="cooldown-seconds" type="number" name="cooldown_seconds" min="10" max="86400" step="10" value="{cooldown_seconds}" required>

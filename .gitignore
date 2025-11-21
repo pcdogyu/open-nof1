@@ -7,10 +7,16 @@ config.py
 __pycache__/
 *.py[cod]
 *.pyo
+*.pyw
 *.pyd
 *.whl
 *.egg-info/
 *.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.cache/
 
 # Names that include "test" should stay local
 *test*
