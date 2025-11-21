@@ -43,6 +43,7 @@ from services.okx.transform import (
     normalize_positions,
     normalize_trades,
 )
+from services.okx.brackets import apply_bracket_targets
 from services.webapp.dependencies import (
     get_account_repository,
     get_portfolio_registry,
@@ -134,6 +135,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
             "max_order_notional_usd",
             "max_position",
             "pyramid_max_orders",
+            "take_profit_pct",
+            "stop_loss_pct",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -144,6 +147,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     min_notional = float(config["min_notional_usd"])
     max_position = float(config.get("max_position", 0.0))
     pyramid_max = int(config.get("pyramid_max_orders", 0))
+    take_profit = float(config.get("take_profit_pct", 0.0))
+    stop_loss = float(config.get("stop_loss_pct", 0.0))
     price = max(0.001, min(0.5, price))
     drawdown = max(0.1, min(95.0, drawdown))
     max_loss = max(1.0, max_loss)
@@ -152,6 +157,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     max_order_notional = max(0.0, min(1_000_000.0, max_order_notional))
     min_notional = max(0.0, min_notional)
     max_position = max(0.0, max_position)
+    take_profit = max(0.0, min(500.0, take_profit))
+    stop_loss = max(0.0, min(95.0, stop_loss))
     pyramid_max = max(0, min(100, pyramid_max))
     return {
         "price_tolerance_pct": price,
@@ -161,6 +168,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
         "min_notional_usd": min_notional,
         "max_order_notional_usd": max_order_notional,
         "max_position": max_position,
+        "take_profit_pct": take_profit,
+        "stop_loss_pct": stop_loss,
         "pyramid_max_orders": pyramid_max,
     }
 
@@ -1080,7 +1089,17 @@ async def _process_account_signal(
         return False, signal_summary
     debug_entry["risk_passed"] = True
 
-    execution_result, placement_error = await asyncio.to_thread(_place_order, meta, routed.intent)
+    entry_price = _try_float(routed.intent.price)
+    if not entry_price:
+        entry_price = _try_float(getattr(routed.market, "last_price", None))
+    if not entry_price:
+        entry_price = _try_float((routed.market.metadata or {}).get("mid_price") if routed.market and routed.market.metadata else None)
+    execution_result, placement_error = await asyncio.to_thread(
+        _place_order,
+        meta,
+        routed.intent,
+        entry_price,
+    )
     if execution_result is None:
         debug_entry["notes"] = f"交易所下单失败: {placement_error or '未知错误'}"
         debug_entry["placement_error"] = placement_error
@@ -1777,7 +1796,7 @@ def _summarize_okx_error(payload: Optional[dict]) -> str:
     return "; ".join(details)
 
 
-def _place_order(meta: Dict[str, str], intent: OrderIntent) -> tuple[Optional[Dict[str, object]], Optional[str]]:
+def _place_order(meta: Dict[str, str], intent: OrderIntent, entry_price: float | None = None) -> tuple[Optional[Dict[str, object]], Optional[str]]:
     credentials = ExchangeCredentials(
         api_key=meta["api_key"],
         api_secret=meta["api_secret"],
@@ -1792,16 +1811,16 @@ def _place_order(meta: Dict[str, str], intent: OrderIntent) -> tuple[Optional[Di
         return None, str(exc)
 
     try:
-        payload = {
+        payload: Dict[str, object] = {
             "instrument_id": intent.instrument_id,
             "side": intent.side,
             "order_type": intent.order_type,
             "size": intent.size,
             "margin_mode": _choose_margin_mode(intent.instrument_id, meta),
         }
+        meta_payload = intent.metadata if isinstance(intent.metadata, dict) else {}
         if intent.price:
             payload["price"] = intent.price
-        meta_payload = intent.metadata if isinstance(intent.metadata, dict) else {}
         client_order_id = meta_payload.get("client_order_id")
         if client_order_id:
             payload["client_order_id"] = client_order_id
@@ -1810,6 +1829,21 @@ def _place_order(meta: Dict[str, str], intent: OrderIntent) -> tuple[Optional[Di
             payload["pos_side"] = str(pos_side).upper()
         if meta_payload.get("reduce_only"):
             payload["reduce_only"] = True
+        with _RISK_CONFIG_LOCK:
+            tp_pct = float(_RISK_CONFIG.get("take_profit_pct", 0.0))
+            sl_pct = float(_RISK_CONFIG.get("stop_loss_pct", 0.0))
+        reference_price = entry_price
+        if reference_price is None:
+            reference_price = _try_float(intent.price)
+        if reference_price is None:
+            reference_price = _try_float(meta_payload.get("reference_price"))
+        payload = apply_bracket_targets(
+            payload,
+            side=intent.side,
+            entry_price=reference_price,
+            take_profit_pct=tp_pct,
+            stop_loss_pct=sl_pct,
+        )
         raw_response = None
         try:
             result = client.place_order(payload)

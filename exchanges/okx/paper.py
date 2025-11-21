@@ -44,6 +44,12 @@ class OrderPayload:
     client_order_id: Optional[str] = None
     pos_side: Optional[str] = None
     reduce_only: Optional[bool] = None
+    tp_trigger_px: Optional[str] = None
+    tp_order_px: Optional[str] = None
+    tp_trigger_px_type: Optional[str] = None
+    sl_trigger_px: Optional[str] = None
+    sl_order_px: Optional[str] = None
+    sl_trigger_px_type: Optional[str] = None
 
 
 class OkxPaperClient(ExchangeClient):
@@ -149,6 +155,16 @@ class OkxPaperClient(ExchangeClient):
             body["posSide"] = order.pos_side
         if order.reduce_only is not None:
             body["reduceOnly"] = "true" if order.reduce_only else "false"
+        if order.tp_trigger_px:
+            body["tpTriggerPx"] = order.tp_trigger_px
+            body["tpOrdPx"] = order.tp_order_px or order.tp_trigger_px
+            if order.tp_trigger_px_type:
+                body["tpTriggerPxType"] = order.tp_trigger_px_type
+        if order.sl_trigger_px:
+            body["slTriggerPx"] = order.sl_trigger_px
+            body["slOrdPx"] = order.sl_order_px or "-1"
+            if order.sl_trigger_px_type:
+                body["slTriggerPxType"] = order.sl_trigger_px_type
         response = self._request("POST", "/api/v5/trade/order", json_body=body)
         data = _single_item(response)
         return {
@@ -278,6 +294,12 @@ class OkxPaperClient(ExchangeClient):
                 client_order_id=raw.get("client_order_id"),
                 pos_side=raw.get("pos_side") or raw.get("posSide"),
                 reduce_only=raw.get("reduce_only"),
+                tp_trigger_px=raw.get("tpTriggerPx"),
+                tp_order_px=raw.get("tpOrdPx"),
+                tp_trigger_px_type=raw.get("tpTriggerPxType"),
+                sl_trigger_px=raw.get("slTriggerPx"),
+                sl_order_px=raw.get("slOrdPx"),
+                sl_trigger_px_type=raw.get("slTriggerPxType"),
             )
         except KeyError as exc:
             raise ValueError(f"Missing required order field: {exc}") from exc

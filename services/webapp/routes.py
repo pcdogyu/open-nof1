@@ -37,6 +37,7 @@ from services.okx.catalog import (
     search_instrument_catalog,
 )
 from services.okx.live import fetch_account_snapshot
+from services.okx.brackets import apply_bracket_targets
 from services.webapp import prompt_templates
 from services.webapp.dependencies import get_account_repository, get_portfolio_registry
 
@@ -983,6 +984,20 @@ def _choose_margin_mode(instrument_id: str, meta: dict, override: str | None) ->
     return "cash"
 
 
+def _extract_ticker_price(ticker: dict) -> float | None:
+    for key in ("last", "lastPx", "last_price", "px"):
+        value = ticker.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric > 0:
+            return numeric
+    return None
+
+
 def place_manual_okx_order(
     *,
     account_id: str,
@@ -1005,7 +1020,12 @@ def place_manual_okx_order(
     if normalized_type not in {"limit", "market"}:
         raise HTTPException(status_code=400, detail="订单类型必须为 limit 或 market")
 
-    payload = {
+    risk_config = get_risk_settings()
+    take_profit_pct = float(risk_config.get("take_profit_pct", 0.0))
+    stop_loss_pct = float(risk_config.get("stop_loss_pct", 0.0))
+    entry_price_hint: float | None = None
+
+    payload: dict[str, object] = {
         "instrument_id": instrument_id.upper(),
         "side": normalized_side,
         "order_type": normalized_type,
@@ -1016,6 +1036,10 @@ def place_manual_okx_order(
         if price is None:
             raise HTTPException(status_code=400, detail="限价单需要价格")
         payload["price"] = str(price)
+        try:
+            entry_price_hint = float(price)
+        except (TypeError, ValueError):
+            entry_price_hint = None
 
     credentials = ExchangeCredentials(
         api_key=meta["api_key"],
@@ -1025,6 +1049,20 @@ def place_manual_okx_order(
     client = OkxPaperClient()
     try:
         client.authenticate(credentials)
+        if entry_price_hint is None:
+            try:
+                ticker = client.fetch_ticker(payload["instrument_id"])
+                entry_price_hint = _extract_ticker_price(ticker)
+            except Exception:
+                entry_price_hint = None
+        payload = apply_bracket_targets(
+            payload,
+            side=normalized_side,
+            entry_price=entry_price_hint,
+            take_profit_pct=take_profit_pct,
+            stop_loss_pct=stop_loss_pct,
+        )
+
         response = client.place_order(payload)
     except OkxClientError as exc:
         payload = getattr(exc, "payload", None) or {}
