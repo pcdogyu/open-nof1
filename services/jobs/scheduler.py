@@ -1,4 +1,4 @@
-﻿"""
+"""
 Background scheduler for analytics refresh and automated signal execution.
 """
 
@@ -119,7 +119,9 @@ _DEFAULT_RISK_CONFIG = {
     "max_position": 0.0,
     "take_profit_pct": 0.0,
     "stop_loss_pct": 0.0,
-    "pyramid_max_orders": 100,
+    "pyramid_max_orders": 5,
+    "pyramid_reentry_pct": 2.0,
+    "liquidation_notional_threshold": 50_000.0,
 }
 
 
@@ -137,6 +139,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
             "pyramid_max_orders",
             "take_profit_pct",
             "stop_loss_pct",
+            "pyramid_reentry_pct",
+            "liquidation_notional_threshold",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -149,6 +153,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     pyramid_max = int(config.get("pyramid_max_orders", 0))
     take_profit = float(config.get("take_profit_pct", 0.0))
     stop_loss = float(config.get("stop_loss_pct", 0.0))
+    reentry_pct = float(config.get("pyramid_reentry_pct", 0.0))
+    liquidation_notional = float(config.get("liquidation_notional_threshold", 50_000.0))
     price = max(0.001, min(0.5, price))
     drawdown = max(0.1, min(95.0, drawdown))
     max_loss = max(1.0, max_loss)
@@ -159,6 +165,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     max_position = max(0.0, max_position)
     take_profit = max(0.0, min(500.0, take_profit))
     stop_loss = max(0.0, min(95.0, stop_loss))
+    reentry_pct = max(0.0, min(50.0, reentry_pct))
+    liquidation_notional = max(0.0, liquidation_notional)
     pyramid_max = max(0, min(100, pyramid_max))
     return {
         "price_tolerance_pct": price,
@@ -171,6 +179,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
         "take_profit_pct": take_profit,
         "stop_loss_pct": stop_loss,
         "pyramid_max_orders": pyramid_max,
+        "pyramid_reentry_pct": reentry_pct,
+        "liquidation_notional_threshold": liquidation_notional,
     }
 
 
@@ -193,7 +203,6 @@ _EXEC_LOG_WRITER: Optional["InfluxWriter"] = None
 
 _LIQUIDATION_REVERSAL_WATCH: Dict[str, Dict[str, object]] = {}
 _LIQUIDATION_SILENCE_SECONDS = 60
-_LIQUIDATION_ABS_THRESHOLD = 5.0
 _LIQUIDATION_MAX_EVENT_LOOKBACK = 15 * 60
 
 
@@ -272,6 +281,8 @@ def update_risk_configuration(
     take_profit_pct: float = 0.0,
     stop_loss_pct: float = 0.0,
     pyramid_max_orders: int = 0,
+    pyramid_reentry_pct: float = 0.0,
+    liquidation_notional_threshold: float = 50_000.0,
 ) -> None:
     """Refresh the in-memory risk configuration."""
     normalized = _sanitize_risk_config(
@@ -280,12 +291,14 @@ def update_risk_configuration(
             "max_drawdown_pct": max_drawdown_pct,
             "max_loss_absolute": max_loss_absolute,
             "cooldown_seconds": cooldown_seconds,
-        "min_notional_usd": min_notional_usd,
-        "max_order_notional_usd": max_order_notional_usd,
-        "max_position": max_position,
-        "take_profit_pct": take_profit_pct,
-        "stop_loss_pct": stop_loss_pct,
-        "pyramid_max_orders": pyramid_max_orders,
+            "min_notional_usd": min_notional_usd,
+            "max_order_notional_usd": max_order_notional_usd,
+            "max_position": max_position,
+            "take_profit_pct": take_profit_pct,
+            "stop_loss_pct": stop_loss_pct,
+            "pyramid_max_orders": pyramid_max_orders,
+            "pyramid_reentry_pct": pyramid_reentry_pct,
+            "liquidation_notional_threshold": liquidation_notional_threshold,
         }
     )
     with _RISK_CONFIG_LOCK:
@@ -972,6 +985,18 @@ async def _process_account_signal(
         debug_entry["notes"] = "无法生成信号"
         _record_order_debug_entry(debug_entry)
         return False, None
+    if not debug_entry.get("automation"):
+        reentry_response = _maybe_force_pyramid_reentry(
+            request=request,
+            positions=positions,
+            open_orders=open_orders,
+        )
+        if reentry_response is not None:
+            response = reentry_response
+            debug_entry["automation"] = "pyramid_reentry"
+            debug_entry["notes"] = reentry_response.reasoning
+            debug_entry["decision_actionable"] = True
+
 
     debug_entry["decision_actionable"] = (response.decision or "").lower() not in {"hold"}
     routed = router.route(
@@ -1499,6 +1524,95 @@ async def _maybe_generate_liquidation_reversal(
     return None
 
 
+def _maybe_force_pyramid_reentry(
+    *,
+    request: SignalRequest,
+    positions: Sequence[Position],
+    open_orders: Sequence[OrderModel],
+) -> Optional[SignalResponse]:
+    with _RISK_CONFIG_LOCK:
+        deviation_pct = float(_RISK_CONFIG.get("pyramid_reentry_pct", 0.0))
+        pyramid_cap = int(_RISK_CONFIG.get("pyramid_max_orders", 0))
+        max_position = float(_RISK_CONFIG.get("max_position", 0.0))
+    if deviation_pct <= 0:
+        return None
+    instrument = request.market.instrument_id
+    if not instrument:
+        return None
+    candidate: Optional[Position] = None
+    for pos in positions or []:
+        if _get_attr(pos, "instrument_id") == instrument:
+            candidate = pos
+            break
+    if candidate is None:
+        return None
+    side = (_get_attr(candidate, "side") or "").lower()
+    qty = _try_float(_get_attr(candidate, "quantity"))
+    entry_price = _try_float(_get_attr(candidate, "entry_price"))
+    if not qty or not entry_price:
+        return None
+    if side not in {"long", "buy", "short", "sell"}:
+        return None
+    direction = "buy" if side in {"long", "buy"} else "sell"
+    if pyramid_cap > 0 and _count_active_orders(open_orders, instrument, direction) >= pyramid_cap:
+        return None
+    metadata = request.market.metadata or {}
+    close_price = _try_float(
+        metadata.get("recent_close_price")
+        or metadata.get("15m_close_price")
+        or metadata.get("close_price")
+        or metadata.get("last_price")
+    )
+    if close_price is None:
+        close_price = _try_float(request.market.price)
+    if close_price is None or close_price <= 0:
+        return None
+    threshold = entry_price * (1 - deviation_pct / 100.0) if direction == "buy" else entry_price * (1 + deviation_pct / 100.0)
+    if direction == "buy":
+        if close_price > threshold:
+            return None
+        observed = ((entry_price - close_price) / entry_price) * 100.0
+    else:
+        if close_price < threshold:
+            return None
+        observed = ((close_price - entry_price) / entry_price) * 100.0
+    net_position = _compute_net_position(instrument, positions)
+    remaining_capacity = None
+    if max_position > 0:
+        remaining_capacity = max(0.0, max_position - abs(net_position))
+        if remaining_capacity <= 1e-9:
+            return None
+    order_size = abs(qty)
+    if remaining_capacity is not None:
+        order_size = min(order_size, remaining_capacity)
+    if order_size <= 0:
+        return None
+    reasoning = (
+        f"{instrument} 价格相对入场价偏移 {observed:.2f}% 超过 {deviation_pct:.2f}% 阈值，触发金字塔加仓。"
+    )
+    suggested_order = {
+        "instrument_id": instrument,
+        "side": direction,
+        "size": order_size,
+        "order_type": "market",
+    }
+    raw_output = {
+        "automation": "pyramid_reentry",
+        "pyramid_reentry_pct": deviation_pct,
+        "observed_deviation_pct": observed,
+        "entry_price": entry_price,
+        "close_price": close_price,
+    }
+    return SignalResponse(
+        model_id=request.model_id,
+        decision="open_long" if direction == "buy" else "open_short",
+        confidence=0.64,
+        reasoning=reasoning,
+        suggested_order=suggested_order,
+        raw_output=raw_output,
+    )
+
+
 def _iter_liquidation_watch_instruments(meta: Dict[str, str]) -> Iterable[str]:
     preferred = [
         meta.get("default_instrument"),
@@ -1608,7 +1722,18 @@ def _evaluate_liquidation_reversal_state(
     if net_qty is None or timestamp_value is None or net_qty == 0:
         return None
     abs_qty = abs(net_qty)
-    if abs_qty < _LIQUIDATION_ABS_THRESHOLD:
+    if abs_qty <= 0:
+        return None
+    notional = _try_float(features.get("liq_notional"))
+    if notional is None:
+        price_hint = _try_float(features.get("liq_last_price"))
+        if price_hint is not None:
+            notional = abs(net_qty) * price_hint
+    with _RISK_CONFIG_LOCK:
+        liq_threshold = float(_RISK_CONFIG.get("liquidation_notional_threshold", 50_000.0))
+    if liq_threshold <= 0:
+        return None
+    if notional is None or notional < liq_threshold:
         return None
     event_time = _coerce_timestamp(timestamp_value)
     if event_time is None:

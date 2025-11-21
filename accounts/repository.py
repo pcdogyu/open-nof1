@@ -140,6 +140,10 @@ class InfluxAccountRepository(AccountRepository):
             point = point.field("leverage", position.leverage)
         if position.unrealized_pnl is not None:
             point = point.field("unrealized_pnl", position.unrealized_pnl)
+        if position.notional_value is not None:
+            point = point.field("notional_value", position.notional_value)
+        if position.initial_margin is not None:
+            point = point.field("initial_margin", position.initial_margin)
         self._write_api.write(bucket=self._config.bucket, org=self._config.org, record=point)
 
     def record_trade(self, trade: Trade) -> None:
@@ -416,6 +420,8 @@ def _record_to_position(record: FluxRecord) -> Position:
         mark_price=_optional_float(values.get("mark_price")),
         leverage=_optional_float(values.get("leverage")),
         unrealized_pnl=_optional_float(values.get("unrealized_pnl")),
+        notional_value=_optional_float(values.get("notional_value")),
+        initial_margin=_optional_float(values.get("initial_margin")),
         updated_at=record.get_time(),
     )
 
@@ -447,6 +453,8 @@ def _merge_position_records(records: List[FluxRecord]) -> List[Position]:
                 mark_price=_optional_float(data.get("mark_price")),
                 leverage=_optional_float(data.get("leverage")),
                 unrealized_pnl=_optional_float(data.get("unrealized_pnl")),
+                notional_value=_optional_float(data.get("notional_value")),
+                initial_margin=_optional_float(data.get("initial_margin")),
                 updated_at=by_time.get(pid) or datetime.now(tz=timezone.utc),
             )
         )

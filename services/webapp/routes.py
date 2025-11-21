@@ -163,7 +163,9 @@ _DEFAULT_RISK_SETTINGS = {
     "stop_loss_pct": 0.0,
     "default_leverage": 1,
     "max_leverage": 125,
-    "pyramid_max_orders": 100,
+    "pyramid_max_orders": 5,
+    "pyramid_reentry_pct": 2.0,
+    "liquidation_notional_threshold": 50_000.0,
 }
 
 
@@ -184,6 +186,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
             "default_leverage",
             "max_leverage",
             "pyramid_max_orders",
+            "pyramid_reentry_pct",
+            "liquidation_notional_threshold",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -196,6 +200,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     stop_loss = float(config["stop_loss_pct"])
     default_leverage = int(config.get("default_leverage", 1))
     max_leverage = int(config.get("max_leverage", 125))
+    pyramid_reentry = float(config.get("pyramid_reentry_pct", 0.0))
+    liquidation_threshold = float(config.get("liquidation_notional_threshold", 50_000.0))
     price = max(0.001, min(0.5, price))
     drawdown = max(0.1, min(95.0, drawdown))
     max_loss = max(1.0, max_loss)
@@ -213,6 +219,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
         max_leverage = default_leverage
     pyramid_max = int(config.get("pyramid_max_orders", 0))
     pyramid_max = max(0, min(100, pyramid_max))
+    pyramid_reentry = max(0.0, min(50.0, pyramid_reentry))
+    liquidation_threshold = max(0.0, liquidation_threshold)
     return {
         "price_tolerance_pct": price,
         "max_drawdown_pct": drawdown,
@@ -226,6 +234,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
         "default_leverage": default_leverage,
         "max_leverage": max_leverage,
         "pyramid_max_orders": pyramid_max,
+        "pyramid_reentry_pct": pyramid_reentry,
+        "liquidation_notional_threshold": liquidation_threshold,
     }
 
 
@@ -361,16 +371,18 @@ def get_risk_settings() -> dict:
         return {
             "price_tolerance_pct": float(_RISK_SETTINGS["price_tolerance_pct"]),
             "max_drawdown_pct": float(_RISK_SETTINGS["max_drawdown_pct"]),
-        "max_loss_absolute": float(_RISK_SETTINGS["max_loss_absolute"]),
-        "cooldown_seconds": int(_RISK_SETTINGS["cooldown_seconds"]),
-        "min_notional_usd": float(_RISK_SETTINGS.get("min_notional_usd", 0.0)),
-        "max_order_notional_usd": float(_RISK_SETTINGS.get("max_order_notional_usd", 0.0)),
-        "max_position": float(_RISK_SETTINGS.get("max_position", 0.0)),
-        "take_profit_pct": float(_RISK_SETTINGS.get("take_profit_pct", 0.0)),
+            "max_loss_absolute": float(_RISK_SETTINGS["max_loss_absolute"]),
+            "cooldown_seconds": int(_RISK_SETTINGS["cooldown_seconds"]),
+            "min_notional_usd": float(_RISK_SETTINGS.get("min_notional_usd", 0.0)),
+            "max_order_notional_usd": float(_RISK_SETTINGS.get("max_order_notional_usd", 0.0)),
+            "max_position": float(_RISK_SETTINGS.get("max_position", 0.0)),
+            "take_profit_pct": float(_RISK_SETTINGS.get("take_profit_pct", 0.0)),
             "stop_loss_pct": float(_RISK_SETTINGS.get("stop_loss_pct", 0.0)),
             "default_leverage": int(_RISK_SETTINGS.get("default_leverage", 1)),
             "max_leverage": int(_RISK_SETTINGS.get("max_leverage", 125)),
             "pyramid_max_orders": int(_RISK_SETTINGS.get("pyramid_max_orders", 0)),
+            "pyramid_reentry_pct": float(_RISK_SETTINGS.get("pyramid_reentry_pct", 0.0)),
+            "liquidation_notional_threshold": float(_RISK_SETTINGS.get("liquidation_notional_threshold", 0.0)),
             "updated_at": _RISK_SETTINGS["updated_at"],
         }
 
@@ -389,6 +401,8 @@ def update_risk_settings(
     default_leverage: int,
     max_leverage: int,
     pyramid_max_orders: int,
+    pyramid_reentry_pct: float,
+    liquidation_notional_threshold: float,
 ) -> dict:
     """Update risk parameters and persist them to config.py."""
     try:
@@ -403,6 +417,8 @@ def update_risk_settings(
         default_leverage_val = int(default_leverage)
         max_leverage_val = int(max_leverage)
         pyramid_max_val = int(pyramid_max_orders)
+        pyramid_reentry_val = float(pyramid_reentry_pct)
+        liquidation_threshold_val = float(liquidation_notional_threshold)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="数值需要为数字。")
     try:
@@ -436,6 +452,10 @@ def update_risk_settings(
         raise HTTPException(status_code=400, detail="最大杠杆需大于等于默认杠杆。")
     if pyramid_max_val < 0 or pyramid_max_val > 100:
         raise HTTPException(status_code=400, detail="单方向金字塔上限应在 0-100 之间。")
+    if pyramid_reentry_val < 0 or pyramid_reentry_val > 50:
+        raise HTTPException(status_code=400, detail="�������۸�ƫ����Ӧ�� 0-50% ֮�䡣")
+    if liquidation_threshold_val < 0:
+        raise HTTPException(status_code=400, detail="爆仓金额阈值必须为非负数。")
 
     normalized = {
         "price_tolerance_pct": price,
@@ -450,6 +470,8 @@ def update_risk_settings(
         "default_leverage": default_leverage_val,
         "max_leverage": max_leverage_val,
         "pyramid_max_orders": pyramid_max_val,
+        "pyramid_reentry_pct": pyramid_reentry_val,
+        "liquidation_notional_threshold": liquidation_threshold_val,
     }
     with _RISK_SETTINGS_LOCK:
         for key, value in normalized.items():
@@ -1639,6 +1661,8 @@ def _persist_live_snapshot(
                 mark_price=p.get("mark_price"),
                 leverage=p.get("leverage"),
                 unrealized_pnl=p.get("unrealized_pnl"),
+                notional_value=p.get("notional_value"),
+                initial_margin=p.get("initial_margin"),
                 updated_at=timestamp,
             )
             repo.record_position(position)
@@ -1747,8 +1771,11 @@ def _summarize_account_performance(
 def _compute_notional_exposure(positions: List[Position]) -> float:
     exposure = 0.0
     for position in positions:
-        price = position.mark_price if position.mark_price is not None else position.entry_price
-        exposure += abs(position.quantity * price)
+        notional = position.notional_value
+        if notional is None or notional <= 0:
+            price = position.mark_price if position.mark_price is not None else position.entry_price
+            notional = abs(position.quantity * price)
+        exposure += abs(notional)
     return round(exposure, 2)
 
 

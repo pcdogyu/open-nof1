@@ -251,7 +251,9 @@ def submit_risk_settings(
     stop_loss_pct: float = Form(0),
     default_leverage: int = Form(1),
     max_leverage: int = Form(125),
-    pyramid_max_orders: int = Form(100),
+    pyramid_max_orders: int = Form(5),
+    pyramid_reentry_pct: float = Form(2),
+    liquidation_notional_threshold: float = Form(50000),
 ) -> RedirectResponse:
     routes.update_risk_settings(
         price_tolerance_pct=price_tolerance_pct / 100.0,
@@ -266,6 +268,8 @@ def submit_risk_settings(
         default_leverage=default_leverage,
         max_leverage=max_leverage,
         pyramid_max_orders=pyramid_max_orders,
+        pyramid_reentry_pct=pyramid_reentry_pct,
+        liquidation_notional_threshold=liquidation_notional_threshold,
     )
     return RedirectResponse(url="/risk", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -943,6 +947,8 @@ def _render_risk_page(settings: dict) -> str:
     stop_loss_pct = max(0.0, min(95.0, float(settings.get("stop_loss_pct") or 0.0)))
     default_leverage = max(1, min(125, int(settings.get("default_leverage") or 1)))
     max_leverage = max(default_leverage, min(125, int(settings.get("max_leverage") or default_leverage)))
+    pyramid_reentry_pct = max(0.0, min(50.0, float(settings.get("pyramid_reentry_pct") or 0.0)))
+    liquidation_threshold = max(0.0, float(settings.get("liquidation_notional_threshold") or 0.0))
 
     def _compact(value: float, digits: int = 2) -> str:
         text = f"{value:.{digits}f}"
@@ -962,6 +968,8 @@ def _render_risk_page(settings: dict) -> str:
     cooldown_minutes_text = _compact(cooldown_minutes, 1)
     pyramid_cap_text = _compact(pyramid_max_orders, 0)
     max_order_notional_text = _compact(max_order_notional, 2)
+    pyramid_reentry_text = _compact(pyramid_reentry_pct, 2)
+    liquidation_threshold_text = _compact(liquidation_threshold, 2)
     updated_at = esc(_format_asia_shanghai(settings.get("updated_at")))
 
     return RISK_TEMPLATE.format(
@@ -977,6 +985,10 @@ def _render_risk_page(settings: dict) -> str:
         max_order_notional_display=esc(max_order_notional_text),
         max_position=esc(f"{max_position_val:.4f}"),
         max_position_display=esc(max_position_text),
+        pyramid_reentry_pct=esc(f"{pyramid_reentry_pct:.2f}"),
+        pyramid_reentry_display=esc(pyramid_reentry_text),
+        liquidation_notional_threshold=esc(f"{liquidation_threshold:.2f}"),
+        liquidation_notional_display=esc(liquidation_threshold_text),
         take_profit_pct=esc(f"{take_profit_pct:.2f}"),
         stop_loss_pct=esc(f"{stop_loss_pct:.2f}"),
         take_profit_display=esc(take_profit_text),
@@ -1038,7 +1050,20 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
         except Exception:
             qty = mark_px = entry_px = leverage = 0.0
         margin = None
-        if qty > 0 and mark_px > 0 and leverage > 0:
+        raw_margin = pos.get("initial_margin")
+        if raw_margin not in (None, ""):
+            try:
+                margin = float(raw_margin)
+            except (TypeError, ValueError):
+                margin = None
+        if margin is None:
+            notional_hint = pos.get("notional_value")
+            if notional_hint not in (None, "") and leverage > 0:
+                try:
+                    margin = float(notional_hint) / leverage
+                except (TypeError, ValueError):
+                    margin = None
+        if margin is None and qty > 0 and mark_px > 0 and leverage > 0:
             margin = (qty * mark_px) / leverage
         pnl_pct = None
         if entry_px > 0 and mark_px > 0:
@@ -1774,6 +1799,10 @@ RISK_TEMPLATE = r"""
                     <input id="max-order-notional" type="number" name="max_order_notional_usd" min="0" step="0.01" value="{max_order_notional_usd}" required>
                     <span class="hint">0 表示不限制；当前 <span id="hint-max-order-notional">{max_order_notional_display}</span> USDT。</span>
                 </label>
+                <label for="liquidation-threshold">爆仓金额阈值 (USDT)
+                    <input id="liquidation-threshold" type="number" name="liquidation_notional_threshold" min="0" step="1" value="{liquidation_notional_threshold}" required>
+                    <span class="hint">15 分钟内净爆仓金额 ≥ <span id="hint-liq-threshold">{liquidation_notional_display}</span> USDT 时自动触发逆向防守。</span>
+                </label>
                 <label for="max-position">最大持仓数量
                     <input id="max-position" type="number" name="max_position" min="0" step="0.0001" value="{max_position}" required>
                     <span class="hint">0 表示按权益自动推算；当前 <span id="hint-max-position">{max_position_display}</span> 张/币。</span>
@@ -1781,6 +1810,10 @@ RISK_TEMPLATE = r"""
                 <label for="pyramid-max">金字塔单向上限（单币对）
                     <input id="pyramid-max" type="number" name="pyramid_max_orders" min="0" max="100" step="1" value="{pyramid_max_orders}" required>
                     <span class="hint">同向累计订单最多 <span id="hint-pyramid-value">{pyramid_max_display}</span> 笔，0 表示不限制。</span>
+                </label>
+                <label for="pyramid-reentry">金字塔加仓偏离（%）
+                    <input id="pyramid-reentry" type="number" name="pyramid_reentry_pct" min="0" max="50" step="0.1" value="{pyramid_reentry_pct}" required>
+                    <span class="hint">最新收盘价偏离入场价超过 <span id="hint-reentry-value">{pyramid_reentry_display}</span>% 时继续同向加仓。</span>
                 </label>
                 <label for="max-drawdown">最大回撤（%）
                     <input id="max-drawdown" type="number" name="max_drawdown_pct" min="0.1" max="95" step="0.1" value="{max_drawdown_pct}" required>
@@ -1816,13 +1849,14 @@ RISK_TEMPLATE = r"""
             <ul class="rule-list">
                 <li>价格限制：委托价格需落在参考价 ±<span id="rule-price-value">{price_tolerance_display}</span>% 内。</li>
                 <li>最小名义：下单金额须 ≥ <span id="rule-min-notional-value">{min_notional_display}</span> USDT，0 表示不限制。</li>
-                <li>金字塔：同币种同方向最多 <span id="rule-pyramid-value">{pyramid_max_display}</span> 笔（0 表示关闭限制）。</li>
+                <li>��������ͬ����ͬ������� <span id="rule-pyramid-value">{pyramid_max_display}</span> �ʣ�ƫ�����ﵽ <span id="rule-reentry-value">{pyramid_reentry_display}</span>% ʱ�Զ������Ӳ�ƽ̨��</li>
                 <li>回撤保护：账户回撤超过 <span id="rule-drawdown-value">{drawdown_display}</span>% 时进入冷静期。</li>
                 <li>亏损限制：累计亏损超出 <span id="rule-loss-value">{max_loss_display}</span> USDT 时停止交易。</li>
                 <li>杠杆限制：默认 <span id="rule-default-lev">{default_leverage_display}</span>x，最大 <span id="rule-max-lev">{max_leverage_display}</span>x。</li>
                 <li>止盈止损：未实现盈亏 ≥ <span id="rule-take-profit-value">{take_profit_display}</span>% 或 ≤ -<span id="rule-stop-loss-value">{stop_loss_display}</span>% 时停止开仓。</li>
                 <li>等待时长：冷静后等待 <span id="rule-cooldown-value">{cooldown_minutes}</span> 分钟或手动恢复。</li>
                 <li>数据馈送：盘口深度、爆仓流数据将注入模型特征辅助人工/AI决策。</li>
+                <li>爆仓反向：15 分钟内净爆仓金额 ≥ <span id="rule-liq-threshold">{liquidation_notional_display}</span> USDT ʱ�Զ�����ԭʼ�����ɣ�</li>
             </ul>
             <p class="hint">保存后写入 config.py 并通知调度任务</p>
         </section>
@@ -1835,11 +1869,13 @@ RISK_TEMPLATE = r"""
         const cooldownInput = document.getElementById('cooldown-seconds');
         const minNotionalInput = document.getElementById('min-notional');
         const pyramidInput = document.getElementById('pyramid-max');
+        const liquidationInput = document.getElementById('liquidation-threshold');
+        const pyramidReentryInput = document.getElementById('pyramid-reentry');
         const takeProfitInput = document.getElementById('take-profit');
         const stopLossInput = document.getElementById('stop-loss');
         const defaultLevInput = document.getElementById('default-leverage');
         const maxLevInput = document.getElementById('max-leverage');
-        if (!priceInput || !drawdownInput || !lossInput || !cooldownInput || !minNotionalInput || !pyramidInput || !takeProfitInput || !stopLossInput || !defaultLevInput || !maxLevInput) {{
+        if (!priceInput || !drawdownInput || !lossInput || !cooldownInput || !minNotionalInput || !pyramidInput || !liquidationInput || !pyramidReentryInput || !takeProfitInput || !stopLossInput || !defaultLevInput || !maxLevInput) {{
           return;
         }}}}
         const formatCompact = (value, digits = 2) => {{{{
@@ -1858,6 +1894,8 @@ RISK_TEMPLATE = r"""
           const cooldownMinutes = cooldownSeconds / 60;
           const minNotional = Number(minNotionalInput.value) || 0;
           const pyramidCap = Number(pyramidInput.value) || 0;
+          const liqThreshold = Number(liquidationInput.value) || 0;
+          const reentryPct = Number(pyramidReentryInput.value) || 0;
           const takeProfit = Number(takeProfitInput.value) || 0;
           const stopLoss = Number(stopLossInput.value) || 0;
           const defaultLev = Number(defaultLevInput.value) || 0;
@@ -1868,6 +1906,8 @@ RISK_TEMPLATE = r"""
           const cooldownText = formatCompact(cooldownMinutes, 1);
           const minNotionalText = formatCompact(minNotional, 2);
           const pyramidCapText = formatCompact(pyramidCap, 0);
+          const liqThresholdText = formatCompact(liqThreshold, 2);
+          const reentryText = formatCompact(reentryPct, 2);
           const takeProfitText = formatCompact(takeProfit, 2);
           const stopLossText = formatCompact(stopLoss, 2);
           const defaultLevText = formatCompact(defaultLev, 0);
@@ -1882,13 +1922,17 @@ RISK_TEMPLATE = r"""
           document.getElementById('rule-min-notional-value').textContent = minNotionalText;
           document.getElementById('hint-pyramid-value').textContent = pyramidCapText;
           document.getElementById('rule-pyramid-value').textContent = pyramidCapText;
+          document.getElementById('hint-liq-threshold').textContent = liqThresholdText;
+          document.getElementById('rule-liq-threshold').textContent = liqThresholdText;
+          document.getElementById('hint-reentry-value').textContent = reentryText;
+          document.getElementById('rule-reentry-value').textContent = reentryText;
           document.getElementById('rule-take-profit-value').textContent = takeProfitText;
           document.getElementById('rule-stop-loss-value').textContent = stopLossText;
           document.getElementById('rule-default-lev').textContent = defaultLevText;
           document.getElementById('rule-max-lev').textContent = maxLevText;
         }};
         ['input', 'change'].forEach((eventName) => {{{{
-          [priceInput, drawdownInput, lossInput, cooldownInput, minNotionalInput, pyramidInput, takeProfitInput, stopLossInput, defaultLevInput, maxLevInput].forEach((input) => {{{{
+          [priceInput, drawdownInput, lossInput, cooldownInput, minNotionalInput, pyramidInput, liquidationInput, pyramidReentryInput, takeProfitInput, stopLossInput, defaultLevInput, maxLevInput].forEach((input) => {{{{
             input.addEventListener(eventName, updateRules);
           }}}});
         }}}});

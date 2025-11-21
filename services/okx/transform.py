@@ -75,6 +75,8 @@ def normalize_positions(
         leverage = _optional_float(item.get("lever"))
         upl = _optional_float(item.get("upl"))
         position_id = str(item.get("posId") or f"{account_id}-{inst}-{side}")
+        notional_usd = _optional_float(item.get("notionalUsd"))
+        initial_margin = _optional_float(item.get("imr") or item.get("margin"))
 
         key = (inst, side)
         bucket = aggregated.setdefault(
@@ -89,6 +91,8 @@ def normalize_positions(
                 "mark_notional": 0.0,
                 "leverage": leverage,
                 "unrealized_pnl": 0.0,
+                "notional_value": 0.0,
+                "initial_margin": 0.0,
             },
         )
 
@@ -101,6 +105,10 @@ def normalize_positions(
             bucket["leverage"] = leverage
         if upl is not None:
             bucket["unrealized_pnl"] += upl
+        if notional_usd is not None:
+            bucket["notional_value"] += notional_usd
+        if initial_margin is not None:
+            bucket["initial_margin"] += initial_margin
         bucket["position_id"] = position_id  # keep latest id
 
     cleaned: List[Position] = []
@@ -108,6 +116,12 @@ def normalize_positions(
         qty = bucket["quantity"]
         entry_price = bucket["entry_notional"] / qty if qty > 0 and bucket["entry_notional"] > 0 else 0.0
         mark_price = bucket["mark_notional"] / qty if qty > 0 and bucket["mark_notional"] > 0 else None
+        notional_value = bucket.get("notional_value")
+        if notional_value is not None and notional_value <= 0:
+            notional_value = None
+        initial_margin = bucket.get("initial_margin")
+        if initial_margin is not None and initial_margin <= 0:
+            initial_margin = None
         cleaned.append(
             Position(
                 position_id=bucket["position_id"],
@@ -119,6 +133,8 @@ def normalize_positions(
                 mark_price=mark_price,
                 leverage=bucket.get("leverage"),
                 unrealized_pnl=bucket.get("unrealized_pnl"),
+                notional_value=notional_value,
+                initial_margin=initial_margin,
                 updated_at=_utc_now(),
             )
         )

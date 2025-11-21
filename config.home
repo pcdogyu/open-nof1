@@ -84,8 +84,11 @@ RISK_SETTINGS = {   'price_tolerance_pct': 0.02,
     'cooldown_seconds': 28800,
     'min_notional_usd': 50.0,
     'max_order_notional_usd': 999.98,
+    'max_position': 0.0,
     'take_profit_pct': 8.0,
     'stop_loss_pct': 5.0,
     'default_leverage': 1,
     'max_leverage': 125,
-    'pyramid_max_orders': 100}
+    'pyramid_max_orders': 5,
+    'pyramid_reentry_pct': 2.0,
+    'liquidation_notional_threshold': 50000.0}

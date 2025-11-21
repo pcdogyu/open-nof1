@@ -40,6 +40,8 @@ class Position(BaseModel):
     mark_price: Optional[float] = Field(None, gt=0)
     leverage: Optional[float] = Field(None, gt=0)
     unrealized_pnl: Optional[float] = None
+    notional_value: Optional[float] = Field(None, ge=0)
+    initial_margin: Optional[float] = Field(None, ge=0)
     updated_at: datetime = Field(default_factory=_utc_now)
 
 
