@@ -157,6 +157,7 @@ _DEFAULT_RISK_SETTINGS = {
     "cooldown_seconds": 600,
     "min_notional_usd": 50.0,
     "max_order_notional_usd": 0.0,
+    "max_position": 0.0,
     "take_profit_pct": 0.0,
     "stop_loss_pct": 0.0,
     "default_leverage": 1,
@@ -176,6 +177,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
             "cooldown_seconds",
             "min_notional_usd",
             "max_order_notional_usd",
+            "max_position",
             "take_profit_pct",
             "stop_loss_pct",
             "default_leverage",
@@ -200,6 +202,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     max_order_notional = float(config.get("max_order_notional_usd", 0.0))
     max_order_notional = max(0.0, min(1_000_000.0, max_order_notional))
     min_notional = max(0.0, min_notional)
+    max_position = float(config.get("max_position", 0.0))
+    max_position = max(0.0, max_position)
     take_profit = max(0.0, min(500.0, take_profit))
     stop_loss = max(0.0, min(95.0, stop_loss))
     default_leverage = max(1, min(125, default_leverage))
@@ -215,6 +219,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
         "cooldown_seconds": cooldown,
         "min_notional_usd": min_notional,
         "max_order_notional_usd": max_order_notional,
+        "max_position": max_position,
         "take_profit_pct": take_profit,
         "stop_loss_pct": stop_loss,
         "default_leverage": default_leverage,
@@ -359,6 +364,7 @@ def get_risk_settings() -> dict:
         "cooldown_seconds": int(_RISK_SETTINGS["cooldown_seconds"]),
         "min_notional_usd": float(_RISK_SETTINGS.get("min_notional_usd", 0.0)),
         "max_order_notional_usd": float(_RISK_SETTINGS.get("max_order_notional_usd", 0.0)),
+        "max_position": float(_RISK_SETTINGS.get("max_position", 0.0)),
         "take_profit_pct": float(_RISK_SETTINGS.get("take_profit_pct", 0.0)),
             "stop_loss_pct": float(_RISK_SETTINGS.get("stop_loss_pct", 0.0)),
             "default_leverage": int(_RISK_SETTINGS.get("default_leverage", 1)),
@@ -376,6 +382,7 @@ def update_risk_settings(
     cooldown_seconds: int,
     min_notional_usd: float,
     max_order_notional_usd: float,
+    max_position: float,
     take_profit_pct: float,
     stop_loss_pct: float,
     default_leverage: int,
@@ -389,6 +396,7 @@ def update_risk_settings(
         max_loss = float(max_loss_absolute)
         min_notional = float(min_notional_usd)
         max_order_notional = float(max_order_notional_usd)
+        max_position_val = float(max_position)
         take_profit = float(take_profit_pct)
         stop_loss = float(stop_loss_pct)
         default_leverage_val = int(default_leverage)
@@ -413,6 +421,8 @@ def update_risk_settings(
         raise HTTPException(status_code=400, detail="最小下单金额不能为负数。")
     if max_order_notional < 0 or max_order_notional > 1_000_000:
         raise HTTPException(status_code=400, detail="Maximum order amount must be between 0 and 1000000 USDT.")
+    if max_position_val < 0:
+        raise HTTPException(status_code=400, detail="最大持仓不得为负数。")
     if take_profit < 0 or take_profit > 500:
         raise HTTPException(status_code=400, detail="止盈范围 0-500% 之间。")
     if stop_loss < 0 or stop_loss > 95:
@@ -433,6 +443,7 @@ def update_risk_settings(
         "cooldown_seconds": cooldown,
         "min_notional_usd": min_notional,
         "max_order_notional_usd": max_order_notional,
+        "max_position": max_position_val,
         "take_profit_pct": take_profit,
         "stop_loss_pct": stop_loss,
         "default_leverage": default_leverage_val,

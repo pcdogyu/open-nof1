@@ -246,6 +246,7 @@ def submit_risk_settings(
     cooldown_seconds: int = Form(...),
     min_notional_usd: float = Form(0),
     max_order_notional_usd: float = Form(0),
+    max_position: float = Form(0),
     take_profit_pct: float = Form(0),
     stop_loss_pct: float = Form(0),
     default_leverage: int = Form(1),
@@ -259,6 +260,7 @@ def submit_risk_settings(
         cooldown_seconds=cooldown_seconds,
         min_notional_usd=min_notional_usd,
         max_order_notional_usd=max_order_notional_usd,
+        max_position=max_position,
         take_profit_pct=take_profit_pct,
         stop_loss_pct=stop_loss_pct,
         default_leverage=default_leverage,
@@ -888,7 +890,21 @@ def _render_order_debug_page(entries: Sequence[dict]) -> str:
                 decision = f"{decision} (--)"
         if entry.get("fallback_used"):
             decision = f"{decision} · Fallback"
-        notes = entry.get("notes") or ""
+        automation = (entry.get("automation") or "").strip()
+        summaries: list[str] = []
+        if automation == "liquidation_reversal":
+            auto_summary = entry.get("automation_summary") or entry.get("signal_summary")
+            if auto_summary:
+                summaries.append(str(auto_summary))
+        elif entry.get("signal_summary"):
+            summaries.append(str(entry.get("signal_summary")))
+        if entry.get("notes"):
+            summaries.append(str(entry.get("notes")))
+        note_content = "<br>".join(esc(item) for item in summaries if item)
+        if not note_content:
+            note_content = "--"
+        if automation == "liquidation_reversal":
+            note_content = f"<span class='automation-tag'>爆仓巡检</span>{note_content}"
         rows.append(
             "<tr>"
             f"<td>{timestamp}</td>"
@@ -901,7 +917,7 @@ def _render_order_debug_page(entries: Sequence[dict]) -> str:
             f"<td>{_stage(entry.get('order_ready'))}</td>"
             f"<td>{_stage(entry.get('risk_passed'))}</td>"
             f"<td>{_stage(entry.get('submitted'))}</td>"
-            f"<td>{esc(notes) if notes else '--'}</td>"
+            f"<td>{note_content}</td>"
             "</tr>"
         )
     if not rows:
@@ -919,9 +935,11 @@ def _render_risk_page(settings: dict) -> str:
     max_loss = max(1.0, max_loss)
     cooldown_seconds = int(settings.get("cooldown_seconds") or 600)
     cooldown_seconds = max(10, min(86400, cooldown_seconds))
-    min_notional = max(0.0, float(settings.get("min_notional_usd") or 0.0))
-    max_order_notional = max(0.0, min(1_000_000.0, float(settings.get("max_order_notional_usd") or 0.0)))
+        min_notional = max(0.0, float(settings.get("min_notional_usd") or 0.0))
+        max_order_notional = max(0.0, min(1_000_000.0, float(settings.get("max_order_notional_usd") or 0.0)))
+        max_position_val = max(0.0, float(settings.get("max_position") or 0.0))
     pyramid_max_orders = max(0, min(100, int(settings.get("pyramid_max_orders") or 0)))
+    max_position_val = max(0.0, float(settings.get("max_position") or 0.0))
     take_profit_pct = max(0.0, min(500.0, float(settings.get("take_profit_pct") or 0.0)))
     stop_loss_pct = max(0.0, min(95.0, float(settings.get("stop_loss_pct") or 0.0)))
     default_leverage = max(1, min(125, int(settings.get("default_leverage") or 1)))
@@ -938,6 +956,8 @@ def _render_risk_page(settings: dict) -> str:
     min_notional_text = _compact(min_notional, 2)
     take_profit_text = _compact(take_profit_pct, 2)
     stop_loss_text = _compact(stop_loss_pct, 2)
+    max_position_text = _compact(max_position_val, 4)
+        max_position_text = _compact(max_position_val, 4)
     default_leverage_text = _compact(default_leverage, 0)
     max_leverage_text = _compact(max_leverage, 0)
     cooldown_minutes = cooldown_seconds / 60
@@ -957,6 +977,8 @@ def _render_risk_page(settings: dict) -> str:
         min_notional_display=esc(min_notional_text),
         max_order_notional_usd=esc(f"{max_order_notional:.2f}"),
         max_order_notional_display=esc(max_order_notional_text),
+        max_position=esc(f"{max_position_val:.4f}"),
+        max_position_display=esc(max_position_text),
         take_profit_pct=esc(f"{take_profit_pct:.2f}"),
         stop_loss_pct=esc(f"{stop_loss_pct:.2f}"),
         take_profit_display=esc(take_profit_text),
@@ -1641,6 +1663,7 @@ ORDER_DEBUG_TEMPLATE = r"""
         .stage-pending {{ background-color: rgba(248, 250, 252, 0.05); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.4); }}
         .decision {{ font-family: "Fira Code", "Consolas", monospace; font-size: 0.85rem; }}
         .empty-state {{ text-align: center; padding: 60px 0; color: #94a3b8; font-size: 0.95rem; }}
+        .automation-tag {{ display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 9999px; background: rgba(59, 130, 246, 0.2); color: #93c5fd; font-size: 0.75rem; font-weight: 600; margin-right: 8px; }}
     </style>
 </head>
 <body>
@@ -1752,6 +1775,10 @@ RISK_TEMPLATE = r"""
                 <label for="max-order-notional">最大下单金额 (USDT)
                     <input id="max-order-notional" type="number" name="max_order_notional_usd" min="0" step="0.01" value="{max_order_notional_usd}" required>
                     <span class="hint">0 表示不限制；当前 <span id="hint-max-order-notional">{max_order_notional_display}</span> USDT。</span>
+                </label>
+                <label for="max-position">最大持仓数量
+                    <input id="max-position" type="number" name="max_position" min="0" step="0.0001" value="{max_position}" required>
+                    <span class="hint">0 表示按权益自动推算；当前 <span id="hint-max-position">{max_position_display}</span> 张/币。</span>
                 </label>
                 <label for="pyramid-max">金字塔单向上限（单币对）
                     <input id="pyramid-max" type="number" name="pyramid_max_orders" min="0" max="100" step="1" value="{pyramid_max_orders}" required>
@@ -2088,7 +2115,7 @@ SCHEDULER_TEMPLATE = r"""
         .log-card {{ flex: 1 1 520px; min-width: 420px; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
         th, td {{ padding: 10px 14px; border-bottom: 1px solid rgba(226, 232, 240, 0.08); text-align: left; font-size: 0.9rem; word-break: break-word; }}
-        .log-card table {{ table-layout: fixed; }}
+        .log-card table {{ table-layout: auto; }}
         .log-card th:nth-child(1), .log-card td:nth-child(1) {{ width: 140px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
         .log-card th:nth-child(2), .log-card td:nth-child(2) {{ width: 110px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
         .log-card th:nth-child(3), .log-card td:nth-child(3) {{ width: 100px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
@@ -2102,6 +2129,8 @@ SCHEDULER_TEMPLATE = r"""
         .empty-state {{ text-align: center; color: #94a3b8; padding: 14px 0; }}
         .scheduler-execlog {{ width: 100%; border-collapse: collapse; margin-top: 10px; background-color: rgba(15, 23, 42, 0.6); border-radius: 8px; overflow: hidden; }}
         .scheduler-execlog th, .scheduler-execlog td {{ padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 0.9rem; }}
+        .scheduler-execlog td:nth-child(4) {{ white-space: normal; }}
+        .scheduler-execlog th:nth-child(5), .scheduler-execlog td:nth-child(5) {{ text-align: right; white-space: nowrap; }}
         @media (max-width: 900px) {{
             .scheduler-layout {{ flex-direction: column; }}
             .card {{ width: 100%; padding: 18px; }}

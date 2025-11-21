@@ -115,6 +115,7 @@ _DEFAULT_RISK_CONFIG = {
     "cooldown_seconds": 600,
     "min_notional_usd": 50.0,
     "max_order_notional_usd": 0.0,
+    "max_position": 0.0,
     "take_profit_pct": 0.0,
     "stop_loss_pct": 0.0,
     "pyramid_max_orders": 100,
@@ -131,6 +132,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
             "cooldown_seconds",
             "min_notional_usd",
             "max_order_notional_usd",
+            "max_position",
             "pyramid_max_orders",
         ):
             if key in raw:
@@ -140,6 +142,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     max_loss = float(config["max_loss_absolute"])
     cooldown = int(config["cooldown_seconds"])
     min_notional = float(config["min_notional_usd"])
+    max_position = float(config.get("max_position", 0.0))
     pyramid_max = int(config.get("pyramid_max_orders", 0))
     price = max(0.001, min(0.5, price))
     drawdown = max(0.1, min(95.0, drawdown))
@@ -148,6 +151,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     max_order_notional = float(config.get("max_order_notional_usd", 0.0))
     max_order_notional = max(0.0, min(1_000_000.0, max_order_notional))
     min_notional = max(0.0, min_notional)
+    max_position = max(0.0, max_position)
     pyramid_max = max(0, min(100, pyramid_max))
     return {
         "price_tolerance_pct": price,
@@ -156,6 +160,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
         "cooldown_seconds": cooldown,
         "min_notional_usd": min_notional,
         "max_order_notional_usd": max_order_notional,
+        "max_position": max_position,
         "pyramid_max_orders": pyramid_max,
     }
 
@@ -254,6 +259,7 @@ def update_risk_configuration(
     cooldown_seconds: int,
     min_notional_usd: float,
     max_order_notional_usd: float = 0.0,
+    max_position: float = 0.0,
     take_profit_pct: float = 0.0,
     stop_loss_pct: float = 0.0,
     pyramid_max_orders: int = 0,
@@ -266,10 +272,11 @@ def update_risk_configuration(
             "max_loss_absolute": max_loss_absolute,
             "cooldown_seconds": cooldown_seconds,
         "min_notional_usd": min_notional_usd,
-            "max_order_notional_usd": max_order_notional_usd,
-            "take_profit_pct": take_profit_pct,
-            "stop_loss_pct": stop_loss_pct,
-            "pyramid_max_orders": pyramid_max_orders,
+        "max_order_notional_usd": max_order_notional_usd,
+        "max_position": max_position,
+        "take_profit_pct": take_profit_pct,
+        "stop_loss_pct": stop_loss_pct,
+        "pyramid_max_orders": pyramid_max_orders,
         }
     )
     with _RISK_CONFIG_LOCK:
@@ -727,6 +734,7 @@ async def _scan_liquidation_flow_job() -> Dict[str, str]:
     started = datetime.now(tz=timezone.utc)
     try:
         highlights: list[str] = []
+        records: list[tuple[str, float, str]] = []
         now = datetime.now(tz=timezone.utc)
         for instrument in instruments:
             features = _load_market_features(instrument)
@@ -742,11 +750,20 @@ async def _scan_liquidation_flow_job() -> Dict[str, str]:
                 age = max(0, int((now - ts).total_seconds()))
                 age_label = f"@{age}s"
             highlights.append(f"{instrument}:{net_qty:+.2f}{age_label}")
+            records.append((instrument, float(net_qty), age_label))
         if highlights:
             preview = " | ".join(highlights[:4])
             if len(highlights) > 4:
                 preview += " | ..."
-            detail = f"扫描 {len(instruments)} 个合约，检测到 {len(highlights)} 条爆仓流：{preview}"
+            suggestions = []
+            for inst, qty, label in records[:3]:
+                direction_hint = "逢低加多" if qty > 0 else "逢高做空"
+                suggestions.append(f"{inst}：{direction_hint}，净爆仓 {qty:+.2f}{label}")
+            advice = " | ".join(suggestions)
+            detail = (
+                f"扫描 {len(instruments)} 个合约，检测到 {len(highlights)} 条爆仓流：{preview}"
+                f"{' | ' + advice if advice else ''}"
+            )
         else:
             detail = f"扫描 {len(instruments)} 个合约，暂无爆仓流事件"
         duration = (datetime.now(tz=timezone.utc) - started).total_seconds()
@@ -933,6 +950,13 @@ async def _process_account_signal(
         liquidation_alert = _annotate_liquidation_hint(request)
         if liquidation_alert:
             debug_entry["liquidation_hint"] = liquidation_alert
+        try:
+            response = await runtime.generate_signal(request)
+        except Exception as exc:
+            logger.exception("Model invocation failed for %s: %s", account_key, exc)
+            debug_entry["notes"] = f"模型执行失败: {exc}"
+            _record_order_debug_entry(debug_entry)
+            return False, None
 
     if response is None:
         logger.debug("No signal generated for %s after liquidation scan.", account_key)
@@ -948,6 +972,8 @@ async def _process_account_signal(
         positions=positions,
         account_meta=meta,
     )
+    if debug_entry.get("automation") == "liquidation_reversal":
+        debug_entry["automation_summary"] = _format_liquidation_debug_summary(request, response, routed)
     if not routed and not _has_open_positions(positions):
         fallback = await _select_fallback_trade(
             runtime=runtime,
@@ -969,6 +995,7 @@ async def _process_account_signal(
                 response.confidence,
             )
     signal_summary = _summarize_ai_signal(response, request, routed)
+    debug_entry["signal_summary"] = signal_summary
     _record_ai_signal_entry(response, request, routed)
     if not routed:
         logger.debug("Router did not produce executable order for %s", account_key)
@@ -1103,6 +1130,37 @@ def _summarize_ai_signal(
     if reason:
         reason = f" 理由:{reason}"
     return f"{instrument}:{response.model_id}={decision}({confidence}){(' -> ' + order_desc) if order_desc else ''}{reason}"
+
+
+def _format_liquidation_debug_summary(
+    request: SignalRequest,
+    response: SignalResponse,
+    routed: Optional[RoutedOrder],
+) -> str:
+    instrument = getattr(request.market, "instrument_id", None) or "-"
+    meta = request.metadata or {}
+    direction = meta.get("liquidation_direction") or (
+        "long" if str((response.suggested_order or {}).get("side", "buy")).lower() == "buy" else "short"
+    )
+    notional = meta.get("liquidation_notional")
+    try:
+        notional_text = f"{float(notional):+.2f}"
+    except (TypeError, ValueError):
+        notional_text = str(notional) if notional is not None else "-"
+    if routed and routed.intent:
+        side = routed.intent.side
+        size = routed.intent.size
+    else:
+        suggested = response.suggested_order or {}
+        side = suggested.get("side", "-")
+        size = suggested.get("size", "-")
+    side_lower = str(side).lower()
+    action = "加多" if side_lower == "buy" else "加空"
+    size_text = "-" if size in (None, "") else str(size)
+    return (
+        f"爆仓巡检：处理 1 个合约（{instrument}），提交 {side or '-'} {size_text}，"
+        f"建议{action}，净爆仓 {notional_text}（{direction}）"
+    )
 
 
 def _record_ai_signal_entry(
@@ -1266,7 +1324,14 @@ def _build_signal_request(
     current_position = sum(
         position.quantity if position.instrument_id == instrument else 0.0 for position in positions
     )
-    max_position = float(meta.get("max_position", max(0.01, account.starting_equity / reference_price * 0.1)))
+    with _RISK_CONFIG_LOCK:
+        risk_max_position = float(_RISK_CONFIG.get("max_position", 0.0))
+    try:
+        meta_max_position = float(meta.get("max_position")) if "max_position" in meta else 0.0
+    except (TypeError, ValueError):
+        meta_max_position = 0.0
+    max_position_base = max(0.01, account.starting_equity / reference_price * 0.1)
+    max_position = meta_max_position or risk_max_position or max_position_base
 
     risk_context = RiskContext(
         max_position=max_position,
