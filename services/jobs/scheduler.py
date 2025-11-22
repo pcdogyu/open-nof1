@@ -1237,11 +1237,15 @@ def _format_liquidation_debug_summary(
         side = suggested.get("side", "-")
         size = suggested.get("size", "-")
     size_text = "-" if size in (None, "") else str(size)
-    direction_label = "????" if direction == "short" else "????"
-    guidance = "??????" if direction == "short" else "??????"
+    side_label = {"buy": "买入", "sell": "卖出"}.get(str(side).lower(), str(side or "-"))
+    direction_label = "空单爆仓" if direction == "short" else "多单爆仓"
+    guidance = "建议逢高防守，谨慎追多" if direction == "short" else "建议逢低承接，关注反弹"
+    order_hint = f"{side_label} {size_text}".strip()
+    if size_text in ("-", ""):
+        order_hint = side_label
     return (
-        f"?? 1 ?????? {side or '-'} {size_text}?"
-        f"?????{instrument} {direction_label}???? {notional_text}?{guidance}?"
+        f"爆仓巡检：检测到 1 条信号，建议{order_hint}；"
+        f"{instrument} 净出现{direction_label}，名义金额约 {notional_text}，{guidance}。"
     )
 
 
@@ -1880,19 +1884,32 @@ def _evaluate_liquidation_reversal_state(
 
 
 def _estimate_reversal_order_size(request: SignalRequest, direction: str) -> float:
+    with _RISK_CONFIG_LOCK:
+        min_notional = float(_RISK_CONFIG.get("min_notional_usd", 0.0))
+    price_hint = _try_float(getattr(request.market, "price", None))
+    if (price_hint is None or price_hint <= 0) and request.market.metadata:
+        price_hint = _try_float(request.market.metadata.get("last_price"))
+
     max_position = float(max(request.risk.max_position or 0.0, 0.0))
-    if max_position <= 0:
-        return 0.0
     current = float(request.risk.current_position or 0.0)
     if direction == "long":
         used = max(0.0, current)
     else:
         used = max(0.0, -current)
     capacity = max(0.0, max_position - used)
+
+    notional_target = 0.0
+    if min_notional > 0 and price_hint and price_hint > 0:
+        notional_target = max(0.0, min_notional / price_hint)
+
+    if max_position <= 0:
+        return round(notional_target, 6) if notional_target > 0 else 0.0
     if capacity <= 0:
         return 0.0
+
     clip = max(max_position * 0.25, 0.001)
-    return round(min(capacity, clip), 6)
+    target = notional_target if notional_target > 0 else clip
+    return round(min(capacity, target), 6)
 
 
 def _coerce_timestamp(value: float | int | None) -> Optional[datetime]:

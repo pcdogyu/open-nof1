@@ -45,7 +45,17 @@ TRADABLE_INSTRUMENTS = [   'XRP-USDT-SWAP',
     'SOL-USDT-SWAP',
     'DOGE-USDT-SWAP',
     'ADA-USDT-SWAP',
-    'LTC-USDT-SWAP']
+    'LTC-USDT-SWAP',
+    'AAVE-USDT-SWAP',
+    'AVAX-USDT-SWAP',
+    'BCH-USDT-SWAP',
+    'ENA-USDT-SWAP',
+    'DOT-USDT-SWAP',
+    'OKB-USDT-SWAP',
+    'SUI-USDT-SWAP',
+    'XLM-USDT-SWAP',
+    'UNI-USDT-SWAP',
+    'PUMP-USDT-SWAP']
 
 # Default polling interval (seconds) for the market data pipeline loop.
 PIPELINE_POLL_INTERVAL = 120
@@ -104,7 +114,7 @@ RISK_SETTINGS = {   'price_tolerance_pct': 0.02,
     'max_drawdown_pct': 8.0,
     'max_loss_absolute': 1500.0,
     'cooldown_seconds': 28800,
-    'min_notional_usd': 50.0,
+    'min_notional_usd': 100.0,
     'max_order_notional_usd': 1000.0,
     'max_position': 0.0,
     'take_profit_pct': 0.0,

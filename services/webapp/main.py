@@ -2729,6 +2729,17 @@ LIQUIDATION_TEMPLATE = r"""
           if (!isFinite(num)) {{ return '-'; }}
           return num.toFixed(digits);
         }};
+        const _toAbsNumber = (value) => {{
+          const num = Number(value);
+          return Number.isFinite(num) ? Math.abs(num) : 0;
+        }};
+        const extractQuantity = (item) => {{
+          if (!item) {{ return 0; }}
+          const netQty = _toAbsNumber(item.net_qty);
+          const longQty = _toAbsNumber(item.long_qty);
+          const shortQty = _toAbsNumber(item.short_qty);
+          return Math.max(netQty, longQty, shortQty);
+        }};
         const fmtTimestamp = (value) => {{
           if (!value) {{ return '--'; }}
           const date = new Date(value);
@@ -2750,9 +2761,9 @@ LIQUIDATION_TEMPLATE = r"""
           if (Number.isFinite(provided)) {{
             return provided;
           }}
-          const qty = Math.abs(Number(item.net_qty));
+          const qty = extractQuantity(item);
           const price = Number(item.last_price);
-          if (Number.isFinite(qty) && Number.isFinite(price)) {{
+          if (qty > 0 && Number.isFinite(price)) {{
             return qty * price;
           }}
           return null;
@@ -2761,7 +2772,7 @@ LIQUIDATION_TEMPLATE = r"""
           const minQty = Math.max(0, Number(minSizeInput.value) || 0);
           const minNotional = Math.max(0, Number(minNotionalInput.value) || 0);
           return items.filter((item) => {{
-            const qty = Math.abs(Number(item.net_qty)) || 0;
+            const qty = extractQuantity(item);
             const notional = computeNotional(item) || 0;
             if (minQty && qty < minQty) {{
               return false;

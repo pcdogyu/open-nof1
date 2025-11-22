@@ -44,7 +44,7 @@ def deterministic_decision(request: SignalRequest, *, source: str) -> Dict[str, 
         "decision": decision,
         "confidence": confidence,
         "reasoning": (
-            "Deterministic fallback based on position ratio and price bias."
+            "\u57fa\u4e8e\u4ed3\u4f4d\u6bd4\u4f8b\u4e0e\u4ef7\u683c\u504f\u5dee\u7684\u786e\u5b9a\u6027\u515c\u5e95\u903b\u8f91\u3002"
         ),
         "order": {
             "instrument_id": request.market.instrument_id,

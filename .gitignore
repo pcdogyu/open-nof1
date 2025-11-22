@@ -6,6 +6,7 @@ config.py
 # Python caches
 __pycache__/
 *.py[cod]
+*.pyc
 *.pyo
 *.pyw
 *.pyd
@@ -21,3 +22,6 @@ __pycache__/
 # Names that include "test" should stay local
 *test*
 *[Tt]est*
+models/__pycache__/utils.cpython-313.pyc
+services/webapp/__pycache__/main.cpython-313.pyc
+__pycache__/config.cpython-313.pyc
