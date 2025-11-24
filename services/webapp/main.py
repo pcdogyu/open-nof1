@@ -2624,6 +2624,19 @@ LIQUIDATION_TEMPLATE = r"""
         .wave-signal-strong {{ color: #fbbf24; }}
         .wave-signal-bottom {{ color: #4ade80; }}
         .wave-signal-warn {{ color: #f87171; }}
+        .order-btn {{
+            padding: 4px 10px;
+            border-radius: 999px;
+            border: 1px solid #38bdf8;
+            background: transparent;
+            color: #38bdf8;
+            cursor: pointer;
+            font-size: 0.78rem;
+        }}
+        .order-btn[disabled] {{
+            opacity: 0.5;
+            cursor: not-allowed;
+        }}
         .signal-subtext {{ font-size: 0.75rem; color: #94a3b8; margin-top: 4px; display: block; }}
     </style>
 </head>
@@ -2685,10 +2698,11 @@ LIQUIDATION_TEMPLATE = r"""
                     <th>密度</th>
                     <th>LPI 强平压力指数</th>
                     <th>信号</th>
+                    <th>操作</th>
                 </tr>
             </thead>
             <tbody id="wave-body">
-                <tr><td colspan="10" class="empty-state">等待数据...</td></tr>
+                <tr><td colspan="11" class="empty-state">等待数据...</td></tr>
             </tbody>
         </table>
     </div>
@@ -2713,6 +2727,8 @@ LIQUIDATION_TEMPLATE = r"""
         const select = document.getElementById('instrument-select');
         const minSizeInput = document.getElementById('min-size');
         const minNotionalInput = document.getElementById('min-notional');
+        const autoNotionalInput = document.getElementById('auto-order-notional');
+        const waveTableBody = document.getElementById('wave-body');
         const FETCH_LIMIT = 400;
         let latestItems = [];
         const fmtNumber = (value, digits) => {{
@@ -2812,11 +2828,29 @@ LIQUIDATION_TEMPLATE = r"""
           const label = describePcPressure(value);
           return label ? `${{baseText}} (${{label}})` : baseText;
         }};
+        const signalOrderConfig = (signal) => {{
+          const code = (signal.signal_code || '').toLowerCase();
+          if (code === 'bottom_absorb') {{
+            return {{ side: 'buy', label: '买入' }};
+          }}
+          if (code === 'top_signal') {{
+            return {{ side: 'sell', label: '卖出' }};
+          }}
+          return null;
+        }};
+        const renderOrderAction = (signal) => {{
+          const config = signalOrderConfig(signal);
+          const instrument = signal.instrument || '';
+          if (!config || !instrument) {{
+            return '<span style="opacity:0.6">--</span>';
+          }}
+          return `<button type="button" class="order-btn" data-instrument="${{instrument}}" data-side="${{config.side}}">${{config.label}}</button>`;
+        }};
         const renderWaveTable = (signals) => {{
-          const body = document.getElementById('wave-body');
+          const body = waveTableBody;
           if (!body) {{ return; }}
           if (!Array.isArray(signals) || !signals.length) {{
-            body.innerHTML = '<tr><td colspan="10" class="empty-state">????</td></tr>';
+            body.innerHTML = '<tr><td colspan="11" class="empty-state">等待数据...</td></tr>';
             return;
           }}
           const rows = signals.map((signal) => {{
@@ -2852,10 +2886,65 @@ LIQUIDATION_TEMPLATE = r"""
                   <div>${{signalText}}</div>
                   ${{detailHtml}}
                 </td>
+                <td>${{renderOrderAction(signal)}}</td>
               </tr>`;
           }});
           body.innerHTML = rows.join('');
         }};
+        const placeAutoOrder = (instrument, side, button) => {{
+          if (!instrument || !side) {{
+            alert('缺少合约或方向信息，无法下单。');
+            return;
+          }}
+          const notionalValue = Number(autoNotionalInput?.value);
+          if (!Number.isFinite(notionalValue) || notionalValue <= 0) {{
+            alert('请在 “Auto Order Notional” 中输入大于 0 的金额。');
+            return;
+          }}
+          const originalText = button.textContent;
+          button.disabled = true;
+          button.textContent = '下单中...';
+          fetch('/api/okx/wave-order', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{
+              instrument_id: instrument,
+              side,
+              size: notionalValue,
+              order_mode: 'notional',
+            }}),
+          }})
+            .then(async (res) => {{
+              const data = await res.json().catch(() => ({{}}));
+              return [res.ok, data];
+            }})
+            .then(([ok, data]) => {{
+              if (ok) {{
+                const est = Number(data.notional_estimate);
+                const confirmation = Number.isFinite(est) ? est : notionalValue;
+                alert(`已提交 ${side === 'buy' ? '买入' : '卖出'} 订单 ≈ $${{confirmation.toFixed(2)}} USDT。`);
+              }} else {{
+                alert(data.detail || '下单失败，请稍后重试。');
+              }}
+            }})
+            .catch((err) => {{
+              console.error(err);
+              alert('下单失败，请稍后重试。');
+            }})
+            .finally(() => {{
+              button.disabled = false;
+              button.textContent = originalText;
+            }});
+        }};
+        waveTableBody?.addEventListener('click', (event) => {{
+          const target = event.target.closest('.order-btn');
+          if (!target || target.disabled) {{
+            return;
+          }}
+          const instrument = target.getAttribute('data-instrument');
+          const side = target.getAttribute('data-side');
+          placeAutoOrder(instrument, side, target);
+        }});
         const applyFilters = (items) => {{
           const minQty = Math.max(0, Number(minSizeInput.value) || 0);
           const minNotional = Math.max(0, Number(minNotionalInput.value) || 0);

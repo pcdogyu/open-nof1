@@ -5,6 +5,8 @@ config.py
 
 # Python caches
 __pycache__/
+**/__pycache__/
+*pycache*/
 *.py[cod]
 *.pyc
 *.pyo
@@ -32,3 +34,5 @@ config.py
 services/jobs/__pycache__/scheduler.cpython-310.pyc
 services/jobs/__pycache__/scheduler.cpython-313.pyc
 __pycache__/config.cpython-313.pyc
+services/webapp/__pycache__/main.cpython-313.pyc
+data/logs/ai_signals.jsonl
