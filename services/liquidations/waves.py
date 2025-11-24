@@ -28,6 +28,8 @@ class WaveMetrics:
     end_price: Optional[float]
     duration_minutes: float
     window_size: int
+    long_total: float
+    short_total: float
 
 
 @dataclass
@@ -40,6 +42,8 @@ class WaveEvent:
     detected_at: datetime
     price: Optional[float]
     metrics: WaveMetrics
+    liquidation_side: Optional[str] = None
+    liquidation_side_label: Optional[str] = None
 
 
 @dataclass
@@ -55,6 +59,8 @@ class WaveSignal:
     severity: int
     event_id: Optional[int]
     event_detected_at: Optional[datetime]
+    liquidation_side: Optional[str] = None
+    liquidation_side_label: Optional[str] = None
 
     def to_payload(self) -> dict:
         metrics = self.metrics
@@ -69,6 +75,8 @@ class WaveSignal:
             "severity": self.severity,
             "event_id": self.event_id,
             "event_detected_at": metrics.end_time.isoformat() if metrics.end_time else None,
+            "liquidation_side": self.liquidation_side,
+            "liquidation_side_label": self.liquidation_side_label,
             "metrics": {
                 "flv": metrics.flv,
                 "baseline": metrics.baseline,
@@ -81,6 +89,8 @@ class WaveSignal:
                 "lpi": metrics.lpi,
                 "end_price": metrics.end_price,
                 "start_price": metrics.start_price,
+                "long_total": metrics.long_total,
+                "short_total": metrics.short_total,
             },
         }
 
@@ -106,7 +116,7 @@ class WaveDetector:
     def __init__(
         self,
         *,
-        window_size: int = 20,
+        window_size: int = 50,
         multiplier: float = 2.0,
         price_drop_threshold: float = 0.7,
         settle_threshold: float = 0.2,
@@ -192,11 +202,17 @@ class WaveDetector:
     def _compute_metrics(self, window: Sequence[dict], state: _WaveState) -> WaveMetrics:
         flv = 0.0
         fls = 0.0
+        total_long = 0.0
+        total_short = 0.0
         first_ts = window[0]["timestamp"]
         last_ts = window[-1]["timestamp"]
         first_price = self._coerce_float(window[0].get("last_price"))
         last_price = self._coerce_float(window[-1].get("last_price"))
         for entry in window:
+            long_qty = abs(self._coerce_float(entry.get("long_qty")) or 0.0)
+            short_qty = abs(self._coerce_float(entry.get("short_qty")) or 0.0)
+            total_long += long_qty
+            total_short += short_qty
             qty = self._extract_quantity(entry)
             flv += qty
             notional = entry.get("notional_value")
@@ -235,7 +251,25 @@ class WaveDetector:
             end_price=last_price,
             duration_minutes=duration_minutes,
             window_size=len(window),
+            long_total=total_long,
+            short_total=total_short,
         )
+
+    def _describe_liquidation_side(self, metrics: WaveMetrics) -> tuple[Optional[str], Optional[str]]:
+        long_total = metrics.long_total or 0.0
+        short_total = metrics.short_total or 0.0
+        total = long_total + short_total
+        if total <= 0:
+            return None, None
+        dominance = abs(long_total - short_total) / total
+        threshold = 0.15
+        if dominance <= threshold:
+            return "mixed", "多空强平接近"
+        if long_total > short_total:
+            share = (long_total / total) * 100
+            return "long", f"多单被强平为主 ({share:.0f}%)"
+        share = (short_total / total) * 100
+        return "short", f"空单被强平为主 ({share:.0f}%)"
 
     def _evaluate_signal(
         self,
@@ -251,6 +285,7 @@ class WaveDetector:
         signal_code: Optional[str] = None
         direction: Optional[str] = None
         severity = 1
+        liquidation_side, liquidation_label = self._describe_liquidation_side(metrics)
 
         state.recent_flv.append(metrics.flv)
         flv_dropping = (
@@ -285,6 +320,8 @@ class WaveDetector:
         elif absorbing:
             status = "吸收"
             signal_text = "强平被吸收 → 底部信号"
+            base_text = "强平被吸收 → 底部信号"
+            signal_text = f"{base_text} · {liquidation_label}" if liquidation_label else base_text
             signal_class = "wave-signal-bottom"
             signal_code = "bottom_absorb"
             direction = "buy"
@@ -334,6 +371,8 @@ class WaveDetector:
                     detected_at=detected_at,
                     price=metrics.end_price,
                     metrics=metrics,
+                    liquidation_side=liquidation_side,
+                    liquidation_side_label=liquidation_label,
                 )
                 self._events[(instrument, signal_code)] = event
                 state.active_signal_code = signal_code
@@ -354,6 +393,8 @@ class WaveDetector:
             severity=severity,
             event_id=event_id,
             event_detected_at=latest_timestamp,
+            liquidation_side=liquidation_side,
+            liquidation_side_label=liquidation_label,
         )
         return signal
 
@@ -374,6 +415,8 @@ class WaveDetector:
             end_price=None,
             duration_minutes=0.0,
             window_size=0,
+            long_total=0.0,
+            short_total=0.0,
         )
         return WaveSignal(
             instrument=instrument,
@@ -387,6 +430,8 @@ class WaveDetector:
             severity=1,
             event_id=None,
             event_detected_at=None,
+            liquidation_side=None,
+            liquidation_side_label=None,
         )
 
     @staticmethod

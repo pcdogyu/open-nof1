@@ -291,8 +291,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     pyramid_reentry = max(0.0, min(50.0, pyramid_reentry))
     liquidation_threshold = max(0.0, liquidation_threshold)
     same_direction_count = max(1, min(20, same_direction_count))
-    opposite_count = max(1, min(20, opposite_count))
-    silence_seconds = max(60.0, min(3600.0, silence_seconds))
+    opposite_count = max(0, min(20, opposite_count))
+    silence_seconds = max(0.0, min(300.0, silence_seconds))
     return {
         "price_tolerance_pct": price,
         "max_drawdown_pct": drawdown,
@@ -580,10 +580,10 @@ def update_risk_settings(
         raise HTTPException(status_code=400, detail="爆仓金额阈值必须为非负数。")
     if same_direction_val < 1 or same_direction_val > 20:
         raise HTTPException(status_code=400, detail="同向爆仓笔数需在 1-20 之间。")
-    if opposite_count_val < 1 or opposite_count_val > 20:
-        raise HTTPException(status_code=400, detail="逆向爆仓笔数需在 1-20 之间。")
-    if silence_seconds_val < 60 or silence_seconds_val > 3600:
-        raise HTTPException(status_code=400, detail="冷静时长需在 60-3600 秒之间。")
+    if opposite_count_val < 0 or opposite_count_val > 20:
+        raise HTTPException(status_code=400, detail="逆向爆仓笔数需在 0-20 之间。")
+    if silence_seconds_val < 0 or silence_seconds_val > 300:
+        raise HTTPException(status_code=400, detail="冷静时长需在 0-300 秒之间。")
 
     normalized = {
         "price_tolerance_pct": price,
@@ -909,6 +909,9 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
     symbol = payload.instrument_id
     side = payload.side.lower()
     account_id = payload.account_id or _default_okx_account_id()
+    order_mode = (payload.order_mode or "size").strip().lower()
+    if order_mode not in {"size", "notional"}:
+        order_mode = "size"
     try:
         requested_size = float(payload.size)
     except (TypeError, ValueError):
@@ -958,11 +961,11 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
             if side == "sell" and side_text not in {"sell", "short"}:
                 continue
             matching_positions.append(pos)
-        for pos in matching_positions:
-            entry_price = _try_float(pos.get("entry_price"))
-            if entry_price and entry_price > 0:
-                deviation = abs((entry_price - event_price) / entry_price) * 100.0
-                if deviation < reentry_pct:
+    for pos in matching_positions:
+        entry_price = _try_float(pos.get("entry_price"))
+        if entry_price and entry_price > 0:
+            deviation = abs((entry_price - event_price) / entry_price) * 100.0
+            if deviation < reentry_pct:
                     raise HTTPException(
                         status_code=400,
                         detail=f"{symbol} 最近持仓 {entry_price:.4f} 与信号价 {event_price:.4f} 偏离 {deviation:.2f}% < {reentry_pct:.2f}%，跳过自动加仓。",
@@ -972,7 +975,24 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
     lot_size = _try_float(instrument_meta.get("lotSz")) or 0.0
     min_size = _try_float(instrument_meta.get("minSz")) or 0.0
     max_size = _try_float(instrument_meta.get("maxSz")) or 0.0
+
+    try:
+        ticker = _fetch_public_ticker(symbol)
+    except Exception as exc:  # pragma: no cover - network errors
+        logger.debug("Failed to fetch ticker for %s: %s", symbol, exc)
+        ticker = None
+    price_hint = _extract_ticker_price(ticker) if ticker else None
+    if (price_hint is None or price_hint <= 0) and event_price and event_price > 0:
+        price_hint = event_price
+
     adjusted_size = max(requested_size, 0.0)
+    notional_requested = None
+    if order_mode == "notional":
+        notional_requested = adjusted_size
+        if not price_hint or price_hint <= 0:
+            raise HTTPException(status_code=400, detail="无法获取有效的行情价格，无法按金额下单。")
+        adjusted_size = notional_requested / price_hint
+
     if lot_size > 0:
         steps = max(1, math.ceil(adjusted_size / lot_size))
         adjusted_size = steps * lot_size
@@ -981,8 +1001,6 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
     if max_size > 0 and adjusted_size > max_size:
         adjusted_size = max_size
 
-    ticker = _fetch_public_ticker(symbol)
-    price_hint = _extract_ticker_price(ticker) if ticker else None
     min_notional = float(risk.get("min_notional_usd", 0.0))
     max_notional = float(risk.get("max_order_notional_usd", 0.0))
     if price_hint and min_notional > 0:
@@ -1007,7 +1025,11 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
         price=None,
         margin_mode=None,
     )
-    notional_estimate = rounded_size * price_hint if price_hint else None
+    notional_estimate: Optional[float]
+    if order_mode == "notional" and notional_requested is not None:
+        notional_estimate = notional_requested
+    else:
+        notional_estimate = rounded_size * price_hint if price_hint else None
     return {
         "status": result.get("status"),
         "order_id": result.get("order_id"),
@@ -1016,6 +1038,7 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
         "size": rounded_size,
         "reference_price": price_hint,
         "notional_estimate": notional_estimate,
+        "order_mode": order_mode,
         "risk_constraints": {
             "min_notional_usd": min_notional,
             "max_order_notional_usd": max_notional,

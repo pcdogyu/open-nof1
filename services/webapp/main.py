@@ -997,8 +997,9 @@ def _render_risk_page(settings: dict) -> str:
     pyramid_reentry_pct = max(0.0, min(50.0, float(settings.get("pyramid_reentry_pct") or 0.0)))
     liquidation_threshold = max(0.0, float(settings.get("liquidation_notional_threshold") or 0.0))
     liquidation_same_count = max(1, int(settings.get("liquidation_same_direction_count") or 4))
-    liquidation_opposite_count = max(1, int(settings.get("liquidation_opposite_count") or 3))
-    liquidation_silence_seconds = max(60, int(settings.get("liquidation_silence_seconds") or 300))
+    liquidation_opposite_count = max(0, int(settings.get("liquidation_opposite_count") or 3))
+    silence_config = int(settings.get("liquidation_silence_seconds") or 300)
+    liquidation_silence_seconds = max(0, min(300, silence_config))
 
     def _compact(value: float, digits: int = 2) -> str:
         text = f"{value:.{digits}f}"
@@ -1929,15 +1930,15 @@ RISK_TEMPLATE = r"""
                         <input id="liquidation-same-count" type="number" name="liquidation_same_direction_count" min="1" max="20" step="1" value="{liquidation_same_direction_count}" required>
                         <span class="hint">15 分钟内净爆仓金额≥50k USDT 且同方向数量超过 {liquidation_same_direction_count} 笔时才进入防守。</span>
                     </label>
-                    <label for="liquidation-opposite-count">逆向爆仓确认
-                        <input id="liquidation-opposite-count" type="number" name="liquidation_opposite_count" min="1" max="20" step="1" value="{liquidation_opposite_count}" required>
-                        <span class="hint">逆向方向需要累计 {liquidation_opposite_count} 笔才执行逆向防守。</span>
+                    <label for="liquidation-opposite-count">逆向爆仓确认（笔）
+                        <input id="liquidation-opposite-count" type="number" name="liquidation_opposite_count" min="0" max="20" step="1" value="{liquidation_opposite_count}" required>
+                        <span class="hint">设为 0 表示不需要逆向确认；达到 {liquidation_opposite_count} 笔逆向爆仓后才会触发反向下单。</span>
                     </label>
                     <label for="liquidation-silence">同向冷静期（秒）
-                        <input id="liquidation-silence" type="number" name="liquidation_silence_seconds" min="60" max="3600" step="30" value="{liquidation_silence_seconds}" required>
-                        <span class="hint">至少等待 {liquidation_silence_minutes} 分钟 (≈{liquidation_silence_seconds} 秒) 未再出现同向爆仓。</span>
+                        <input id="liquidation-silence" type="number" name="liquidation_silence_seconds" min="0" max="300" step="1" value="{liquidation_silence_seconds}" required>
+                        <span class="hint">范围 0-300 秒，设为 0 表示爆仓流结束后立刻以市价反向入场；当前为 {liquidation_silence_minutes} 分钟（{liquidation_silence_seconds} 秒）。</span>
                     </label>
-                    <label for="max-position">最大持仓数量
+                    <label for="max-position">组合仓位上限（张/币）
                         <input id="max-position" type="number" name="max_position" min="0" step="0.0001" value="{max_position}" required>
                         <span class="hint">当前限制：<span id="hint-max-position">{max_position_display}</span> 张/币，0 表示按权益估算。</span>
                     </label>
@@ -1986,333 +1987,31 @@ RISK_TEMPLATE = r"""
                 </div>
                 <button type="submit">保存策略参数</button>
             </form>
+            <script>
+                (function enforceSilenceRange() {
+                    const silenceField = document.getElementById('liquidation-silence');
+                    if (!silenceField) {
+                        return;
+                    }
+                    silenceField.min = '0';
+                    silenceField.max = '300';
+                    const validate = () => {
+                        const value = Number(silenceField.value);
+                        if (!Number.isFinite(value)) {
+                            silenceField.setCustomValidity('请输入 0-300 之间的数字。');
+                        } else if (value < 0 || value > 300) {
+                            silenceField.setCustomValidity('冷静期需在 0-300 秒之间。');
+                        } else {
+                            silenceField.setCustomValidity('');
+                        }
+                    };
+                    validate();
+                    silenceField.addEventListener('input', validate);
+                })();
+            </script>
         </section>
         
     </div>
-    <script>
-      (function() {
-        const select = document.getElementById('instrument-select');
-        const minSizeInput = document.getElementById('min-size');
-        const minNotionalInput = document.getElementById('min-notional');
-        const autoSizeInput = document.getElementById('auto-order-size');
-        const autoNotionalInput = document.getElementById('auto-order-notional');
-        const autoModeSelect = document.getElementById('auto-order-mode');
-        const FETCH_LIMIT = 400;
-        const DEFAULT_AUTO_ORDER_SIZE = 1;
-        const DEFAULT_AUTO_ORDER_NOTIONAL = 100;
-        const triggeredSignals = new Set();
-        const SIGNAL_SIDE_MAP = {
-          bottom_absorb: 'buy',
-          top_signal: 'sell',
-        };
-        const AUTO_SIZE_STORAGE_KEY = 'liquidationAutoOrderSizes';
-        const AUTO_NOTIONAL_STORAGE_KEY = 'liquidationAutoOrderNotional';
-        const AUTO_MODE_STORAGE_KEY = 'liquidationAutoOrderMode';
-        let latestItems = [];
-        const normalizeInstrument = (value) => (value || '').trim().toUpperCase();
-        const loadMap = (key) => {
-          try {
-            const raw = localStorage.getItem(key);
-            return raw ? JSON.parse(raw) : {};
-          } catch (err) {
-            console.warn(`无法读取本地存储 ${key}`, err);
-            return {};
-          }
-        };
-        const persistMap = (key, map) => {
-          try {
-            localStorage.setItem(key, JSON.stringify(map));
-          } catch (err) {
-            console.warn(`无法保存本地存储 ${key}`, err);
-          }
-        };
-        const autoSizeMap = loadMap(AUTO_SIZE_STORAGE_KEY);
-        const autoNotionalMap = loadMap(AUTO_NOTIONAL_STORAGE_KEY);
-        const autoModeMap = loadMap(AUTO_MODE_STORAGE_KEY);
-        const getAutoSize = (instrument) => {
-          const key = normalizeInstrument(instrument);
-          if (!key) { return DEFAULT_AUTO_ORDER_SIZE; }
-          const numeric = Number(autoSizeMap[key]);
-          if (!Number.isFinite(numeric) || numeric <= 0) {
-            return DEFAULT_AUTO_ORDER_SIZE;
-          }
-          return numeric;
-        };
-        const getAutoNotional = (instrument) => {
-          const key = normalizeInstrument(instrument);
-          if (!key) { return DEFAULT_AUTO_ORDER_NOTIONAL; }
-          const numeric = Number(autoNotionalMap[key]);
-          if (!Number.isFinite(numeric) || numeric <= 0) {
-            return DEFAULT_AUTO_ORDER_NOTIONAL;
-          }
-          return numeric;
-        };
-        const getAutoMode = (instrument) => {
-          const key = normalizeInstrument(instrument);
-          const mode = (autoModeMap[key] || 'size').toLowerCase();
-          return mode === 'notional' ? 'notional' : 'size';
-        };
-        const syncAutoControls = () => {
-          const inst = select.value;
-          if (autoSizeInput) {
-            autoSizeInput.value = getAutoSize(inst);
-          }
-          if (autoNotionalInput) {
-            autoNotionalInput.value = getAutoNotional(inst);
-          }
-          if (autoModeSelect) {
-            autoModeSelect.value = getAutoMode(inst);
-          }
-        };
-        const updateAutoSize = (instrument, value) => {
-          const key = normalizeInstrument(instrument);
-          if (!key) { return; }
-          const numeric = Number(value);
-          if (!Number.isFinite(numeric) || numeric <= 0) {
-            delete autoSizeMap[key];
-          } else {
-            autoSizeMap[key] = numeric;
-          }
-          persistMap(AUTO_SIZE_STORAGE_KEY, autoSizeMap);
-        };
-        const updateAutoNotional = (instrument, value) => {
-          const key = normalizeInstrument(instrument);
-          if (!key) { return; }
-          const numeric = Number(value);
-          if (!Number.isFinite(numeric) || numeric <= 0) {
-            delete autoNotionalMap[key];
-          } else {
-            autoNotionalMap[key] = numeric;
-          }
-          persistMap(AUTO_NOTIONAL_STORAGE_KEY, autoNotionalMap);
-        };
-        const updateAutoMode = (instrument, value) => {
-          const key = normalizeInstrument(instrument);
-          if (!key) { return; }
-          const normalized = (value || 'size').toLowerCase();
-          if (normalized !== 'notional' && normalized !== 'size') {
-            delete autoModeMap[key];
-          } else {
-            autoModeMap[key] = normalized;
-          }
-          persistMap(AUTO_MODE_STORAGE_KEY, autoModeMap);
-        };
-        const computeOrderSize = (signal) => {
-          const instrument = signal.instrument;
-          const mode = getAutoMode(instrument);
-          if (mode === 'notional') {
-            const notional = getAutoNotional(instrument);
-            const referencePrice =
-              Number(signal.metrics?.end_price) ||
-              Number(signal.metrics?.start_price) ||
-              null;
-            if (Number.isFinite(referencePrice) && referencePrice > 0) {
-              const qty = notional / referencePrice;
-              if (qty > 0) {
-                return qty;
-              }
-            }
-            return getAutoSize(instrument);
-          }
-          return getAutoSize(instrument);
-        };
-        syncAutoControls();
-        const fmtNumber = (value, digits) => {
-          if (value === null || value === undefined || value === '') { return '-'; }
-          const num = Number(value);
-          if (!isFinite(num)) { return '-'; }
-          return num.toFixed(digits);
-        };
-        const fmtTimestamp = (value) => {
-          if (!value) { return '--'; }
-          const date = new Date(value);
-          if (!isFinite(date)) { return value; }
-          return new Intl.DateTimeFormat('zh-CN', {
-            timeZone: 'Asia/Shanghai',
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-          }).format(date);
-        };
-        const _toAbsNumber = (value) => {
-          const num = Number(value);
-          return Number.isFinite(num) ? Math.abs(num) : 0;
-        };
-        const extractQuantity = (item) => {
-          if (!item) { return 0; }
-          const netQty = _toAbsNumber(item.net_qty);
-          const longQty = _toAbsNumber(item.long_qty);
-          const shortQty = _toAbsNumber(item.short_qty);
-          return Math.max(netQty, longQty, shortQty);
-        };
-        const computeNotional = (item) => {
-          if (!item) { return null; }
-          const provided = Number(item.notional_value);
-          if (Number.isFinite(provided)) {
-            return provided;
-          }
-          const qty = extractQuantity(item);
-          const price = Number(item.last_price);
-          if (qty > 0 && Number.isFinite(price)) {
-            return qty * price;
-          }
-          return null;
-        };
-        const renderWaveTable = (signals) => {
-          const body = document.getElementById('wave-body');
-          if (!body) { return; }
-          if (!Array.isArray(signals) || !signals.length) {
-            body.innerHTML = '<tr><td colspan="10" class="empty-state">????</td></tr>';
-            return;
-          }
-          const rows = signals.map((signal) => {
-            const metrics = signal.metrics || {};
-            const flvText = `${fmtNumber(metrics.flv, 2)} / ${fmtNumber(metrics.baseline, 2)}`;
-            const priceText = metrics.price_drop_pct > 0
-              ? `-${fmtNumber(metrics.price_drop_pct, 2)}%`
-              : `${fmtNumber(metrics.price_change_pct, 2)}%`;
-            const leText = metrics.le === null ? '-' : fmtNumber(metrics.le, 2);
-            const pcText = metrics.pc === null ? '-' : fmtNumber(metrics.pc, 2);
-            const densityText = metrics.density_per_min
-              ? `${fmtNumber(metrics.density_per_min, 2)}/min`
-              : '-';
-            const lpiText = metrics.lpi === undefined ? '-' : fmtNumber(metrics.lpi, 2);
-            const signalClass = signal.signal_class || '';
-            return `
-              <tr>
-                <td>${signal.instrument || '--'}</td>
-                <td>${signal.wave || '--'}</td>
-                <td>${signal.status || '--'}</td>
-                <td>${flvText}</td>
-                <td>${priceText}</td>
-                <td>${leText}</td>
-                <td>${pcText}</td>
-                <td>${densityText}</td>
-                <td>${lpiText}</td>
-                <td class="${signalClass}">${signal.signal || '???'}</td>
-              </tr>`;
-          });
-          body.innerHTML = rows.join('');
-        };
-        const applyFilters = (items) => {
-          const minQty = Math.max(0, Number(minSizeInput.value) || 0);
-          const minNotional = Math.max(0, Number(minNotionalInput.value) || 0);
-          const instrumentFilter = (select.value || '').trim().toUpperCase();
-          return items.filter((item) => {
-            const inst = (item.instrument_id || '').trim().toUpperCase();
-            if (instrumentFilter && inst !== instrumentFilter) {
-              return false;
-            }
-            const qty = extractQuantity(item);
-            const notional = computeNotional(item) || 0;
-            if (minQty && qty < minQty) {
-              return false;
-            }
-            if (minNotional && notional < minNotional) {
-              return false;
-            }
-            return true;
-          });
-        };
-        const renderRows = () => {
-          const body = document.getElementById('liquidations-body');
-          body.innerHTML = '';
-          const filtered = applyFilters(latestItems);
-          if (!filtered.length) {
-            body.innerHTML = '<tr><td colspan="7" class="empty-state">??????</td></tr>';
-            return;
-          }
-          filtered.forEach((item) => {
-            const tr = document.createElement('tr');
-            const notional = computeNotional(item);
-            tr.innerHTML = `
-              <td>${fmtTimestamp(item.timestamp)}</td>
-              <td>${item.instrument_id || '--'}</td>
-              <td>${fmtNumber(item.long_qty, 2)}</td>
-              <td>${fmtNumber(item.short_qty, 2)}</td>
-              <td>${fmtNumber(item.net_qty, 2)}</td>
-              <td>${fmtNumber(item.last_price, 4)}</td>
-              <td>${notional === null ? '-' : fmtNumber(notional, 2)}</td>`;
-            body.appendChild(tr);
-          });
-        };
-        const handleWaveSignals = (signals) => {
-          signals
-            .filter((signal) => signal.signal_code && SIGNAL_SIDE_MAP[signal.signal_code])
-            .forEach((signal) => {
-              const side = SIGNAL_SIDE_MAP[signal.signal_code];
-              const uniqueKey = `${signal.instrument}-${signal.signal_code}-${signal.event_id || signal.event_detected_at || signal.wave}`;
-              if (!signal.instrument || triggeredSignals.has(uniqueKey)) {
-                return;
-              }
-              triggeredSignals.add(uniqueKey);
-              fetch('/api/okx/wave-order', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  instrument_id: signal.instrument,
-                  size: computeOrderSize(signal),
-                  side,
-                  event_price: Number(signal.metrics?.end_price) || null,
-                  order_mode: getAutoMode(signal.instrument),
-                }),
-              })
-                .then((res) => res.json())
-                .then((result) => {
-                  console.log(`????????(${signal.signal_code})`, signal.instrument, side, result.status);
-                })
-                .catch((err) => console.error('??????', err));
-            });
-        };
-        function refresh() {
-          const params = new URLSearchParams({ limit: FETCH_LIMIT.toString() });
-          fetch('/api/streams/liquidations/latest?' + params.toString())
-            .then((res) => res.json())
-            .then((data) => {
-              latestItems = Array.isArray(data.items) ? data.items : [];
-              renderRows();
-              const signals = Array.isArray(data.wave_signals) ? data.wave_signals : [];
-              renderWaveTable(signals);
-              handleWaveSignals(signals);
-              const updated = document.getElementById('liquidations-updated');
-              if (updated) { updated.textContent = fmtTimestamp(data.updated_at); }
-              const waveStatus = document.getElementById('wave-status-text');
-              if (waveStatus) {
-                waveStatus.textContent = data.wave_summary || '????';
-              }
-            })
-            .catch((err) => console.error(err));
-        }
-        select.addEventListener('change', () => {
-          renderRows();
-          syncAutoControls();
-        });
-        [minSizeInput, minNotionalInput].forEach((input) => {
-          input.addEventListener('input', () => renderRows());
-        });
-        if (autoSizeInput) {
-          autoSizeInput.addEventListener('input', (event) => {
-            updateAutoSize(select.value, event.target.value);
-          });
-        }
-        if (autoNotionalInput) {
-          autoNotionalInput.addEventListener('input', (event) => {
-            updateAutoNotional(select.value, event.target.value);
-          });
-        }
-        if (autoModeSelect) {
-          autoModeSelect.addEventListener('change', (event) => {
-            updateAutoMode(select.value, event.target.value);
-          });
-        }
-        refresh();
-        setInterval(refresh, 1000);
-      })();
-    </script>    </script>
 </body>
 </html>
 """
@@ -2925,6 +2624,7 @@ LIQUIDATION_TEMPLATE = r"""
         .wave-signal-strong {{ color: #fbbf24; }}
         .wave-signal-bottom {{ color: #4ade80; }}
         .wave-signal-warn {{ color: #f87171; }}
+        .signal-subtext {{ font-size: 0.75rem; color: #94a3b8; margin-top: 4px; display: block; }}
     </style>
 </head>
 <body>
@@ -2962,7 +2662,7 @@ LIQUIDATION_TEMPLATE = r"""
         <label>自动下单方式
             <select id="auto-order-mode">
                 <option value="size">按手数</option>
-                <option value="notional">按金额</option>
+                <option value="notional" selected>按金额</option>
             </select>
         </label>
         <span>最后更新：<span class="timestamp" id="liquidations-updated">{updated_at}</span></span>
@@ -3060,6 +2760,58 @@ LIQUIDATION_TEMPLATE = r"""
           }}
           return null;
         }};
+        const describeLeElasticity = (value) => {{
+          if (!Number.isFinite(value) || value <= 0) {{
+            return '';
+          }}
+          if (value >= 3) {{
+            return '跌幅敏感：单位跌幅即可触发超大规模强平';
+          }}
+          if (value >= 2) {{
+            return '高弹性：同等跌幅触发强平明显偏多';
+          }}
+          if (value >= 1) {{
+            return '偏高：跌得少却爆得多';
+          }}
+          if (value >= 0.5) {{
+            return '中性：跌幅与强平量大致匹配';
+          }}
+          return '低弹性：需更大跌幅才触发强平';
+        }};
+        const formatLeElasticity = (value) => {{
+          if (!Number.isFinite(value)) {{
+            return '-';
+          }}
+          const baseText = fmtNumber(value, 2);
+          if (value === 0) {{
+            return baseText;
+          }}
+          const explanation = describeLeElasticity(value);
+          return explanation ? `${{baseText}} (${{explanation}})` : baseText;
+        }};
+        const describePcPressure = (value) => {{
+          if (!Number.isFinite(value) || value <= 0) {{
+            return '';
+          }}
+          if (value >= 1_000_000) {{
+            return '压力爆表，谨慎接盘';
+          }}
+          if (value >= 300_000) {{
+            return '高压，关注回撤';
+          }}
+          if (value >= 100_000) {{
+            return '中等压力';
+          }}
+          return '压力有限';
+        }};
+        const formatPcPressure = (value) => {{
+          if (!Number.isFinite(value)) {{
+            return '-';
+          }}
+          const baseText = fmtNumber(value, 2);
+          const label = describePcPressure(value);
+          return label ? `${{baseText}} (${{label}})` : baseText;
+        }};
         const renderWaveTable = (signals) => {{
           const body = document.getElementById('wave-body');
           if (!body) {{ return; }}
@@ -3074,15 +2826,17 @@ LIQUIDATION_TEMPLATE = r"""
               ? `-${{fmtNumber(metrics.price_drop_pct, 2)}}%`
               : `${{fmtNumber(metrics.price_change_pct, 2)}}%`;
             const leValue = Number(metrics.le);
-            const leText = Number.isFinite(leValue)
-              ? `${{fmtNumber(leValue, 2)}} (${leValue >= 1 ? '跌得少，却爆得多' : '跌得多，爆得少'})`
-              : '-';
-            const pcText = metrics.pc === null ? '-' : fmtNumber(metrics.pc, 2);
+            const leText = formatLeElasticity(leValue);
+            const pcValue = Number(metrics.pc);
+            const pcText = Number.isFinite(pcValue) ? formatPcPressure(pcValue) : '-';
             const densityText = metrics.density_per_min
               ? `${{fmtNumber(metrics.density_per_min, 2)}}/min`
               : '-';
             const lpiText = metrics.lpi === undefined ? '-' : fmtNumber(metrics.lpi, 2);
             const signalClass = signal.signal_class || '';
+            const detailText = signal.liquidation_side_label || '';
+            const detailHtml = detailText ? `<span class="signal-subtext">${{detailText}}</span>` : '';
+            const signalText = signal.signal || '???';
             return `
               <tr>
                 <td>${{signal.instrument || '--'}}</td>
@@ -3094,7 +2848,10 @@ LIQUIDATION_TEMPLATE = r"""
                 <td>${{pcText}}</td>
                 <td>${{densityText}}</td>
                 <td>${{lpiText}}</td>
-                <td class="${{signalClass}}">${{signal.signal || '???'}}</td>
+                <td class="${{signalClass}}">
+                  <div>${{signalText}}</div>
+                  ${{detailHtml}}
+                </td>
               </tr>`;
           }});
           body.innerHTML = rows.join('');

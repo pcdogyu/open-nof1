@@ -196,8 +196,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     liquidation_notional = max(0.0, liquidation_notional)
     pyramid_max = max(0, min(100, pyramid_max))
     same_direction_count = max(1, min(20, same_direction_count))
-    opposite_direction_count = max(1, min(20, opposite_direction_count))
-    silence_seconds = max(60.0, min(3600.0, silence_seconds))
+    opposite_direction_count = max(0, min(20, opposite_direction_count))
+    silence_seconds = max(0.0, min(300.0, silence_seconds))
     return {
         "price_tolerance_pct": price,
         "max_drawdown_pct": drawdown,
@@ -240,8 +240,9 @@ _EXEC_LOG_WRITER: Optional["InfluxWriter"] = None
 _WAVE_AUTOMATION_CURSOR: Dict[str, Dict[Tuple[str, str], int]] = {}
 
 _LIQUIDATION_REVERSAL_WATCH: Dict[str, Dict[str, object]] = {}
-_LIQUIDATION_SILENCE_SECONDS = 60
+_LIQUIDATION_MIN_EVENT_AGE_SECONDS = 0.0
 _LIQUIDATION_MAX_EVENT_LOOKBACK = 15 * 60
+_LIQUIDATION_MIN_POSITION_HOLD_SECONDS = 15 * 60
 
 
 def _get_pipeline() -> MarketDataPipeline:
@@ -897,18 +898,18 @@ from(bucket: "{cfg.bucket}")
                     ts = timestamp_value.isoformat()
                 else:
                     ts = str(timestamp_value)
-        rows.append(
-            {
-                "instrument_id": symbol,
-                "timestamp": ts,
-                "long_qty": values.get("long_qty"),
-                "short_qty": values.get("short_qty"),
-                "net_qty": values.get("net_qty"),
-                "last_price": values.get("last_price"),
-                "notional_value": values.get("notional_value"),
-            }
-        )
-    wave_detector.update_wave(symbol, rows)
+                rows.append(
+                    {
+                        "instrument_id": symbol,
+                        "timestamp": ts,
+                        "long_qty": values.get("long_qty"),
+                        "short_qty": values.get("short_qty"),
+                        "net_qty": values.get("net_qty"),
+                        "last_price": values.get("last_price"),
+                        "notional_value": values.get("notional_value"),
+                    }
+                )
+        wave_detector.update_wave(symbol, rows)
 
 
 def _passes_wave_reentry(
@@ -1018,12 +1019,12 @@ async def _maybe_execute_wave_strategy(
             confidence=0.78,
             reasoning=reasoning,
             suggested_order=suggested_order,
-            raw_output={{
+            raw_output={
                 "automation": "liquidation_wave",
                 "wave_signal_code": event.signal_code,
                 "wave_event_id": event.event_id,
                 "wave_detected_at": event.detected_at.isoformat(),
-            }},
+            },
         )
         cursor[key] = event.event_id
         return request, response
@@ -2004,6 +2005,8 @@ def _evaluate_liquidation_reversal_state(
         same_required = int(_RISK_CONFIG.get("liquidation_same_direction_count", 4))
         confirmation_required = int(_RISK_CONFIG.get("liquidation_opposite_count", 3))
         silence_required = float(_RISK_CONFIG.get("liquidation_silence_seconds", 300.0))
+    zero_confirmation = confirmation_required <= 0
+    confirmation_required = max(0, confirmation_required)
     liq_threshold = max(_MIN_LIQUIDATION_NOTIONAL_USD, liq_threshold)
     if liq_threshold <= 0:
         return None
@@ -2011,7 +2014,7 @@ def _evaluate_liquidation_reversal_state(
     if event_time is None:
         return None
     silence = (now - event_time).total_seconds()
-    if silence < _LIQUIDATION_SILENCE_SECONDS or silence > _LIQUIDATION_MAX_EVENT_LOOKBACK:
+    if silence < _LIQUIDATION_MIN_EVENT_AGE_SECONDS or silence > _LIQUIDATION_MAX_EVENT_LOOKBACK:
         return None
     symbol = instrument.upper()
     state = _LIQUIDATION_REVERSAL_WATCH.setdefault(
@@ -2024,9 +2027,29 @@ def _evaluate_liquidation_reversal_state(
             "last_large_event": None,
             "silence_armed": False,
             "post_silence_same_count": 0,
+            "hold_until": None,
         },
     )
+    hold_until = state.get("hold_until")
+    if isinstance(hold_until, datetime):
+        if hold_until > now:
+            return None
+        state["hold_until"] = None
     history: deque = state["history"]
+
+    def _finalize_reversal(direction_sign: int) -> Tuple[str, float, datetime, float]:
+        state["candidate_direction"] = None
+        state["last_same_time"] = None
+        state["opposite_count"] = 0
+        state["silence_armed"] = False
+        state["post_silence_same_count"] = 0
+        state["last_large_event"] = event_time
+        if _LIQUIDATION_MIN_POSITION_HOLD_SECONDS > 0:
+            state["hold_until"] = now + timedelta(seconds=_LIQUIDATION_MIN_POSITION_HOLD_SECONDS)
+        else:
+            state["hold_until"] = None
+        history.clear()
+        return ("long" if direction_sign > 0 else "short", abs_qty, event_time, notional_value or abs_qty)
     cutoff = event_time - timedelta(minutes=15)
     while history and history[0][0] < cutoff:
         history.popleft()
@@ -2051,6 +2074,8 @@ def _evaluate_liquidation_reversal_state(
         history.append((event_time, sign))
         same_count = sum(1 for ts, sg in history if sg == sign)
         if same_count >= same_required and (candidate_dir is None or candidate_dir == sign):
+            if zero_confirmation:
+                return _finalize_reversal(sign)
             state["candidate_direction"] = sign
             state["last_same_time"] = event_time
             state["opposite_count"] = 0
@@ -2064,14 +2089,7 @@ def _evaluate_liquidation_reversal_state(
                 post_silence_same += 1
                 state["post_silence_same_count"] = post_silence_same
                 if post_silence_same >= confirmation_required:
-                    state["candidate_direction"] = None
-                    state["last_same_time"] = None
-                    state["opposite_count"] = 0
-                    state["silence_armed"] = False
-                    state["post_silence_same_count"] = 0
-                    state["last_large_event"] = event_time
-                    history.clear()
-                    return ("long" if sign > 0 else "short", abs_qty, event_time, notional_value or abs_qty)
+                    return _finalize_reversal(sign)
             return None
     elif candidate_dir is None:
         return None
@@ -2094,18 +2112,14 @@ def _evaluate_liquidation_reversal_state(
         state["opposite_count"] = 0
         return None
 
+    if zero_confirmation:
+        return _finalize_reversal(sign)
+
     state["opposite_count"] = int(state.get("opposite_count") or 0) + 1
     if state["opposite_count"] < confirmation_required:
         return None
 
-    state["candidate_direction"] = None
-    state["last_same_time"] = None
-    state["opposite_count"] = 0
-    state["silence_armed"] = False
-    state["post_silence_same_count"] = 0
-    state["last_large_event"] = event_time
-    history.clear()
-    return ("long" if sign > 0 else "short", abs_qty, event_time, notional_value or abs_qty)
+    return _finalize_reversal(sign)
 
 
 def _estimate_reversal_order_size(request: SignalRequest, direction: str) -> float:

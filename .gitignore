@@ -28,3 +28,7 @@ __pycache__/config.cpython-313.pyc
 
 # Local logs
 data/logs/
+config.py
+services/jobs/__pycache__/scheduler.cpython-310.pyc
+services/jobs/__pycache__/scheduler.cpython-313.pyc
+__pycache__/config.cpython-313.pyc
