@@ -25,3 +25,6 @@ __pycache__/
 models/__pycache__/utils.cpython-313.pyc
 services/webapp/__pycache__/main.cpython-313.pyc
 __pycache__/config.cpython-313.pyc
+
+# Local logs
+data/logs/
