@@ -40,6 +40,7 @@ class OrderPayload:
     order_type: Literal["limit", "market"]
     size: str
     margin_mode: Literal["cash", "cross", "isolated"] = "cash"
+    leverage: Optional[float] = None
     price: Optional[str] = None
     client_order_id: Optional[str] = None
     pos_side: Optional[str] = None
@@ -147,6 +148,8 @@ class OkxPaperClient(ExchangeClient):
             "ordType": order.order_type,
             "sz": order.size,
         }
+        if order.leverage is not None:
+            body["lever"] = str(order.leverage)
         if order.price and order.order_type == "limit":
             body["px"] = order.price
         if order.client_order_id:
@@ -290,6 +293,7 @@ class OkxPaperClient(ExchangeClient):
                 order_type=raw["order_type"],
                 size=str(raw["size"]),
                 margin_mode=raw.get("margin_mode", "cash"),
+                leverage=_safe_float(raw.get("leverage")),
                 price=str(raw["price"]) if raw.get("price") else None,
                 client_order_id=raw.get("client_order_id"),
                 pos_side=raw.get("pos_side") or raw.get("posSide"),
@@ -313,3 +317,12 @@ def _single_item(response: dict) -> dict:
     if not data:
         raise OkxClientError("OKX returned empty data payload")
     return data[0]
+
+
+def _safe_float(value: object) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

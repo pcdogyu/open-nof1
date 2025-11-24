@@ -40,6 +40,7 @@ from services.okx.live import fetch_account_snapshot
 from services.okx.brackets import apply_bracket_targets
 from services.webapp import prompt_templates
 from services.webapp.dependencies import get_account_repository, get_portfolio_registry
+from services.liquidations import waves as wave_detector
 
 try:  # optional during tests
     from influxdb_client import InfluxDBClient
@@ -112,6 +113,40 @@ except ImportError:  # pragma: no cover - fallback for test envs
 router = APIRouter()
 _OKX_CACHE_TTL_SECONDS = int(_OKX_TTL)
 
+
+def _format_okx_error(exc: OkxClientError) -> str:
+    """Return a verbose OKX error string including nested data details."""
+    payload = getattr(exc, "payload", None) or {}
+    code = payload.get("code")
+    msg = payload.get("msg") or payload.get("sMsg")
+    detail = str(exc)
+    extra_bits: list[str] = []
+    if code or msg:
+        extra_bits.append(f"code={code}, msg={msg}")
+    data_entries = payload.get("data") or []
+    formatted_entries: list[str] = []
+    for entry in data_entries:
+        if isinstance(entry, dict):
+            entry_code = entry.get("sCode") or entry.get("code")
+            entry_msg = entry.get("sMsg") or entry.get("msg")
+            if entry_code or entry_msg:
+                parts: list[str] = []
+                if entry_code:
+                    parts.append(str(entry_code))
+                if entry_msg:
+                    parts.append(str(entry_msg))
+                formatted_entries.append(": ".join(parts))
+            else:
+                formatted_entries.append(str(entry))
+        else:
+            formatted_entries.append(str(entry))
+    if formatted_entries:
+        extra_bits.append("details=" + " | ".join(formatted_entries))
+    if extra_bits:
+        detail = f"{detail} ({'; '.join(extra_bits)})"
+    return detail
+
+
 SIGNAL_LOG_PATH = Path("data/logs/ai_signals.jsonl")
 logger = logging.getLogger(__name__)
 _MODEL_REGISTRY_LOCK = Lock()
@@ -162,7 +197,7 @@ _DEFAULT_RISK_SETTINGS = {
     "max_position": 0.0,
     "take_profit_pct": 0.0,
     "stop_loss_pct": 0.0,
-    "default_leverage": 1,
+    "default_leverage": 2,
     "max_leverage": 125,
     "pyramid_max_orders": 5,
     "pyramid_reentry_pct": 2.0,
@@ -305,6 +340,34 @@ class PipelineSettingsPayload(BaseModel):
         if not sanitized:
             raise ValueError("At least one instrument must be provided.")
         return sanitized
+
+
+class WaveOrderRequest(BaseModel):
+    """Request payload for triggering automated OKX orders from wave signals."""
+
+    instrument_id: str = Field(..., description="OKX instrument identifier, e.g. BTC-USDT-SWAP.")
+    size: float = Field(1.0, gt=0, description="Order size (contracts).")
+    side: str = Field("buy", description="Order direction: buy or sell.")
+    account_id: Optional[str] = Field(
+        default=None,
+        description="Optional OKX account identifier override. Defaults to the first configured account.",
+    )
+    event_price: Optional[float] = Field(default=None, description="Reference price when the wave signal fired.")
+    order_mode: Optional[str] = Field(default="size", description="Client-selected automation mode (size/notional).")
+
+    @validator("instrument_id")
+    def _normalize_instrument(cls, value: str) -> str:
+        normalized = (value or "").strip().upper()
+        if not normalized:
+            raise ValueError("instrument_id is required.")
+        return normalized
+
+    @validator("side")
+    def _validate_side(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in {"buy", "sell"}:
+            raise ValueError("side must be either 'buy' or 'sell'.")
+        return normalized
 
 
 def get_pipeline_settings() -> dict:
@@ -838,6 +901,129 @@ def okx_summary_api(
     return get_okx_summary(repository)
 
 
+@router.post(
+    "/api/okx/wave-order",
+    summary="Submit a market order when liquidation wave signals trigger.",
+)
+def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
+    symbol = payload.instrument_id
+    side = payload.side.lower()
+    account_id = payload.account_id or _default_okx_account_id()
+    try:
+        requested_size = float(payload.size)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="size 参数必须为数字。")
+    if requested_size <= 0:
+        raise HTTPException(status_code=400, detail="下单数量必须大于 0。")
+
+    risk = get_risk_settings()
+    pyramid_cap = int(risk.get("pyramid_max_orders", 0))
+    reentry_pct = float(risk.get("pyramid_reentry_pct", 0.0))
+    event_price = _try_float(payload.event_price)
+
+    open_orders: Sequence[dict] = []
+    positions: Sequence[dict] = []
+    try:
+        summary = get_okx_summary()
+    except Exception as exc:  # pragma: no cover - repository optional
+        logger.debug("Unable to fetch OKX summary for wave order: %s", exc)
+        summary = {}
+    for entry in summary.get("accounts", []):
+        account_meta = entry.get("account") or {}
+        if account_meta.get("account_id") == account_id:
+            open_orders = entry.get("open_orders") or []
+            positions = entry.get("positions") or []
+            break
+    if pyramid_cap > 0:
+        active_same_side = sum(
+            1
+            for order in open_orders
+            if (order.get("instrument_id") or "").upper() == symbol
+            and (order.get("side") or "").lower() == side
+        )
+        if active_same_side >= pyramid_cap:
+            raise HTTPException(
+                status_code=400,
+                detail=f"金字塔同向订单已达 {pyramid_cap} 笔，阻止继续加仓。",
+            )
+
+    if event_price and event_price > 0 and reentry_pct > 0 and positions:
+        matching_positions = []
+        for pos in positions:
+            if (pos.get("instrument_id") or "").upper() != symbol:
+                continue
+            side_text = (pos.get("side") or "").lower()
+            if side == "buy" and side_text not in {"buy", "long"}:
+                continue
+            if side == "sell" and side_text not in {"sell", "short"}:
+                continue
+            matching_positions.append(pos)
+        for pos in matching_positions:
+            entry_price = _try_float(pos.get("entry_price"))
+            if entry_price and entry_price > 0:
+                deviation = abs((entry_price - event_price) / entry_price) * 100.0
+                if deviation < reentry_pct:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{symbol} 最近持仓 {entry_price:.4f} 与信号价 {event_price:.4f} 偏离 {deviation:.2f}% < {reentry_pct:.2f}%，跳过自动加仓。",
+                    )
+
+    instrument_meta = _get_okx_instrument_meta(symbol) or {}
+    lot_size = _try_float(instrument_meta.get("lotSz")) or 0.0
+    min_size = _try_float(instrument_meta.get("minSz")) or 0.0
+    max_size = _try_float(instrument_meta.get("maxSz")) or 0.0
+    adjusted_size = max(requested_size, 0.0)
+    if lot_size > 0:
+        steps = max(1, math.ceil(adjusted_size / lot_size))
+        adjusted_size = steps * lot_size
+    if min_size > 0 and adjusted_size < min_size:
+        adjusted_size = min_size
+    if max_size > 0 and adjusted_size > max_size:
+        adjusted_size = max_size
+
+    ticker = _fetch_public_ticker(symbol)
+    price_hint = _extract_ticker_price(ticker) if ticker else None
+    min_notional = float(risk.get("min_notional_usd", 0.0))
+    max_notional = float(risk.get("max_order_notional_usd", 0.0))
+    if price_hint and min_notional > 0:
+        min_contracts = min_notional / price_hint
+        if min_contracts > adjusted_size:
+            adjusted_size = min_contracts
+    if price_hint and max_notional > 0:
+        max_contracts = max_notional / price_hint
+        if max_contracts > 0 and adjusted_size > max_contracts:
+            adjusted_size = max_contracts
+
+    if adjusted_size <= 0:
+        raise HTTPException(status_code=400, detail="调整后下单数量无效。")
+
+    rounded_size = round(adjusted_size, 8)
+    result = place_manual_okx_order(
+        account_id=account_id,
+        instrument_id=symbol,
+        side=side,
+        order_type="market",
+        size=rounded_size,
+        price=None,
+        margin_mode=None,
+    )
+    notional_estimate = rounded_size * price_hint if price_hint else None
+    return {
+        "status": result.get("status"),
+        "order_id": result.get("order_id"),
+        "instrument_id": symbol,
+        "side": side,
+        "size": rounded_size,
+        "reference_price": price_hint,
+        "notional_estimate": notional_estimate,
+        "risk_constraints": {
+            "min_notional_usd": min_notional,
+            "max_order_notional_usd": max_notional,
+            "pyramid_max_orders": pyramid_cap,
+        },
+    }
+
+
 def get_model_catalog() -> list[dict]:
     """Return current model registry configuration."""
     with _MODEL_REGISTRY_LOCK:
@@ -1057,13 +1243,21 @@ def get_okx_summary(
     }
 
 
-def _resolve_okx_account_meta(account_identifier: str) -> tuple[str, dict]:
+def _default_okx_account_id() -> str:
+    for key, meta in OKX_ACCOUNTS.items():
+        return meta.get("account_id") or key
+    raise HTTPException(status_code=400, detail="???????? OKX ???")
+
+
+def _resolve_okx_account_meta(account_identifier: str | None) -> tuple[str, dict]:
     normalized = (account_identifier or "").strip()
+    if not normalized:
+        normalized = _default_okx_account_id()
     for key, meta in OKX_ACCOUNTS.items():
         account_id = meta.get("account_id") or key
-        if normalized and normalized in {account_id, key}:
+        if normalized in {account_id, key}:
             return account_id, meta
-    raise HTTPException(status_code=400, detail=f"未找到账户 {account_identifier}")
+    raise HTTPException(status_code=400, detail=f"??????? {account_identifier}")
 
 
 def _choose_margin_mode(instrument_id: str, meta: dict, override: str | None) -> str:
@@ -1074,6 +1268,19 @@ def _choose_margin_mode(instrument_id: str, meta: dict, override: str | None) ->
     if symbol.endswith("-SWAP") or "FUTURE" in symbol:
         return "cross"
     return "cash"
+
+
+def _resolve_leverage(meta: dict, override: float | str | None = None) -> float:
+    risk = get_risk_settings()
+    default_leverage = max(1.0, float(risk.get("default_leverage", 2)))
+    max_leverage = max(default_leverage, float(risk.get("max_leverage", default_leverage)))
+
+    candidate = _try_float(override)
+    if candidate is None:
+        candidate = _try_float(meta.get("default_leverage"))
+    if candidate is None or candidate <= 0:
+        candidate = default_leverage
+    return max(1.0, min(max_leverage, candidate))
 
 
 def _extract_ticker_price(ticker: dict) -> float | None:
@@ -1088,6 +1295,26 @@ def _extract_ticker_price(ticker: dict) -> float | None:
         if numeric > 0:
             return numeric
     return None
+
+
+def _fetch_public_ticker(inst_id: str) -> dict | None:
+    symbol = (inst_id or "").strip().upper()
+    if not symbol:
+        return None
+    try:
+        response = httpx.get(
+            f"{OKX_REST_BASE}/api/v5/market/ticker",
+            params={"instId": symbol},
+            timeout=5.0,
+        )
+        payload = response.json()
+    except Exception as exc:  # pragma: no cover - network path
+        logger.debug("Failed to fetch ticker for %s: %s", symbol, exc)
+        return None
+    if payload.get("code") not in {"0", 0}:
+        return None
+    data = payload.get("data") or []
+    return data[0] if data else None
 
 
 def place_manual_okx_order(
@@ -1123,6 +1350,7 @@ def place_manual_okx_order(
         "order_type": normalized_type,
         "size": str(size),
         "margin_mode": _choose_margin_mode(instrument_id, meta, margin_mode),
+        "leverage": _resolve_leverage(meta),
     }
     if normalized_type == "limit":
         if price is None:
@@ -1157,13 +1385,7 @@ def place_manual_okx_order(
 
         response = client.place_order(payload)
     except OkxClientError as exc:
-        payload = getattr(exc, "payload", None) or {}
-        code = payload.get("code")
-        msg = payload.get("msg") or payload.get("sMsg")
-        detail = str(exc)
-        if code or msg:
-            detail = f"{detail} (code={code}, msg={msg})"
-        raise HTTPException(status_code=400, detail=detail)
+        raise HTTPException(status_code=400, detail=_format_okx_error(exc))
     finally:
         client.close()
 
@@ -1259,6 +1481,7 @@ def scale_okx_position(
                 "size": size_text,
                 "margin_mode": margin_mode_value,
                 "pos_side": pos_side_payload,
+                "leverage": _resolve_leverage(meta),
             }
         )
         try:
@@ -1266,13 +1489,7 @@ def scale_okx_position(
         except Exception as refresh_exc:  # pragma: no cover
             logger.debug("Post-scale summary refresh failed: %s", refresh_exc)
     except OkxClientError as exc:
-        payload = getattr(exc, "payload", None) or {}
-        code = payload.get("code")
-        msg = payload.get("msg") or payload.get("sMsg")
-        detail = str(exc)
-        if code or msg:
-            detail = f"{detail} (code={code}, msg={msg})"
-        raise HTTPException(status_code=400, detail=detail)
+        raise HTTPException(status_code=400, detail=_format_okx_error(exc))
     finally:
         client.close()
     return {
@@ -1300,9 +1517,9 @@ def close_okx_position(
     try:
         normalized_qty = float(quantity)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="??????????")
+        raise HTTPException(status_code=400, detail="平仓数量必须大于 0")
     if normalized_qty <= 0:
-        raise HTTPException(status_code=400, detail="?????? 0")
+        raise HTTPException(status_code=400, detail="平仓数量必须大于 0")
 
     side_lower = (position_side or "").lower()
     if side_lower in {"long", "buy"}:
@@ -1370,6 +1587,13 @@ def close_okx_position(
         instrument_meta = _get_okx_instrument_meta(symbol)
         lot_size = _try_float(instrument_meta.get("lotSz")) if instrument_meta else None
         min_size = _try_float(instrument_meta.get("minSz")) if instrument_meta else None
+        if lot_size:
+            tolerance = max(lot_size * 0.5, 1e-8)
+        else:
+            tolerance = 1e-8
+        if position_size is not None and abs(normalized_qty - position_size) <= tolerance:
+            normalized_qty = position_size
+            effective_qty = position_size
         if lot_size and lot_size > 0:
             multiples = math.floor(effective_qty / lot_size)
             if multiples <= 0:
@@ -1382,7 +1606,16 @@ def close_okx_position(
         effective_qty = max(effective_qty, 0.0)
         if effective_qty <= 0:
             raise HTTPException(status_code=400, detail="无法计算有效的平仓数量。")
-        normalized_size_str = str(effective_qty)
+        decimal_places = 4
+        if lot_size and lot_size > 0:
+            lot_str = f"{lot_size:.10f}".rstrip("0").rstrip(".")
+            if "." in lot_str:
+                decimal_places = max(decimal_places, len(lot_str.split(".")[1]))
+            else:
+                decimal_places = 0
+        normalized_size_str = f"{effective_qty:.{decimal_places}f}".rstrip("0").rstrip(".")
+        if not normalized_size_str:
+            normalized_size_str = "0"
         use_market_reduce = (
             net_position
             or pos_side_payload is None
@@ -1413,13 +1646,7 @@ def close_okx_position(
         except Exception as refresh_exc:  # pragma: no cover - cache refresh best-effort
             logger.debug("Post-close summary refresh failed: %s", refresh_exc)
     except OkxClientError as exc:
-        payload = getattr(exc, "payload", None) or {}
-        code = payload.get("code")
-        msg = payload.get("msg") or payload.get("sMsg")
-        detail = str(exc)
-        if code or msg:
-            detail = f"{detail} (code={code}, msg={msg})"
-        raise HTTPException(status_code=400, detail=detail)
+        raise HTTPException(status_code=400, detail=_format_okx_error(exc))
     finally:
         client.close()
 
@@ -1494,13 +1721,7 @@ def cancel_okx_order(
         client.authenticate(credentials)
         response = client.cancel_order(order_id=normalized_order_id, instrument_id=symbol)
     except OkxClientError as exc:
-        payload = getattr(exc, "payload", None) or {}
-        code = payload.get("code")
-        msg = payload.get("msg") or payload.get("sMsg")
-        detail = str(exc)
-        if code or msg:
-            detail = f"{detail} (code={code}, msg={msg})"
-        raise HTTPException(status_code=400, detail=detail)
+        raise HTTPException(status_code=400, detail=_format_okx_error(exc))
     finally:
         client.close()
 
@@ -1527,9 +1748,12 @@ def get_liquidation_snapshot(limit: int = 50, instrument: Optional[str] = None) 
         instrument=instrument_filter or None,
         lookback=lookback,
     )
+    if not records:
+        records = _fetch_live_liquidations(instrument=instrument_filter or None, limit=query_limit)
     cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=120)
     items: list[dict] = []
     fallback_items: list[dict] = []
+    grouped_records: dict[str, list[dict]] = {}
     for row in records:
         inst_id = (row.get("instrument_id") or "").upper()
         timestamp = row.get("_time")
@@ -1555,6 +1779,7 @@ def get_liquidation_snapshot(limit: int = 50, instrument: Optional[str] = None) 
             "last_price": last_price,
             "notional_value": notional_value,
         }
+        grouped_records.setdefault(inst_id, []).append(record_payload)
         fallback_items.append(record_payload)
         if isinstance(ts, datetime) and ts < cutoff:
             continue
@@ -1563,11 +1788,41 @@ def get_liquidation_snapshot(limit: int = 50, instrument: Optional[str] = None) 
         items = fallback_items[:sanitized_limit]
     items.sort(key=lambda entry: entry["timestamp"], reverse=True)
     items = items[:sanitized_limit]
+    tracked_instruments = [
+        inst.strip().upper()
+        for inst in (TRADABLE_INSTRUMENTS or [])
+        if isinstance(inst, str) and inst.strip()
+    ]
+    if instrument_filter and instrument_filter not in tracked_instruments:
+        tracked_instruments.append(instrument_filter)
+    wave_detector.bulk_update(grouped_records)
+    wave_signals = wave_detector.snapshot_signals(tracked_instruments or grouped_records.keys())
+    wave_summary = _summarize_wave_status(wave_signals)
     return {
         "instrument": instrument_filter,
         "items": items,
         "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "wave_signals": [signal.to_payload() for signal in wave_signals],
+        "wave_summary": wave_summary,
     }
+
+
+def _summarize_wave_status(signals: Sequence[wave_detector.WaveSignal]) -> str:
+    if not signals:
+        return "等待数据"
+    active = [sig.instrument for sig in signals if sig.status == "波次进行"]
+    absorbs = [sig.instrument for sig in signals if sig.signal_code == "bottom_absorb"]
+    tops = [sig.instrument for sig in signals if sig.signal_code == "top_signal"]
+    warns = [sig.instrument for sig in signals if sig.status in {"警戒", "顶部预警"}]
+    if active:
+        return f"波次进行：{', '.join(active)}"
+    if tops:
+        return f"顶部：{', '.join(tops)}"
+    if warns:
+        return f"警戒：{', '.join(warns)}"
+    if absorbs:
+        return f"吸收：{', '.join(absorbs)}"
+    return f"监控 {len(signals)} 个合约"
 
 
 def get_orderbook_snapshot(
@@ -2159,6 +2414,113 @@ def _coerce_float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _fetch_live_liquidations(*, instrument: str | None, limit: int) -> list[dict]:
+    """Fallback to OKX REST when InfluxDB has no liquidation records."""
+    instruments: Sequence[str]
+    if instrument:
+        instruments = [instrument]
+    else:
+        instruments = [
+            inst.strip().upper()
+            for inst in TRADABLE_INSTRUMENTS
+            if isinstance(inst, str) and inst.strip()
+        ]
+    if not instruments:
+        return []
+    rows: list[dict] = []
+    per_instrument_limit = max(5, min(limit, 100))
+    try:
+        with httpx.Client(base_url=OKX_REST_BASE, timeout=6.0) as client:
+            for inst in instruments:
+                inst_family = _derive_inst_family(inst)
+                if not inst_family:
+                    continue
+                try:
+                    response = client.get(
+                        "/api/v5/public/liquidation-orders",
+                        params={
+                            "instType": "SWAP",
+                            "instFamily": inst_family,
+                            "state": "filled",
+                            "limit": str(per_instrument_limit),
+                        },
+                    )
+                    payload = response.json()
+                except Exception as exc:
+                    logger.debug("Live liquidation request failed for %s: %s", inst, exc)
+                    continue
+                if payload.get("code") not in {"0", 0}:
+                    continue
+                data = payload.get("data") or []
+                for entry in data:
+                    if not isinstance(entry, dict) or "$ref" in entry:
+                        continue
+                    details = entry.get("details") or []
+                    for detail in details:
+                        record = _convert_live_liquidation_detail(inst, detail)
+                        if record:
+                            rows.append(record)
+    except Exception as exc:
+        logger.debug("Live liquidation fallback failed: %s", exc)
+    rows.sort(key=lambda row: row.get("_time") or "", reverse=True)
+    return rows[:limit]
+
+
+def _convert_live_liquidation_detail(instrument: str, detail: dict) -> dict | None:
+    try:
+        size = abs(float(detail.get("sz") or 0.0))
+    except (TypeError, ValueError):
+        size = 0.0
+    if size <= 0:
+        return None
+    pos_side = (detail.get("posSide") or "").lower()
+    side = (detail.get("side") or "").lower()
+    long_qty = 0.0
+    short_qty = 0.0
+    if pos_side == "long" or (not pos_side and side == "sell"):
+        long_qty = size
+    elif pos_side == "short" or (not pos_side and side == "buy"):
+        short_qty = size
+    else:
+        return None
+    try:
+        price = float(detail.get("bkPx") or detail.get("px") or 0.0)
+    except (TypeError, ValueError):
+        price = 0.0
+    net_qty = long_qty - short_qty
+    timestamp_value = detail.get("ts") or detail.get("time")
+    timestamp = _coerce_timestamp_ms(timestamp_value)
+    notional = None
+    if price and net_qty:
+        notional = abs(net_qty) * price
+    return {
+        "instrument_id": instrument,
+        "_time": timestamp.isoformat() if timestamp else datetime.now(tz=timezone.utc).isoformat(),
+        "long_qty": long_qty or None,
+        "short_qty": short_qty or None,
+        "net_qty": net_qty or None,
+        "last_price": price or None,
+        "notional_value": notional,
+    }
+
+
+def _coerce_timestamp_ms(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        ms = int(value)
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _derive_inst_family(inst_id: str) -> str | None:
+    parts = (inst_id or "").upper().split("-")
+    if len(parts) >= 2:
+        return f"{parts[0]}-{parts[1]}"
+    return None
 
 
 def _fetch_live_orderbooks(*, levels: int, instrument_filter: str | None) -> list[dict]:

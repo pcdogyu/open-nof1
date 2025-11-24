@@ -1990,85 +1990,329 @@ RISK_TEMPLATE = r"""
         
     </div>
     <script>
-      (function() {{{{
-        const priceInput = document.getElementById('price-tolerance');
-        const drawdownInput = document.getElementById('max-drawdown');
-        const lossInput = document.getElementById('loss-limit');
-        const cooldownInput = document.getElementById('cooldown-seconds');
+      (function() {
+        const select = document.getElementById('instrument-select');
+        const minSizeInput = document.getElementById('min-size');
         const minNotionalInput = document.getElementById('min-notional');
-        const maxOrderInput = document.getElementById('max-order-notional');
-        const maxPositionInput = document.getElementById('max-position');
-        const pyramidInput = document.getElementById('pyramid-max');
-        const liquidationInput = document.getElementById('liquidation-threshold');
-        const pyramidReentryInput = document.getElementById('pyramid-reentry');
-        const takeProfitInput = document.getElementById('take-profit');
-        const stopLossInput = document.getElementById('stop-loss');
-        const defaultLevInput = document.getElementById('default-leverage');
-        const maxLevInput = document.getElementById('max-leverage');
-        if (!priceInput || !drawdownInput || !lossInput || !cooldownInput || !minNotionalInput || !pyramidInput || !liquidationInput || !pyramidReentryInput || !takeProfitInput || !stopLossInput || !defaultLevInput || !maxLevInput) {{
-          return;
-        }}}}
-        const formatCompact = (value, digits = 2) => {{{{
+        const autoSizeInput = document.getElementById('auto-order-size');
+        const autoNotionalInput = document.getElementById('auto-order-notional');
+        const autoModeSelect = document.getElementById('auto-order-mode');
+        const FETCH_LIMIT = 400;
+        const DEFAULT_AUTO_ORDER_SIZE = 1;
+        const DEFAULT_AUTO_ORDER_NOTIONAL = 100;
+        const triggeredSignals = new Set();
+        const SIGNAL_SIDE_MAP = {
+          bottom_absorb: 'buy',
+          top_signal: 'sell',
+        };
+        const AUTO_SIZE_STORAGE_KEY = 'liquidationAutoOrderSizes';
+        const AUTO_NOTIONAL_STORAGE_KEY = 'liquidationAutoOrderNotional';
+        const AUTO_MODE_STORAGE_KEY = 'liquidationAutoOrderMode';
+        let latestItems = [];
+        const normalizeInstrument = (value) => (value || '').trim().toUpperCase();
+        const loadMap = (key) => {
+          try {
+            const raw = localStorage.getItem(key);
+            return raw ? JSON.parse(raw) : {};
+          } catch (err) {
+            console.warn(`无法读取本地存储 ${key}`, err);
+            return {};
+          }
+        };
+        const persistMap = (key, map) => {
+          try {
+            localStorage.setItem(key, JSON.stringify(map));
+          } catch (err) {
+            console.warn(`无法保存本地存储 ${key}`, err);
+          }
+        };
+        const autoSizeMap = loadMap(AUTO_SIZE_STORAGE_KEY);
+        const autoNotionalMap = loadMap(AUTO_NOTIONAL_STORAGE_KEY);
+        const autoModeMap = loadMap(AUTO_MODE_STORAGE_KEY);
+        const getAutoSize = (instrument) => {
+          const key = normalizeInstrument(instrument);
+          if (!key) { return DEFAULT_AUTO_ORDER_SIZE; }
+          const numeric = Number(autoSizeMap[key]);
+          if (!Number.isFinite(numeric) || numeric <= 0) {
+            return DEFAULT_AUTO_ORDER_SIZE;
+          }
+          return numeric;
+        };
+        const getAutoNotional = (instrument) => {
+          const key = normalizeInstrument(instrument);
+          if (!key) { return DEFAULT_AUTO_ORDER_NOTIONAL; }
+          const numeric = Number(autoNotionalMap[key]);
+          if (!Number.isFinite(numeric) || numeric <= 0) {
+            return DEFAULT_AUTO_ORDER_NOTIONAL;
+          }
+          return numeric;
+        };
+        const getAutoMode = (instrument) => {
+          const key = normalizeInstrument(instrument);
+          const mode = (autoModeMap[key] || 'size').toLowerCase();
+          return mode === 'notional' ? 'notional' : 'size';
+        };
+        const syncAutoControls = () => {
+          const inst = select.value;
+          if (autoSizeInput) {
+            autoSizeInput.value = getAutoSize(inst);
+          }
+          if (autoNotionalInput) {
+            autoNotionalInput.value = getAutoNotional(inst);
+          }
+          if (autoModeSelect) {
+            autoModeSelect.value = getAutoMode(inst);
+          }
+        };
+        const updateAutoSize = (instrument, value) => {
+          const key = normalizeInstrument(instrument);
+          if (!key) { return; }
+          const numeric = Number(value);
+          if (!Number.isFinite(numeric) || numeric <= 0) {
+            delete autoSizeMap[key];
+          } else {
+            autoSizeMap[key] = numeric;
+          }
+          persistMap(AUTO_SIZE_STORAGE_KEY, autoSizeMap);
+        };
+        const updateAutoNotional = (instrument, value) => {
+          const key = normalizeInstrument(instrument);
+          if (!key) { return; }
+          const numeric = Number(value);
+          if (!Number.isFinite(numeric) || numeric <= 0) {
+            delete autoNotionalMap[key];
+          } else {
+            autoNotionalMap[key] = numeric;
+          }
+          persistMap(AUTO_NOTIONAL_STORAGE_KEY, autoNotionalMap);
+        };
+        const updateAutoMode = (instrument, value) => {
+          const key = normalizeInstrument(instrument);
+          if (!key) { return; }
+          const normalized = (value || 'size').toLowerCase();
+          if (normalized !== 'notional' && normalized !== 'size') {
+            delete autoModeMap[key];
+          } else {
+            autoModeMap[key] = normalized;
+          }
+          persistMap(AUTO_MODE_STORAGE_KEY, autoModeMap);
+        };
+        const computeOrderSize = (signal) => {
+          const instrument = signal.instrument;
+          const mode = getAutoMode(instrument);
+          if (mode === 'notional') {
+            const notional = getAutoNotional(instrument);
+            const referencePrice =
+              Number(signal.metrics?.end_price) ||
+              Number(signal.metrics?.start_price) ||
+              null;
+            if (Number.isFinite(referencePrice) && referencePrice > 0) {
+              const qty = notional / referencePrice;
+              if (qty > 0) {
+                return qty;
+              }
+            }
+            return getAutoSize(instrument);
+          }
+          return getAutoSize(instrument);
+        };
+        syncAutoControls();
+        const fmtNumber = (value, digits) => {
+          if (value === null || value === undefined || value === '') { return '-'; }
           const num = Number(value);
-          if (!isFinite(num)) {{{{
-            return '--';
-          }}}}
-          const fixed = num.toFixed(digits);
-          return fixed.replace(/\.?0+$/, '') || '0';
-        }}}};
-        const updateHints = () => {{
-          const priceValue = Number(priceInput.value) || 0;
-          const drawdownValue = Number(drawdownInput.value) || 0;
-          const lossValue = Number(lossInput.value) || 0;
-          const cooldownSeconds = Number(cooldownInput.value) || 0;
-          const cooldownMinutes = cooldownSeconds / 60;
-          const minNotional = Number(minNotionalInput.value) || 0;
-          const pyramidCap = Number(pyramidInput.value) || 0;
-          const maxOrderVal = Number(maxOrderInput.value) || 0;
-          const maxPositionVal = Number(maxPositionInput.value) || 0;
-          const liqThreshold = Number(liquidationInput.value) || 0;
-          const reentryPct = Number(pyramidReentryInput.value) || 0;
-          const takeProfit = Number(takeProfitInput.value) || 0;
-          const stopLoss = Number(stopLossInput.value) || 0;
-          const defaultLev = Number(defaultLevInput.value) || 0;
-          const maxLev = Number(maxLevInput.value) || 0;
-          const priceText = formatCompact(priceValue, 2);
-          const drawdownText = formatCompact(drawdownValue, 2);
-          const lossText = formatCompact(lossValue, 2);
-          const cooldownText = formatCompact(cooldownMinutes, 1);
-          const minNotionalText = formatCompact(minNotional, 2);
-          const pyramidCapText = formatCompact(pyramidCap, 0);
-          const maxOrderText = formatCompact(maxOrderVal, 2);
-          const maxPositionText = formatCompact(maxPositionVal, 4);
-          const liqThresholdText = formatCompact(liqThreshold, 2);
-          const reentryText = formatCompact(reentryPct, 2);
-          const takeProfitText = formatCompact(takeProfit, 2);
-          const stopLossText = formatCompact(stopLoss, 2);
-          const defaultLevText = formatCompact(defaultLev, 0);
-          const maxLevText = formatCompact(maxLev, 0);
-          const setText = (id, value) => {{
-            const el = document.getElementById(id);
-            if (el) el.textContent = value;
-          }};
-          setText('hint-price-value', priceText);
-          setText('hint-min-notional', minNotionalText);
-          setText('hint-max-order-notional', maxOrderText);
-          setText('hint-max-position', maxPositionText);
-          setText('hint-liq-threshold', liqThresholdText);
-          setText('hint-pyramid-value', pyramidCapText);
-          setText('hint-reentry-value', reentryText);
-          setText('hint-take-profit-value', takeProfitText);
-          setText('hint-stop-loss-value', stopLossText);
-          setText('hint-cooldown-value', cooldownText);
-        }};
-        ['input', 'change'].forEach((eventName) => {{{{
-          [priceInput, drawdownInput, lossInput, cooldownInput, minNotionalInput, maxOrderInput, maxPositionInput, pyramidInput, liquidationInput, pyramidReentryInput, takeProfitInput, stopLossInput, defaultLevInput, maxLevInput].forEach((input) => {{{{
-            input.addEventListener(eventName, updateHints);
-          }}}});
-        }}}});
-        updateHints();
-      }}}})();
-    </script>
+          if (!isFinite(num)) { return '-'; }
+          return num.toFixed(digits);
+        };
+        const fmtTimestamp = (value) => {
+          if (!value) { return '--'; }
+          const date = new Date(value);
+          if (!isFinite(date)) { return value; }
+          return new Intl.DateTimeFormat('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+          }).format(date);
+        };
+        const _toAbsNumber = (value) => {
+          const num = Number(value);
+          return Number.isFinite(num) ? Math.abs(num) : 0;
+        };
+        const extractQuantity = (item) => {
+          if (!item) { return 0; }
+          const netQty = _toAbsNumber(item.net_qty);
+          const longQty = _toAbsNumber(item.long_qty);
+          const shortQty = _toAbsNumber(item.short_qty);
+          return Math.max(netQty, longQty, shortQty);
+        };
+        const computeNotional = (item) => {
+          if (!item) { return null; }
+          const provided = Number(item.notional_value);
+          if (Number.isFinite(provided)) {
+            return provided;
+          }
+          const qty = extractQuantity(item);
+          const price = Number(item.last_price);
+          if (qty > 0 && Number.isFinite(price)) {
+            return qty * price;
+          }
+          return null;
+        };
+        const renderWaveTable = (signals) => {
+          const body = document.getElementById('wave-body');
+          if (!body) { return; }
+          if (!Array.isArray(signals) || !signals.length) {
+            body.innerHTML = '<tr><td colspan="10" class="empty-state">????</td></tr>';
+            return;
+          }
+          const rows = signals.map((signal) => {
+            const metrics = signal.metrics || {};
+            const flvText = `${fmtNumber(metrics.flv, 2)} / ${fmtNumber(metrics.baseline, 2)}`;
+            const priceText = metrics.price_drop_pct > 0
+              ? `-${fmtNumber(metrics.price_drop_pct, 2)}%`
+              : `${fmtNumber(metrics.price_change_pct, 2)}%`;
+            const leText = metrics.le === null ? '-' : fmtNumber(metrics.le, 2);
+            const pcText = metrics.pc === null ? '-' : fmtNumber(metrics.pc, 2);
+            const densityText = metrics.density_per_min
+              ? `${fmtNumber(metrics.density_per_min, 2)}/min`
+              : '-';
+            const lpiText = metrics.lpi === undefined ? '-' : fmtNumber(metrics.lpi, 2);
+            const signalClass = signal.signal_class || '';
+            return `
+              <tr>
+                <td>${signal.instrument || '--'}</td>
+                <td>${signal.wave || '--'}</td>
+                <td>${signal.status || '--'}</td>
+                <td>${flvText}</td>
+                <td>${priceText}</td>
+                <td>${leText}</td>
+                <td>${pcText}</td>
+                <td>${densityText}</td>
+                <td>${lpiText}</td>
+                <td class="${signalClass}">${signal.signal || '???'}</td>
+              </tr>`;
+          });
+          body.innerHTML = rows.join('');
+        };
+        const applyFilters = (items) => {
+          const minQty = Math.max(0, Number(minSizeInput.value) || 0);
+          const minNotional = Math.max(0, Number(minNotionalInput.value) || 0);
+          const instrumentFilter = (select.value || '').trim().toUpperCase();
+          return items.filter((item) => {
+            const inst = (item.instrument_id || '').trim().toUpperCase();
+            if (instrumentFilter && inst !== instrumentFilter) {
+              return false;
+            }
+            const qty = extractQuantity(item);
+            const notional = computeNotional(item) || 0;
+            if (minQty && qty < minQty) {
+              return false;
+            }
+            if (minNotional && notional < minNotional) {
+              return false;
+            }
+            return true;
+          });
+        };
+        const renderRows = () => {
+          const body = document.getElementById('liquidations-body');
+          body.innerHTML = '';
+          const filtered = applyFilters(latestItems);
+          if (!filtered.length) {
+            body.innerHTML = '<tr><td colspan="7" class="empty-state">??????</td></tr>';
+            return;
+          }
+          filtered.forEach((item) => {
+            const tr = document.createElement('tr');
+            const notional = computeNotional(item);
+            tr.innerHTML = `
+              <td>${fmtTimestamp(item.timestamp)}</td>
+              <td>${item.instrument_id || '--'}</td>
+              <td>${fmtNumber(item.long_qty, 2)}</td>
+              <td>${fmtNumber(item.short_qty, 2)}</td>
+              <td>${fmtNumber(item.net_qty, 2)}</td>
+              <td>${fmtNumber(item.last_price, 4)}</td>
+              <td>${notional === null ? '-' : fmtNumber(notional, 2)}</td>`;
+            body.appendChild(tr);
+          });
+        };
+        const handleWaveSignals = (signals) => {
+          signals
+            .filter((signal) => signal.signal_code && SIGNAL_SIDE_MAP[signal.signal_code])
+            .forEach((signal) => {
+              const side = SIGNAL_SIDE_MAP[signal.signal_code];
+              const uniqueKey = `${signal.instrument}-${signal.signal_code}-${signal.event_id || signal.event_detected_at || signal.wave}`;
+              if (!signal.instrument || triggeredSignals.has(uniqueKey)) {
+                return;
+              }
+              triggeredSignals.add(uniqueKey);
+              fetch('/api/okx/wave-order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  instrument_id: signal.instrument,
+                  size: computeOrderSize(signal),
+                  side,
+                  event_price: Number(signal.metrics?.end_price) || null,
+                  order_mode: getAutoMode(signal.instrument),
+                }),
+              })
+                .then((res) => res.json())
+                .then((result) => {
+                  console.log(`????????(${signal.signal_code})`, signal.instrument, side, result.status);
+                })
+                .catch((err) => console.error('??????', err));
+            });
+        };
+        function refresh() {
+          const params = new URLSearchParams({ limit: FETCH_LIMIT.toString() });
+          fetch('/api/streams/liquidations/latest?' + params.toString())
+            .then((res) => res.json())
+            .then((data) => {
+              latestItems = Array.isArray(data.items) ? data.items : [];
+              renderRows();
+              const signals = Array.isArray(data.wave_signals) ? data.wave_signals : [];
+              renderWaveTable(signals);
+              handleWaveSignals(signals);
+              const updated = document.getElementById('liquidations-updated');
+              if (updated) { updated.textContent = fmtTimestamp(data.updated_at); }
+              const waveStatus = document.getElementById('wave-status-text');
+              if (waveStatus) {
+                waveStatus.textContent = data.wave_summary || '????';
+              }
+            })
+            .catch((err) => console.error(err));
+        }
+        select.addEventListener('change', () => {
+          renderRows();
+          syncAutoControls();
+        });
+        [minSizeInput, minNotionalInput].forEach((input) => {
+          input.addEventListener('input', () => renderRows());
+        });
+        if (autoSizeInput) {
+          autoSizeInput.addEventListener('input', (event) => {
+            updateAutoSize(select.value, event.target.value);
+          });
+        }
+        if (autoNotionalInput) {
+          autoNotionalInput.addEventListener('input', (event) => {
+            updateAutoNotional(select.value, event.target.value);
+          });
+        }
+        if (autoModeSelect) {
+          autoModeSelect.addEventListener('change', (event) => {
+            updateAutoMode(select.value, event.target.value);
+          });
+        }
+        refresh();
+        setInterval(refresh, 1000);
+      })();
+    </script>    </script>
 </body>
 </html>
 """
@@ -2561,7 +2805,7 @@ PROMPT_EDITOR_TEMPLATE = r"""
     <div class="prompt-layout">
         <header>
             <h1>提示词模板</h1>
-            <p class="hint">模板中可以自由编排说明，让 LLM 在下单前参考实时仓位与风控上下文。使用 <code>{{{{</code> 与 <code>}}}}</code> 输出字面花括号。</p>
+            <p class="hint">模板中可以自由编排说明，让 LLM 在下单前参考实时仓位与风控上下文。使用 <code>{{</code> 与 <code>}}</code> 输出字面花括号。</p>
             {notice_block}
         </header>
         <section class="card">
@@ -2670,6 +2914,17 @@ LIQUIDATION_TEMPLATE = r"""
         tr:nth-child(even) {{ background: rgba(30, 41, 59, 0.7); }}
         .timestamp {{ color: #38bdf8; }}
         .empty-state {{ text-align: center; color: #94a3b8; padding: 16px; }}
+        .wave-section {{ background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 1rem; border: 1px solid #334155; }}
+        .wave-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }}
+        .wave-header h2 {{ margin: 0; font-size: 1rem; color: #f1f5f9; }}
+        .wave-status {{ font-size: 0.85rem; padding: 4px 12px; border-radius: 999px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; }}
+        .detection-table {{ width: 100%; border-collapse: collapse; border: 1px solid #334155; border-radius: 12px; overflow: hidden; }}
+        .detection-table th, .detection-table td {{ padding: 8px 10px; font-size: 0.85rem; border-bottom: 1px solid #334155; }}
+        .detection-table th {{ background: rgba(15, 23, 42, 0.5); font-weight: 600; }}
+        .detection-table tr:nth-child(even) {{ background: rgba(30, 41, 59, 0.4); }}
+        .wave-signal-strong {{ color: #fbbf24; }}
+        .wave-signal-bottom {{ color: #4ade80; }}
+        .wave-signal-warn {{ color: #f87171; }}
     </style>
 </head>
 <body>
@@ -2698,7 +2953,44 @@ LIQUIDATION_TEMPLATE = r"""
         <label>最小爆仓金额（USDT）
             <input type="number" id="min-notional" min="0" step="10" placeholder="如 100000">
         </label>
+        <label>Auto Order Size 自动加仓手数
+            <input type="number" id="auto-order-size" min="0.001" step="0.001" value="1">
+        </label>
+        <label>Auto Order Notional 自动下单金额（USDT）
+            <input type="number" id="auto-order-notional" min="10" step="10" value="100">
+        </label>
+        <label>自动下单方式
+            <select id="auto-order-mode">
+                <option value="size">按手数</option>
+                <option value="notional">按金额</option>
+            </select>
+        </label>
         <span>最后更新：<span class="timestamp" id="liquidations-updated">{updated_at}</span></span>
+    </div>
+    <div class="wave-section">
+        <div class="wave-header">
+            <h2>Real-Time Liquidation Waves 实时爆仓波次监测</h2>
+            <span class="wave-status" id="wave-status-text">等待数据</span>
+        </div>
+        <table class="detection-table">
+            <thead>
+                <tr>
+                    <th>合约</th>
+                    <th>波次</th>
+                    <th>状态</th>
+                    <th>FLV / 均值</th>
+                    <th>价格跌幅</th>
+                    <th>LE 爆仓弹性(单位跌幅触发强平数)</th>
+                    <th>PC Pressure Cost 价格压力</th>
+                    <th>密度</th>
+                    <th>LPI 强平压力指数</th>
+                    <th>信号</th>
+                </tr>
+            </thead>
+            <tbody id="wave-body">
+                <tr><td colspan="10" class="empty-state">等待数据...</td></tr>
+            </tbody>
+        </table>
     </div>
     <table>
         <thead>
@@ -2721,24 +3013,13 @@ LIQUIDATION_TEMPLATE = r"""
         const select = document.getElementById('instrument-select');
         const minSizeInput = document.getElementById('min-size');
         const minNotionalInput = document.getElementById('min-notional');
-        const DEFAULT_LIMIT = 50;
+        const FETCH_LIMIT = 400;
         let latestItems = [];
         const fmtNumber = (value, digits) => {{
           if (value === null || value === undefined || value === '') {{ return '-'; }}
           const num = Number(value);
           if (!isFinite(num)) {{ return '-'; }}
           return num.toFixed(digits);
-        }};
-        const _toAbsNumber = (value) => {{
-          const num = Number(value);
-          return Number.isFinite(num) ? Math.abs(num) : 0;
-        }};
-        const extractQuantity = (item) => {{
-          if (!item) {{ return 0; }}
-          const netQty = _toAbsNumber(item.net_qty);
-          const longQty = _toAbsNumber(item.long_qty);
-          const shortQty = _toAbsNumber(item.short_qty);
-          return Math.max(netQty, longQty, shortQty);
         }};
         const fmtTimestamp = (value) => {{
           if (!value) {{ return '--'; }}
@@ -2755,6 +3036,17 @@ LIQUIDATION_TEMPLATE = r"""
             hour12: false
           }}).format(date);
         }};
+        const _toAbsNumber = (value) => {{
+          const num = Number(value);
+          return Number.isFinite(num) ? Math.abs(num) : 0;
+        }};
+        const extractQuantity = (item) => {{
+          if (!item) {{ return 0; }}
+          const netQty = _toAbsNumber(item.net_qty);
+          const longQty = _toAbsNumber(item.long_qty);
+          const shortQty = _toAbsNumber(item.short_qty);
+          return Math.max(netQty, longQty, shortQty);
+        }};
         const computeNotional = (item) => {{
           if (!item) {{ return null; }}
           const provided = Number(item.notional_value);
@@ -2768,10 +3060,54 @@ LIQUIDATION_TEMPLATE = r"""
           }}
           return null;
         }};
+        const renderWaveTable = (signals) => {{
+          const body = document.getElementById('wave-body');
+          if (!body) {{ return; }}
+          if (!Array.isArray(signals) || !signals.length) {{
+            body.innerHTML = '<tr><td colspan="10" class="empty-state">????</td></tr>';
+            return;
+          }}
+          const rows = signals.map((signal) => {{
+            const metrics = signal.metrics || {{}};
+            const flvText = `${{fmtNumber(metrics.flv, 2)}} / ${{fmtNumber(metrics.baseline, 2)}}`;
+            const priceText = metrics.price_drop_pct > 0
+              ? `-${{fmtNumber(metrics.price_drop_pct, 2)}}%`
+              : `${{fmtNumber(metrics.price_change_pct, 2)}}%`;
+            const leValue = Number(metrics.le);
+            const leText = Number.isFinite(leValue)
+              ? `${{fmtNumber(leValue, 2)}} (${leValue >= 1 ? '跌得少，却爆得多' : '跌得多，爆得少'})`
+              : '-';
+            const pcText = metrics.pc === null ? '-' : fmtNumber(metrics.pc, 2);
+            const densityText = metrics.density_per_min
+              ? `${{fmtNumber(metrics.density_per_min, 2)}}/min`
+              : '-';
+            const lpiText = metrics.lpi === undefined ? '-' : fmtNumber(metrics.lpi, 2);
+            const signalClass = signal.signal_class || '';
+            return `
+              <tr>
+                <td>${{signal.instrument || '--'}}</td>
+                <td>${{signal.wave || '--'}}</td>
+                <td>${{signal.status || '--'}}</td>
+                <td>${{flvText}}</td>
+                <td>${{priceText}}</td>
+                <td>${{leText}}</td>
+                <td>${{pcText}}</td>
+                <td>${{densityText}}</td>
+                <td>${{lpiText}}</td>
+                <td class="${{signalClass}}">${{signal.signal || '???'}}</td>
+              </tr>`;
+          }});
+          body.innerHTML = rows.join('');
+        }};
         const applyFilters = (items) => {{
           const minQty = Math.max(0, Number(minSizeInput.value) || 0);
           const minNotional = Math.max(0, Number(minNotionalInput.value) || 0);
+          const instrumentFilter = (select.value || '').trim().toUpperCase();
           return items.filter((item) => {{
+            const inst = (item.instrument_id || '').trim().toUpperCase();
+            if (instrumentFilter && inst !== instrumentFilter) {{
+              return false;
+            }}
             const qty = extractQuantity(item);
             const notional = computeNotional(item) || 0;
             if (minQty && qty < minQty) {{
@@ -2788,7 +3124,7 @@ LIQUIDATION_TEMPLATE = r"""
           body.innerHTML = '';
           const filtered = applyFilters(latestItems);
           if (!filtered.length) {{
-            body.innerHTML = '<tr><td colspan="7" class="empty-state">暂无爆仓数据</td></tr>';
+            body.innerHTML = '<tr><td colspan="7" class="empty-state">??????</td></tr>';
             return;
           }}
           filtered.forEach((item) => {{
@@ -2806,19 +3142,25 @@ LIQUIDATION_TEMPLATE = r"""
           }});
         }};
         function refresh() {{
-          const params = new URLSearchParams({{ limit: DEFAULT_LIMIT.toString() }});
-          if (select.value) {{ params.set('instrument', select.value); }}
+          const params = new URLSearchParams({{ limit: FETCH_LIMIT.toString() }});
           fetch('/api/streams/liquidations/latest?' + params.toString())
             .then((res) => res.json())
             .then((data) => {{
               latestItems = Array.isArray(data.items) ? data.items : [];
               renderRows();
+              renderWaveTable(data.wave_signals || []);
               const updated = document.getElementById('liquidations-updated');
               if (updated) {{ updated.textContent = fmtTimestamp(data.updated_at); }}
+              const waveStatus = document.getElementById('wave-status-text');
+              if (waveStatus) {{
+                waveStatus.textContent = data.wave_summary || '????';
+              }}
             }})
             .catch((err) => console.error(err));
         }}
-        select.addEventListener('change', refresh);
+        select.addEventListener('change', () => {{
+          renderRows();
+        }});
         [minSizeInput, minNotionalInput].forEach((input) => {{
           input.addEventListener('input', () => renderRows());
         }});

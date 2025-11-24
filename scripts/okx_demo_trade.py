@@ -47,6 +47,12 @@ def main() -> None:
         choices=["cash", "cross", "isolated"],
         help="Trading mode",
     )
+    place_parser.add_argument(
+        "--lever",
+        type=float,
+        default=2.0,
+        help="Order leverage (defaults to 2x)",
+    )
 
     cancel_parser = subparsers.add_parser("cancel", help="Cancel an OKX order")
     cancel_parser.add_argument("--inst-id", required=True, help="OKX instrument ID")
@@ -73,6 +79,7 @@ def main() -> None:
                 "price": args.price,
                 "margin_mode": args.margin_mode,
                 "client_order_id": args.client_order_id,
+                "leverage": args.lever,
             }
             response = client.place_order(payload)
         else:  # cancel

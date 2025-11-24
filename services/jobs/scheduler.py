@@ -48,6 +48,7 @@ from services.webapp.dependencies import (
     get_account_repository,
     get_portfolio_registry,
 )
+from services.liquidations import waves as wave_detector
 from data_pipeline.pipeline import (
     MarketDataPipeline,
     PipelineSettings,
@@ -68,6 +69,7 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 _DEFAULT_LIQUIDATION_INTERVAL = 120
+_MIN_LIQUIDATION_NOTIONAL_USD = 10_000.0
 
 try:  # pragma: no cover - config is optional for tests
     from config import (
@@ -119,6 +121,8 @@ _DEFAULT_RISK_CONFIG = {
     "max_position": 0.0,
     "take_profit_pct": 0.0,
     "stop_loss_pct": 0.0,
+    "default_leverage": 2,
+    "max_leverage": 125,
     "position_take_profit_pct": 5.0,
     "position_stop_loss_pct": 3.0,
     "pyramid_max_orders": 5,
@@ -143,6 +147,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
             "max_position",
             "take_profit_pct",
             "stop_loss_pct",
+            "default_leverage",
+            "max_leverage",
             "position_take_profit_pct",
             "position_stop_loss_pct",
             "pyramid_max_orders",
@@ -160,6 +166,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     cooldown = int(config["cooldown_seconds"])
     min_notional = float(config["min_notional_usd"])
     max_position = float(config.get("max_position", 0.0))
+    default_leverage = float(config.get("default_leverage", 2.0))
+    max_leverage = float(config.get("max_leverage", max(default_leverage, 1.0)))
     pyramid_max = int(config.get("pyramid_max_orders", 0))
     take_profit = float(config.get("take_profit_pct", 0.0))
     stop_loss = float(config.get("stop_loss_pct", 0.0))
@@ -178,6 +186,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     max_order_notional = max(0.0, min(1_000_000.0, max_order_notional))
     min_notional = max(0.0, min_notional)
     max_position = max(0.0, max_position)
+    default_leverage = max(1.0, min(125.0, default_leverage))
+    max_leverage = max(default_leverage, min(125.0, max_leverage))
     take_profit = max(0.0, min(500.0, take_profit))
     stop_loss = max(0.0, min(95.0, stop_loss))
     position_take_profit = max(0.0, min(500.0, position_take_profit))
@@ -196,6 +206,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
         "min_notional_usd": min_notional,
         "max_order_notional_usd": max_order_notional,
         "max_position": max_position,
+        "default_leverage": default_leverage,
+        "max_leverage": max_leverage,
         "take_profit_pct": take_profit,
         "stop_loss_pct": stop_loss,
         "position_take_profit_pct": position_take_profit,
@@ -225,6 +237,7 @@ _EXECUTION_LOG = deque(maxlen=100)
 _ORDER_DEBUG_LOG = deque(maxlen=50)
 _ORDER_DEBUG_WRITER: Optional["InfluxWriter"] = None
 _EXEC_LOG_WRITER: Optional["InfluxWriter"] = None
+_WAVE_AUTOMATION_CURSOR: Dict[str, Dict[Tuple[str, str], int]] = {}
 
 _LIQUIDATION_REVERSAL_WATCH: Dict[str, Dict[str, object]] = {}
 _LIQUIDATION_SILENCE_SECONDS = 60
@@ -798,6 +811,13 @@ async def _scan_liquidation_flow_job() -> Dict[str, str]:
             net_qty = features.get("liq_net_qty")
             if not isinstance(net_qty, (int, float)) or net_qty == 0:
                 continue
+            liq_notional = _try_float(features.get("liq_notional"))
+            if liq_notional is None:
+                price_hint = _try_float(features.get("liq_last_price")) or _try_float(features.get("last_price"))
+                if price_hint is not None:
+                    liq_notional = abs(float(net_qty)) * price_hint
+            if liq_notional is None or liq_notional < _MIN_LIQUIDATION_NOTIONAL_USD:
+                continue
             ts_value = features.get("liq_timestamp")
             ts = None
             if isinstance(ts_value, (int, float)):
@@ -807,7 +827,6 @@ async def _scan_liquidation_flow_job() -> Dict[str, str]:
                 age = max(0, int((now - ts).total_seconds()))
                 age_label = f"@{age}s"
             highlights.append(f"{instrument}:{net_qty:+.2f}{age_label}")
-            liq_notional = _try_float(features.get("liq_notional"))
             records.append((instrument, float(net_qty), age_label, liq_notional))
         if highlights:
             preview = " | ".join(highlights[:4])
@@ -834,6 +853,181 @@ async def _scan_liquidation_flow_job() -> Dict[str, str]:
         logger.warning("Liquidation scan job failed: %s", exc)
         _append_execution_log("liquidation", "error", message, duration_seconds=duration)
         return {"status": "error", "detail": message}
+
+
+def _wave_watchlist() -> List[str]:
+    return [
+        inst.strip().upper()
+        for inst in (TRADABLE_INSTRUMENTS or [])
+        if isinstance(inst, str) and inst.strip()
+    ]
+
+
+def _refresh_wave_signals_sync(instruments: Sequence[str], *, lookback: str = "120m", limit: int = 120) -> None:
+    if not instruments:
+        return
+    query_api, cfg = _get_feature_query_api()
+    if query_api is None or cfg is None:
+        return
+    for instrument in instruments:
+        symbol = instrument.strip().upper()
+        if not symbol:
+            continue
+        flux = f"""
+from(bucket: "{cfg.bucket}")
+  |> range(start: -{lookback})
+  |> filter(fn: (r) => r["_measurement"] == "okx_liquidations")
+  |> filter(fn: (r) => r["instrument_id"] == "{symbol}")
+  |> pivot(rowKey:["_time"], columnKey:["_field"], valueColumn:"_value")
+  |> sort(columns: ["_time"], desc: false)
+  |> limit(n: {limit})
+"""
+        try:
+            tables = query_api.query(flux)
+        except Exception as exc:
+            logger.debug("Wave detector query failed for %s: %s", symbol, exc)
+            wave_detector.update_wave(symbol, [])
+            continue
+        rows: List[dict] = []
+        for table in tables:
+            for record in getattr(table, "records", []):
+                values = getattr(record, "values", {})
+                timestamp_value = values.get("_time")
+                if isinstance(timestamp_value, datetime):
+                    ts = timestamp_value.isoformat()
+                else:
+                    ts = str(timestamp_value)
+        rows.append(
+            {
+                "instrument_id": symbol,
+                "timestamp": ts,
+                "long_qty": values.get("long_qty"),
+                "short_qty": values.get("short_qty"),
+                "net_qty": values.get("net_qty"),
+                "last_price": values.get("last_price"),
+                "notional_value": values.get("notional_value"),
+            }
+        )
+    wave_detector.update_wave(symbol, rows)
+
+
+def _passes_wave_reentry(
+    *,
+    event_price: Optional[float],
+    event_direction: str,
+    event_instrument: str,
+    positions: Sequence[Position],
+    reentry_pct: float,
+) -> bool:
+    if reentry_pct <= 0 or event_price is None or event_price <= 0:
+        return True
+    for pos in positions or []:
+        if _get_attr(pos, "instrument_id") != event_instrument:
+            continue
+        entry_price = _try_float(_get_attr(pos, "entry_price"))
+        if not entry_price or entry_price <= 0:
+            continue
+        side = (_get_attr(pos, "side") or "").lower()
+        if event_direction == "buy" and side in {"long", "buy"}:
+            deviation = ((entry_price - event_price) / entry_price) * 100.0
+            if deviation < reentry_pct:
+                return False
+        elif event_direction == "sell" and side in {"short", "sell"}:
+            deviation = ((event_price - entry_price) / entry_price) * 100.0
+            if deviation < reentry_pct:
+                return False
+    return True
+
+
+async def _maybe_execute_wave_strategy(
+    *,
+    account: Account,
+    positions: Sequence[Position],
+    open_orders: Sequence[OrderModel],
+    meta: Dict[str, str],
+    market_price: float,
+) -> Optional[Tuple[SignalRequest, SignalResponse]]:
+    watchlist = _wave_watchlist()
+    if not watchlist:
+        return None
+    relevant = set(inst.upper() for inst in _iter_liquidation_watch_instruments(meta))
+    if not relevant:
+        return None
+    events = wave_detector.iter_events(signal_codes=("bottom_absorb", "top_signal"))
+    candidates = [event for event in events if event.instrument in relevant]
+    if not candidates:
+        return None
+    with _RISK_CONFIG_LOCK:
+        reentry_pct = float(_RISK_CONFIG.get("pyramid_reentry_pct", 0.0))
+        pyramid_cap = int(_RISK_CONFIG.get("pyramid_max_orders", 0))
+    cursor = _WAVE_AUTOMATION_CURSOR.setdefault(account.account_id, {})
+    candidates.sort(key=lambda evt: evt.detected_at or datetime.min)
+    for event in candidates:
+        if event.event_id is None:
+            continue
+        key = (event.instrument, event.signal_code)
+        if cursor.get(key, 0) >= event.event_id:
+            continue
+        direction = event.direction
+        if direction not in {"buy", "sell"}:
+            cursor[key] = event.event_id
+            continue
+        if pyramid_cap > 0 and _count_active_orders(open_orders, event.instrument, direction) >= pyramid_cap:
+            cursor[key] = event.event_id
+            continue
+        if not _passes_wave_reentry(
+            event_price=event.price,
+            event_direction=direction,
+            event_instrument=event.instrument,
+            positions=positions,
+            reentry_pct=reentry_pct,
+        ):
+            cursor[key] = event.event_id
+            continue
+
+        request = _build_signal_request(
+            model_id=account.model_id,
+            meta=meta,
+            account=account,
+            positions=positions,
+            market_price=market_price,
+            instrument_override=event.instrument,
+        )
+        if request is None:
+            cursor[key] = event.event_id
+            continue
+        side = "long" if direction == "buy" else "short"
+        size = _estimate_reversal_order_size(request, side)
+        if size <= 0:
+            cursor[key] = event.event_id
+            continue
+        suggested_order = {
+            "instrument_id": event.instrument,
+            "side": direction,
+            "order_type": "market",
+            "size": round(size, 6),
+            "reference_price": event.price or request.market.price,
+        }
+        reasoning = (
+            f"{event.instrument} {event.signal_text} (LE={event.metrics.le or '-'}, "
+            f"PC={event.metrics.pc or '-'}) -> 执行{'买入' if direction == 'buy' else '卖出'} {size}."
+        )
+        response = SignalResponse(
+            model_id=request.model_id,
+            decision="open_long" if direction == "buy" else "open_short",
+            confidence=0.78,
+            reasoning=reasoning,
+            suggested_order=suggested_order,
+            raw_output={{
+                "automation": "liquidation_wave",
+                "wave_signal_code": event.signal_code,
+                "wave_event_id": event.event_id,
+                "wave_detected_at": event.detected_at.isoformat(),
+            }},
+        )
+        cursor[key] = event.event_id
+        return request, response
+    return None
 
 
 async def _execute_model_workflow_job() -> Dict[str, str]:
@@ -864,6 +1058,9 @@ async def _execute_model_workflow_job() -> Dict[str, str]:
 
     started = datetime.now(tz=timezone.utc)
     try:
+        watchlist = _wave_watchlist()
+        if watchlist:
+            await asyncio.to_thread(_refresh_wave_signals_sync, watchlist)
         async with SignalRuntime() as runtime:
             for account_key, meta in OKX_ACCOUNTS.items():
                 if not meta.get("enabled", True):
@@ -980,43 +1177,56 @@ async def _process_account_signal(
         "notes": "",
     }
 
-    manual_signal = await _maybe_generate_liquidation_reversal(
+    automation_signal = await _maybe_execute_wave_strategy(
         account=account,
         positions=positions,
+        open_orders=open_orders,
         meta=meta,
-        runtime=runtime,
+        market_price=market_price,
     )
+    request: Optional[SignalRequest] = None
     response: Optional[SignalResponse] = None
-    if manual_signal:
-        request, response = manual_signal
+    if automation_signal:
+        request, response = automation_signal
         debug_entry["decision_actionable"] = True
-        debug_entry["automation"] = "liquidation_reversal"
-        debug_entry["notes"] = "爆仓逆转由人工触发，默认 60 秒后自动复位。"
+        debug_entry["automation"] = "liquidation_wave"
+        debug_entry["notes"] = response.reasoning
     else:
-        request = _build_signal_request(
-            model_id=account.model_id,
-            meta=meta,
+        manual_signal = await _maybe_generate_liquidation_reversal(
             account=account,
             positions=positions,
-            market_price=market_price,
+            meta=meta,
+            runtime=runtime,
         )
+        if manual_signal:
+            request, response = manual_signal
+            debug_entry["decision_actionable"] = True
+            debug_entry["automation"] = "liquidation_reversal"
+            debug_entry["notes"] = "?????????? 60 ?????????"
+        else:
+            request = _build_signal_request(
+                model_id=account.model_id,
+                meta=meta,
+                account=account,
+                positions=positions,
+                market_price=market_price,
+            )
 
-        if request is None:
-            logger.debug("Unable to build signal request for %s; skipping", account_key)
-            debug_entry["notes"] = "缺乏可交易合约或行情，无法生成信号。"
-            _record_order_debug_entry(debug_entry)
-            return False, None
-        liquidation_alert = _annotate_liquidation_hint(request)
-        if liquidation_alert:
-            debug_entry["liquidation_hint"] = liquidation_alert
-        try:
-            response = await runtime.generate_signal(request)
-        except Exception as exc:
-            logger.exception("Model invocation failed for %s: %s", account_key, exc)
-            debug_entry["notes"] = f"模型执行失败: {exc}"
-            _record_order_debug_entry(debug_entry)
-            return False, None
-
+            if request is None:
+                logger.debug("Unable to build signal request for %s; skipping", account_key)
+                debug_entry["notes"] = "??????????????????"
+                _record_order_debug_entry(debug_entry)
+                return False, None
+            liquidation_alert = _annotate_liquidation_hint(request)
+            if liquidation_alert:
+                debug_entry["liquidation_hint"] = liquidation_alert
+            try:
+                response = await runtime.generate_signal(request)
+            except Exception as exc:
+                logger.exception("Model invocation failed for %s: %s", account_key, exc)
+                debug_entry["notes"] = f"??????: {exc}"
+                _record_order_debug_entry(debug_entry)
+                return False, None
     if response is None:
         logger.debug("No signal generated for %s after liquidation scan.", account_key)
         debug_entry["notes"] = "无法生成信号"
@@ -1084,16 +1294,12 @@ async def _process_account_signal(
             routed.intent.metadata["order_action"] = action_tag
     _assign_okx_position_side(routed.intent, positions, meta)
 
-    size_note = _align_size_to_lot(routed.intent)
-    if size_note:
-        debug_entry["size_adjusted"] = size_note
-
     with _RISK_CONFIG_LOCK:
         pyramid_cap = int(_RISK_CONFIG.get("pyramid_max_orders", 0))
     if pyramid_cap > 0:
         active_count = _count_active_orders(open_orders, routed.intent.instrument_id, routed.intent.side)
         if active_count >= pyramid_cap:
-            debug_entry["notes"] = f"金字塔同向订单已达 {pyramid_cap} 单，跳过下单"
+            debug_entry["notes"] = f"金字塔同向订单达到 {pyramid_cap} 笔，已跳过下单"
             debug_entry["pyramid_blocked"] = True
             _record_order_debug_entry(debug_entry)
             return False, signal_summary
@@ -1113,7 +1319,7 @@ async def _process_account_signal(
         except Exception:
             notional = 0.0
         if notional <= 0:
-            debug_entry["notes"] = "缺少价格无法计算最小名义金额"
+            debug_entry["notes"] = "缺少价格，无法验证最小名义金额"
             _record_order_debug_entry(debug_entry)
             if signal_summary:
                 signal_summary = f"{signal_summary} | {debug_entry['notes']}"
@@ -1121,13 +1327,25 @@ async def _process_account_signal(
                 signal_summary = debug_entry["notes"]
             return False, signal_summary
         if notional < min_notional:
-            debug_entry["notes"] = f"名义金额 {notional:.2f} 小于最小下单金额 {min_notional:.2f}"
-            _record_order_debug_entry(debug_entry)
-            if signal_summary:
-                signal_summary = f"{signal_summary} | {debug_entry['notes']}"
+            if price_ref and price_ref > 0:
+                size_value = _try_float(routed.intent.size) or 0.0
+                direction = 1.0 if size_value >= 0 else -1.0
+                adjusted_size = (min_notional / price_ref) * (direction or 1.0)
+                routed.intent.size = round(adjusted_size, 8)
+                debug_entry["min_notional_adjustment"] = f"Raised to {min_notional:.2f} USDT minimum"
             else:
-                signal_summary = debug_entry["notes"]
-            return False, signal_summary
+                debug_entry["notes"] = "无法满足最小下单金额，缺少价格参考"
+                _record_order_debug_entry(debug_entry)
+                if signal_summary:
+                    signal_summary = f"{signal_summary} | {debug_entry['notes']}"
+                else:
+                    signal_summary = debug_entry["notes"]
+                return False, signal_summary
+
+    size_note = _align_size_to_lot(routed.intent)
+    if size_note:
+        previous = debug_entry.get("size_adjusted")
+        debug_entry["size_adjusted"] = f"{previous}; {size_note}" if previous else size_note
 
     try:
         ensure_valid_order(routed.intent, [validator])
@@ -1534,13 +1752,16 @@ async def _maybe_generate_liquidation_reversal(
         decision = _evaluate_liquidation_reversal_state(instrument, features, detected_at)
         if not decision:
             continue
-        direction, notional_qty, event_time = decision
+        direction, notional_qty, event_time, notional_usd = decision
         request = _build_signal_request(
             model_id=account.model_id,
             meta=meta,
             account=account,
             positions=positions,
-            market_price=features.get("liq_last_price") or 0.0,
+            market_price=features.get("liq_last_price")
+            or features.get("last_price")
+            or features.get("mid_price")
+            or 0.0,
             instrument_override=instrument,
         )
         if request is None:
@@ -1549,19 +1770,16 @@ async def _maybe_generate_liquidation_reversal(
             request=request,
             direction=direction,
             notional_qty=notional_qty,
+            notional_usd=notional_usd,
             event_time=event_time,
             detected_at=detected_at,
         )
-        try:
-            response = await runtime.generate_signal(request)
-        except Exception as exc:
-            logger.warning("AI evaluation for liquidation reversal failed: %s", exc)
-            response = None
         response = _finalize_liquidation_response(
             request=request,
-            response=response,
+            response=None,
             direction=direction,
             notional_qty=notional_qty,
+            notional_usd=notional_usd,
             event_time=event_time,
             detected_at=detected_at,
         )
@@ -1682,6 +1900,7 @@ def _attach_liquidation_metadata(
     request: SignalRequest,
     direction: str,
     notional_qty: float,
+    notional_usd: float,
     event_time: datetime,
     detected_at: datetime,
 ) -> None:
@@ -1689,14 +1908,15 @@ def _attach_liquidation_metadata(
     metadata = request.metadata
     metadata["automation"] = "liquidation_reversal"
     metadata["liquidation_direction"] = direction
-    metadata["liquidation_notional"] = notional_qty
+    metadata["liquidation_notional_qty"] = notional_qty
+    metadata["liquidation_notional"] = notional_usd
     metadata["liquidation_event_time"] = event_time.isoformat()
     metadata["liquidation_detected_at"] = detected_at.isoformat()
     request.market.metadata["liquidation_direction"] = direction
     request.market.metadata["liquidation_signal"] = True
     request.market.metadata["liquidation_event_time"] = event_time.isoformat()
     request.risk.notes["liquidation_direction"] = direction
-    request.risk.notes["liquidation_notional"] = notional_qty
+    request.risk.notes["liquidation_notional"] = notional_usd
 
 
 def _finalize_liquidation_response(
@@ -1705,6 +1925,7 @@ def _finalize_liquidation_response(
     response: Optional[SignalResponse],
     direction: str,
     notional_qty: float,
+    notional_usd: float,
     event_time: datetime,
     detected_at: datetime,
 ) -> Optional[SignalResponse]:
@@ -1729,8 +1950,9 @@ def _finalize_liquidation_response(
     suggested.setdefault("order_type", "market")
 
     reasoning = (
-        f"{instrument} 净爆仓{('多单' if direction == 'long' else '空单')}数量 {notional_qty:.2f} "
-        f"在 {int((detected_at - event_time).total_seconds())} 秒前触发，AI 建议执行 {suggested['side']} {size}."
+        f"{instrument} liquidation {'long' if direction == 'long' else 'short'} quantity {notional_qty:.2f} "
+        f"(approx {notional_usd:,.0f} USDT) triggered {int((detected_at - event_time).total_seconds())}s ago; "
+        f"executing {suggested['side']} {size}."
     )
 
     forced_decision = "open_long" if direction == "long" else "open_short"
@@ -1752,7 +1974,8 @@ def _finalize_liquidation_response(
     raw_output = base_response.raw_output or {}
     raw_output["automation"] = "liquidation_reversal"
     raw_output["liquidation_direction"] = direction
-    raw_output["liquidation_notional"] = notional_qty
+    raw_output["liquidation_notional_qty"] = notional_qty
+    raw_output["liquidation_notional"] = notional_usd
     raw_output["liquidation_event_time"] = event_time.isoformat()
     raw_output["liquidation_detected_at"] = detected_at.isoformat()
     base_response.raw_output = raw_output
@@ -1763,7 +1986,7 @@ def _evaluate_liquidation_reversal_state(
     instrument: str,
     features: Dict[str, float],
     now: datetime,
-) -> Optional[Tuple[str, float, datetime]]:
+) -> Optional[Tuple[str, float, datetime, float]]:
     net_qty = features.get("liq_net_qty")
     timestamp_value = features.get("liq_timestamp")
     if net_qty is None or timestamp_value is None or net_qty == 0:
@@ -1773,7 +1996,7 @@ def _evaluate_liquidation_reversal_state(
         return None
     notional = _try_float(features.get("liq_notional"))
     if notional is None:
-        price_hint = _try_float(features.get("liq_last_price"))
+        price_hint = _try_float(features.get("liq_last_price")) or _try_float(features.get("last_price"))
         if price_hint is not None:
             notional = abs(net_qty) * price_hint
     with _RISK_CONFIG_LOCK:
@@ -1781,6 +2004,7 @@ def _evaluate_liquidation_reversal_state(
         same_required = int(_RISK_CONFIG.get("liquidation_same_direction_count", 4))
         confirmation_required = int(_RISK_CONFIG.get("liquidation_opposite_count", 3))
         silence_required = float(_RISK_CONFIG.get("liquidation_silence_seconds", 300.0))
+    liq_threshold = max(_MIN_LIQUIDATION_NOTIONAL_USD, liq_threshold)
     if liq_threshold <= 0:
         return None
     event_time = _coerce_timestamp(timestamp_value)
@@ -1810,6 +2034,7 @@ def _evaluate_liquidation_reversal_state(
     sign = 1 if net_qty > 0 else -1
     candidate_dir = state.get("candidate_direction")
     eligible_same = notional is not None and notional >= liq_threshold
+    notional_value = float(notional) if notional is not None else 0.0
 
     previous_large = state.get("last_large_event")
     if eligible_same:
@@ -1846,7 +2071,7 @@ def _evaluate_liquidation_reversal_state(
                     state["post_silence_same_count"] = 0
                     state["last_large_event"] = event_time
                     history.clear()
-                    return ("long" if sign > 0 else "short", abs_qty, event_time)
+                    return ("long" if sign > 0 else "short", abs_qty, event_time, notional_value or abs_qty)
             return None
     elif candidate_dir is None:
         return None
@@ -1880,7 +2105,7 @@ def _evaluate_liquidation_reversal_state(
     state["post_silence_same_count"] = 0
     state["last_large_event"] = event_time
     history.clear()
-    return ("long" if sign > 0 else "short", abs_qty, event_time)
+    return ("long" if sign > 0 else "short", abs_qty, event_time, notional_value or abs_qty)
 
 
 def _estimate_reversal_order_size(request: SignalRequest, direction: str) -> float:
@@ -2025,6 +2250,18 @@ def _choose_margin_mode(instrument_id: str, meta: Dict[str, str]) -> str:
     return "cash"
 
 
+def _resolve_leverage(meta: Dict[str, str], override: object = None) -> float:
+    candidate = _try_float(override)
+    if candidate is None:
+        candidate = _try_float(meta.get("default_leverage"))
+    with _RISK_CONFIG_LOCK:
+        default_leverage = float(_RISK_CONFIG.get("default_leverage", 2.0))
+        max_leverage = float(_RISK_CONFIG.get("max_leverage", max(default_leverage, 1.0)))
+    if candidate is None or candidate <= 0:
+        candidate = default_leverage
+    return max(1.0, min(max_leverage, candidate))
+
+
 def _summarize_okx_error(payload: Optional[dict]) -> str:
     """
     Render the OKX error payload into a compact string for debugging.
@@ -2077,6 +2314,8 @@ def _place_order(meta: Dict[str, str], intent: OrderIntent, entry_price: float |
             "margin_mode": _choose_margin_mode(intent.instrument_id, meta),
         }
         meta_payload = intent.metadata if isinstance(intent.metadata, dict) else {}
+        leverage_value = _resolve_leverage(meta, meta_payload.get("leverage"))
+        payload["leverage"] = leverage_value
         if intent.price:
             payload["price"] = intent.price
         client_order_id = meta_payload.get("client_order_id")
