@@ -70,7 +70,14 @@ class ProfitLossGuard:
             pnl_pct = float(metrics.unrealized_pnl_pct)
         except (TypeError, ValueError):
             return
-        if self.take_profit_pct > 0 and pnl_pct >= self.take_profit_pct:
+        position_notional = 0.0
+        try:
+            position_notional = float(metrics.position_notional)
+        except (TypeError, ValueError):
+            position_notional = 0.0
+        has_exposure = position_notional > 1e-6
+
+        if self.take_profit_pct > 0 and pnl_pct >= self.take_profit_pct and has_exposure:
             evaluation.add_violation(
                 "TAKE_PROFIT_REACHED",
                 "Portfolio PnL reached take-profit threshold; halting new trades.",
@@ -78,7 +85,7 @@ class ProfitLossGuard:
                 unrealized_pnl_pct=pnl_pct,
                 portfolio_id=metrics.portfolio_id,
             )
-        if self.stop_loss_pct > 0 and pnl_pct <= -abs(self.stop_loss_pct):
+        if self.stop_loss_pct > 0 and pnl_pct <= -abs(self.stop_loss_pct) and has_exposure:
             evaluation.add_violation(
                 "STOP_LOSS_REACHED",
                 "Portfolio PnL breached stop-loss threshold; halting new trades.",

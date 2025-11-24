@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List, Literal
 
 import httpx
 
-Timeframe = Literal["2m", "15m", "1H", "4H"]
+Timeframe = Literal["2m", "5m", "15m", "1H", "4H"]
 
 
 @dataclass(slots=True)
@@ -30,7 +30,7 @@ class MarketCollectorConfig:
     base_url: str = "https://www.okx.com"
     instruments: List[InstrumentConfig] = field(default_factory=list)
     timeframes: List[Timeframe] = field(
-        default_factory=lambda: ["2m", "15m", "1H", "4H"]
+        default_factory=lambda: ["2m", "5m", "15m", "1H", "4H"]
     )
     candle_limit: int = 120  # number of points per timeframe
     orderbook_depth: int = 50
@@ -79,7 +79,7 @@ class MarketCollector:
             )
             return self._aggregate_two_minute(raw.get("data", []))
 
-        bar_map = {"15m": "15m", "1H": "1H", "4H": "4H"}
+        bar_map = {"5m": "5m", "15m": "15m", "1H": "1H", "4H": "4H"}
         raw = await self._get(
             "/api/v5/market/candles",
             params={"instId": inst_id, "bar": bar_map[timeframe], "limit": limit},

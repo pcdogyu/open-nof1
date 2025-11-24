@@ -11,6 +11,28 @@ INFLUX_BUCKET = "orderflow"
 
 # Auto-generated InfluxDB token (scope manually configure in Influx UI).
 INFLUX_TOKEN = "fMSaxuOVlJ1nLkBUb96JCw4fyWRNZ8d_Z7M7c1jwzEX-QOZ-yXmHrKknco_flQs3yOZL2MH14z5-Va8I4q1_Hg=="
+INFLUX_SECONDARY_TOKEN = "INLTcxomqhQy5xHEbBYcs_mbc6kZ3SuhbqTHfmgH09TiGPfdRjyZH-Z9Boxuy2vnSEN_mw7I8jqgU2VbzCzEWw=="
+INFLUX_TOKENS = [
+    INFLUX_TOKEN,
+    INFLUX_SECONDARY_TOKEN,
+]
+INFLUX_PROFILES = [
+    {
+        "url": INFLUX_URL,
+        "org": INFLUX_ORG,
+        "bucket": INFLUX_BUCKET,
+        "token": INFLUX_TOKEN,
+        "enabled": False,
+    },
+    {
+        # 若第二个实例地址不同，请在此更新 URL/ORG/BUCKET/TOKEN
+        "url": INFLUX_URL,
+        "org": INFLUX_ORG,
+        "bucket": INFLUX_BUCKET,
+        "token": INFLUX_SECONDARY_TOKEN,
+        "enabled": True,  # 备用实例尚未启用，避免随机选择到无响应端口
+    },
+]
 
 # Optional: admin credentials if needed for scripts (avoid using in production).
 INFLUX_USERNAME = "admin"
@@ -83,10 +105,12 @@ RISK_SETTINGS = {   'price_tolerance_pct': 0.02,
     'max_loss_absolute': 1500.0,
     'cooldown_seconds': 28800,
     'min_notional_usd': 50.0,
-    'max_order_notional_usd': 500.0,
+    'max_order_notional_usd': 1000.0,
     'max_position': 0.0,
-    'take_profit_pct': 5.0,
-    'stop_loss_pct': 5.0,
+    'take_profit_pct': 0.0,
+    'stop_loss_pct': 0.0,
+    'position_take_profit_pct': 5.0,
+    'position_stop_loss_pct': 3.0,
     'default_leverage': 2,
     'max_leverage': 125,
     'pyramid_max_orders': 5,

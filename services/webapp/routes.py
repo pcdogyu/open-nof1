@@ -418,6 +418,8 @@ def get_risk_settings() -> dict:
             "max_position": float(_RISK_SETTINGS.get("max_position", 0.0)),
             "take_profit_pct": float(_RISK_SETTINGS.get("take_profit_pct", 0.0)),
             "stop_loss_pct": float(_RISK_SETTINGS.get("stop_loss_pct", 0.0)),
+            "position_take_profit_pct": float(_RISK_SETTINGS.get("position_take_profit_pct", 5.0)),
+            "position_stop_loss_pct": float(_RISK_SETTINGS.get("position_stop_loss_pct", 3.0)),
             "default_leverage": int(_RISK_SETTINGS.get("default_leverage", 1)),
             "max_leverage": int(_RISK_SETTINGS.get("max_leverage", 125)),
             "pyramid_max_orders": int(_RISK_SETTINGS.get("pyramid_max_orders", 0)),
@@ -441,6 +443,8 @@ def update_risk_settings(
     max_position: float,
     take_profit_pct: float,
     stop_loss_pct: float,
+    position_take_profit_pct: float,
+    position_stop_loss_pct: float,
     default_leverage: int,
     max_leverage: int,
     pyramid_max_orders: int,
@@ -460,6 +464,8 @@ def update_risk_settings(
         max_position_val = float(max_position)
         take_profit = float(take_profit_pct)
         stop_loss = float(stop_loss_pct)
+        position_take_profit = float(position_take_profit_pct)
+        position_stop_loss = float(position_stop_loss_pct)
         default_leverage_val = int(default_leverage)
         max_leverage_val = int(max_leverage)
         pyramid_max_val = int(pyramid_max_orders)
@@ -493,6 +499,10 @@ def update_risk_settings(
         raise HTTPException(status_code=400, detail="止盈范围 0-500% 之间。")
     if stop_loss < 0 or stop_loss > 95:
         raise HTTPException(status_code=400, detail="止损范围 0-95% 之间。")
+    if position_take_profit < 0 or position_take_profit > 500:
+        raise HTTPException(status_code=400, detail="单笔止盈范围 0-500% 之间。")
+    if position_stop_loss < 0 or position_stop_loss > 95:
+        raise HTTPException(status_code=400, detail="单笔止损范围 0-95% 之间。")
     if default_leverage_val < 1 or default_leverage_val > 125:
         raise HTTPException(status_code=400, detail="默认杠杆需在 1-125 之间。")
     if max_leverage_val < 1 or max_leverage_val > 125:
@@ -522,6 +532,8 @@ def update_risk_settings(
         "max_position": max_position_val,
         "take_profit_pct": take_profit,
         "stop_loss_pct": stop_loss,
+        "position_take_profit_pct": position_take_profit,
+        "position_stop_loss_pct": position_stop_loss,
         "default_leverage": default_leverage_val,
         "max_leverage": max_leverage_val,
         "pyramid_max_orders": pyramid_max_val,
