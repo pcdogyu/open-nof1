@@ -3688,8 +3688,6 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         .map-meta strong { font-size: 1.05rem; color: #f8fafc; }
         .map-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.85rem; color: #cbd5f5; }
         .legend-dot { display: inline-flex; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
-        .legend-dot.buy { background: #34d399; }
-        .legend-dot.sell { background: #f87171; }
         .legend-dot.bar { background: #facc15; }
         .legend-price { color: #f8fafc; }
         .timestamp { color: #38bdf8; }
@@ -3749,10 +3747,8 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
                 <span>最后刷新：<span class="timestamp" id="map-updated">$updated_at</span></span>
                 <span>统计区间：<strong id="map-range">--</strong></span>
             </div>
-            <div class="map-legend">
-                <span><i class="legend-dot buy"></i>累计买盘强度</span>
-                <span><i class="legend-dot sell"></i>累计卖盘强度</span>
-                <span><i class="legend-dot bar"></i>区间金额</span>
+        <div class="map-legend">
+            <span><i class="legend-dot bar"></i>区间金额</span>
                 <span class="legend-price">当前价格：<strong id="map-legend-price">--</strong></span>
             </div>
         </div>
@@ -3962,7 +3958,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           const rect = chartSvg.getBoundingClientRect();
           const width = Math.max(rect.width || chartSvg.parentElement?.clientWidth || 800, 800);
           const height = Math.max(rect.height || 360, 360);
-          chartSvg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+          chartSvg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
           chartSvg.innerHTML = '';
           const padding = { left: 90, right: 40, top: 24, bottom: 48 };
           const chartWidth = width - padding.left - padding.right;
@@ -4017,27 +4013,14 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           };
           drawBars(asks, '#fbbf24');
           drawBars(bids, '#38bdf8');
-          const drawLine = (collection, color) => {
-            if (!collection.length) { return; }
-            const sorted = collection.slice().sort((a, b) => Number(a.price) - Number(b.price));
-            let pathData = '';
-            sorted.forEach((bin, index) => {
-              const price = Number(bin.price);
-              if (!Number.isFinite(price)) { return; }
-              const x = scaleX(price);
-              const y = scaleLineY(Number(bin.cumulative) || 0);
-              pathData += (index === 0 ? 'M ' : ' L ') + x + ' ' + y;
-            });
-            if (!pathData) { return; }
-            const pathEl = document.createElementNS(svgNS, 'path');
-            pathEl.setAttribute('d', pathData);
-            pathEl.setAttribute('fill', 'none');
-            pathEl.setAttribute('stroke', color);
-            pathEl.setAttribute('stroke-width', '2');
-            chartSvg.appendChild(pathEl);
-          };
-          drawLine(asks, '#f97316');
-          drawLine(bids, '#14b8a6');
+          const leftArea = document.createElementNS(svgNS, 'path');
+          leftArea.setAttribute('d', `M ${padding.left} ${padding.top + chartHeight} L ${padding.left} ${padding.top} L ${padding.left + chartWidth / 2} ${padding.top} L ${padding.left + chartWidth / 2} ${padding.top + chartHeight} Z`);
+          leftArea.setAttribute('fill', 'rgba(248, 113, 113, 0.08)');
+          chartSvg.appendChild(leftArea);
+          const rightArea = document.createElementNS(svgNS, 'path');
+          rightArea.setAttribute('d', `M ${padding.left + chartWidth / 2} ${padding.top + chartHeight} L ${padding.left + chartWidth / 2} ${padding.top} L ${padding.left + chartWidth} ${padding.top} L ${padding.left + chartWidth} ${padding.top + chartHeight} Z`);
+          rightArea.setAttribute('fill', 'rgba(34, 197, 94, 0.08)');
+          chartSvg.appendChild(rightArea);
           if (Number.isFinite(latestPrice)) {
             const latestX = scaleX(latestPrice);
             const marker = document.createElementNS(svgNS, 'line');
