@@ -3003,7 +3003,7 @@ LIQUIDATION_TEMPLATE = r"""
               if (ok) {{
                 const est = Number(data.notional_estimate);
                 const confirmation = Number.isFinite(est) ? est : notionalValue;
-                alert(`已提交 ${side === 'buy' ? '买入' : '卖出'} 订单 ≈ $${{confirmation.toFixed(2)}} USDT。`);
+                alert(`已提交 ${{side === 'buy' ? '买入' : '卖出'}} 订单 ≈ $${{confirmation.toFixed(2)}} USDT。`);
               }} else {{
                 alert(data.detail || '下单失败，请稍后重试。');
               }}
