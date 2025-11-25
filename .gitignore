@@ -9,6 +9,7 @@ __pycache__/
 *pycache*/
 *.py[cod]
 *.pyc
+*.pyc
 *.pyo
 *.pyw
 *.pyd
@@ -40,3 +41,6 @@ services/webapp/__pycache__/routes.cpython-312.pyc
 risk/__pycache__/notional_limits.cpython-312.pyc
 data/logs/ai_signals.jsonl
 data/state/active_influx_profile.json
+services/webapp/__pycache__/main.cpython-312.pyc
+services/webapp/__pycache__/routes.cpython-312.pyc
+data/logs/ai_signals.jsonl
