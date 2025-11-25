@@ -3980,7 +3980,16 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           const yMax = Math.max(maxNotional, 1);
           updateAmountAxis(yMax);
           updatePriceAxis(bins, latestPrice);
-          const markerPrice = Number.isFinite(latestPrice) ? latestPrice : clampedCenter;
+          let markerPrice = Number.isFinite(latestPrice) ? latestPrice : NaN;
+          if (!Number.isFinite(markerPrice) && legendPriceEl) {
+            const parsedLegend = Number(legendPriceEl.textContent);
+            if (Number.isFinite(parsedLegend)) {
+              markerPrice = parsedLegend;
+            }
+          }
+          if (!Number.isFinite(markerPrice)) {
+            markerPrice = clampedCenter;
+          }
           if (legendPriceEl) {
             legendPriceEl.textContent = Number.isFinite(markerPrice) ? formatPrice(markerPrice) : '--';
           }
@@ -4038,19 +4047,20 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
             chartSvg.appendChild(rightArea);
           }
           const leftArea = document.createElementNS(svgNS, 'rect');
-          const markerX = scaleX(markerPrice);
+          const markerXRaw = scaleX(markerPrice);
+          const markerX = Math.min(padding.left + chartWidth, Math.max(padding.left, markerXRaw));
           leftArea.setAttribute('x', padding.left);
           leftArea.setAttribute('y', padding.top);
           leftArea.setAttribute('width', Math.max(0, markerX - padding.left));
           leftArea.setAttribute('height', chartHeight);
-          leftArea.setAttribute('fill', 'rgba(248, 113, 113, 0.08)');
+          leftArea.setAttribute('fill', 'rgba(248, 113, 113, 0.2)');
           chartSvg.appendChild(leftArea);
           const rightArea = document.createElementNS(svgNS, 'rect');
           rightArea.setAttribute('x', markerX);
           rightArea.setAttribute('y', padding.top);
           rightArea.setAttribute('width', Math.max(0, padding.left + chartWidth - markerX));
           rightArea.setAttribute('height', chartHeight);
-          rightArea.setAttribute('fill', 'rgba(34, 197, 94, 0.08)');
+          rightArea.setAttribute('fill', 'rgba(34, 197, 94, 0.18)');
           chartSvg.appendChild(rightArea);
           if (Number.isFinite(markerPrice)) {
             const latestX = markerX;
