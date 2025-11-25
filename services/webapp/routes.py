@@ -369,6 +369,41 @@ class WaveOrderRequest(BaseModel):
             raise ValueError("side must be either 'buy' or 'sell'.")
         return normalized
 
+class LiquidationMapBinPayload(BaseModel):
+    price: float = Field(..., description="Price bucket anchor.")
+    notional: float = Field(..., ge=0.0, description="Notional within the bucket.")
+    cumulative: float = Field(..., ge=0.0, description="Cumulative notional up to this bucket.")
+    side: str = Field(..., description="Bid or ask side.")
+    size: float | None = Field(None, ge=0.0, description="Raw size inside the bucket.")
+
+    @validator("side")
+    def _normalize_side(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized in {"bid", "buy", "bids"}:
+            return "bid"
+        if normalized in {"ask", "sell", "asks"}:
+            return "ask"
+        raise ValueError("side must be bid/buy or ask/sell")
+
+
+class LiquidationMapRecordPayload(BaseModel):
+    instrument: str = Field(..., min_length=1, description="Instrument identifier.")
+    timestamp: datetime | None = Field(
+        None, description="Timestamp corresponding to the depth snapshot."
+    )
+    latest_price: float | None = Field(
+        None, description="Latest price used to center the buckets."
+    )
+    bin_size: float = Field(1.0, gt=0.0, description="Bucket size in quote currency.")
+    bins: List[LiquidationMapBinPayload] = Field(..., min_items=1)
+
+    @validator("instrument")
+    def _normalize_instrument(cls, value: str) -> str:
+        inst = (value or "").strip().upper()
+        if not inst:
+            raise ValueError("instrument is required")
+        return inst
+
 
 def get_pipeline_settings() -> dict:
     """Return current pipeline settings snapshot."""
@@ -1138,6 +1173,73 @@ def latest_liquidations_api(limit: int = 50, instrument: Optional[str] = None) -
 def latest_orderbook_api(limit: int = 50, instrument: Optional[str] = None) -> dict:
     limit = max(1, min(limit, 500))
     return get_orderbook_snapshot(levels=limit, instrument=instrument)
+
+
+@router.post(
+    "/api/liquidation-map/bins",
+    summary="Persist aggregated liquidation map buckets into InfluxDB",
+)
+def record_liquidation_map_bins(payload: LiquidationMapRecordPayload) -> dict:
+    writer = _get_orderbook_writer()
+    if writer is None:
+        raise HTTPException(status_code=503, detail="Influx writer unavailable.")
+    timestamp = payload.timestamp or datetime.now(tz=timezone.utc)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    base_ns = int(timestamp.timestamp() * 1e9)
+    inst_id = payload.instrument
+    bin_size = float(payload.bin_size)
+    recorded = 0
+    for idx, bucket in enumerate(payload.bins):
+        bucket_start = math.floor(bucket.price / bin_size) * bin_size
+        fields = {
+            "price": float(bucket.price),
+            "bucket_start": float(bucket_start),
+            "notional": float(bucket.notional),
+            "cumulative": float(bucket.cumulative),
+        }
+        if bucket.size is not None:
+            fields["size"] = float(bucket.size)
+        tags = {
+            "instrument_id": inst_id,
+            "side": bucket.side,
+            "price_bucket": f"{bucket_start:.4f}",
+            "bin_size": f"{bin_size:.4f}",
+        }
+        try:
+            writer.write_indicator_set(
+                measurement="liquidation_map_bins",
+                tags=tags,
+                fields=fields,
+                timestamp_ns=base_ns + idx,
+            )
+            recorded += 1
+        except Exception as exc:  # pragma: no cover - write failures logged only
+            logger.debug("Failed to persist liquidation map bin: %s", exc)
+    return {
+        "instrument": inst_id,
+        "bins_recorded": recorded,
+        "timestamp": timestamp.isoformat(),
+    }
+
+
+@router.get(
+    "/api/liquidation-map/history",
+    summary="Fetch aggregated liquidation map bins from InfluxDB",
+)
+def liquidation_map_history_api(
+    instrument: Optional[str] = None,
+    hours: int = 24,
+    limit: int = 8000,
+) -> dict:
+    hours = max(1, min(hours, 168))
+    limit = max(100, min(limit, 20000))
+    snapshot = get_liquidation_map_history_snapshot(
+        instrument=instrument,
+        lookback_hours=hours,
+        limit=limit,
+    )
+    return snapshot
 
 
 def get_okx_summary(
@@ -2035,6 +2137,69 @@ def get_orderbook_snapshot(
         "instrument": instrument_filter,
         "levels": max(1, levels),
         "items": items,
+        "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+def get_liquidation_map_history_snapshot(
+    *,
+    instrument: Optional[str],
+    lookback_hours: int,
+    limit: int,
+) -> dict:
+    instrument_filter = (instrument or "").strip().upper()
+    rows = _query_influx_measurement(
+        measurement="liquidation_map_bins",
+        limit=limit,
+        instrument=instrument_filter or None,
+        lookback=f"{max(1, lookback_hours)}h",
+    )
+    aggregated: dict[tuple[str, float], dict] = {}
+    earliest: datetime | None = None
+    latest: datetime | None = None
+    bin_size_value: float | None = None
+    for row in rows:
+        side = str(row.get("side") or "").lower()
+        if side not in {"bid", "ask"}:
+            continue
+        price_bucket = _coerce_float(row.get("bucket_start") or row.get("price"))
+        if price_bucket is None:
+            continue
+        notional = max(0.0, _coerce_float(row.get("notional")) or 0.0)
+        size = max(0.0, _coerce_float(row.get("size")) or 0.0)
+        if bin_size_value is None:
+            bin_size_value = _coerce_float(row.get("bin_size")) or 1.0
+        ts = _coerce_datetime(row.get("_time"), default=datetime.now(tz=timezone.utc))
+        if earliest is None or ts < earliest:
+            earliest = ts
+        if latest is None or ts > latest:
+            latest = ts
+        key = (side, price_bucket)
+        entry = aggregated.setdefault(
+            key,
+            {
+                "price": price_bucket,
+                "side": side,
+                "notional": 0.0,
+                "size": 0.0,
+            },
+        )
+        entry["notional"] += notional
+        entry["size"] += size
+    bins = sorted(aggregated.values(), key=lambda item: item["price"])
+    cumulative_by_side: dict[str, float] = {"bid": 0.0, "ask": 0.0}
+    for bucket in bins:
+        cumulative_by_side[bucket["side"]] += bucket["notional"]
+        bucket["cumulative"] = cumulative_by_side[bucket["side"]]
+    return {
+        "instrument": instrument_filter,
+        "bin_size": bin_size_value or 1.0,
+        "bins": bins,
+        "lookback_hours": lookback_hours,
+        "range_start": earliest.isoformat() if earliest else None,
+        "range_end": latest.isoformat() if latest else None,
+        "totals": cumulative_by_side,
+        "records": len(rows),
         "updated_at": datetime.now(tz=timezone.utc).isoformat(),
     }
 

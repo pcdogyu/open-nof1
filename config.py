@@ -10,7 +10,7 @@ INFLUX_ORG = "hy"
 INFLUX_BUCKET = "orderflow"
 
 # Auto-generated InfluxDB token (scope manually configure in Influx UI).
-INFLUX_TOKEN = "fMSaxuOVlJ1nLkBUb96JCw4fyWRNZ8d_Z7M7c1jwzEX-QOZ-yXmHrKknco_flQs3yOZL2MH14z5-Va8I4q1_Hg=="
+INFLUX_TOKEN = "GCFl77EGbk4vlpAWyxRqXqGi_J_OR7wz6wm8l8Wh5tzY7LUIvC1-kHXKS7RIWeK7_Dnw4UlT--2sXF7_wCW4uA=="
 INFLUX_SECONDARY_TOKEN = "INLTcxomqhQy5xHEbBYcs_mbc6kZ3SuhbqTHfmgH09TiGPfdRjyZH-Z9Boxuy2vnSEN_mw7I8jqgU2VbzCzEWw=="
 INFLUX_TOKENS = [
     INFLUX_TOKEN,
@@ -22,7 +22,7 @@ INFLUX_PROFILES = [
         "org": INFLUX_ORG,
         "bucket": INFLUX_BUCKET,
         "token": INFLUX_TOKEN,
-        "enabled": False,
+        "enabled": True,
     },
     {
         # 若第二个实例地址不同，请在此更新 URL/ORG/BUCKET/TOKEN

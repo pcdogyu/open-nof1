@@ -35,4 +35,8 @@ services/jobs/__pycache__/scheduler.cpython-310.pyc
 services/jobs/__pycache__/scheduler.cpython-313.pyc
 __pycache__/config.cpython-313.pyc
 services/webapp/__pycache__/main.cpython-313.pyc
+services/webapp/__pycache__/main.cpython-312.pyc
+services/webapp/__pycache__/routes.cpython-312.pyc
+risk/__pycache__/notional_limits.cpython-312.pyc
 data/logs/ai_signals.jsonl
+data/state/active_influx_profile.json

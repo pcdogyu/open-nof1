@@ -10,11 +10,12 @@ import html
 import logging
 import urllib.parse
 from datetime import datetime, timedelta, timezone
+from string import Template
 from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Form, status, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 
 from services.jobs.scheduler import shutdown_scheduler, start_scheduler
 from services.webapp import routes
@@ -213,6 +214,7 @@ def liquidation_dashboard(request: Request) -> HTMLResponse:
 def orderbook_dashboard(request: Request) -> HTMLResponse:
     instrument = request.query_params.get("instrument")
     levels_param = request.query_params.get("levels", "400")
+    response_format = (request.query_params.get("format") or "").strip().lower()
     try:
         levels = max(1, min(int(levels_param), 400))
     except ValueError:
@@ -220,7 +222,61 @@ def orderbook_dashboard(request: Request) -> HTMLResponse:
     snapshot = routes.get_orderbook_snapshot(levels=levels, instrument=instrument)
     settings = routes.get_pipeline_settings()
     instruments = settings.get("tradable_instruments", [])
+    if response_format == "json":
+        return JSONResponse(content=snapshot)
     return HTMLResponse(content=_render_orderbook_page(snapshot, instruments, levels))
+
+
+@app.get("/liquidation-map", include_in_schema=False, response_class=HTMLResponse)
+def liquidation_map_dashboard() -> HTMLResponse:
+    default_instrument = "ETH-USDT-SWAP"
+    snapshot = routes.get_orderbook_snapshot(levels=400, instrument=default_instrument)
+    instrument_payload: dict | None = None
+    for item in snapshot.get("items", []):
+        inst_id = (item.get("instrument_id") or "").upper()
+        if inst_id == default_instrument:
+            instrument_payload = item
+            break
+    if instrument_payload is None and snapshot.get("items"):
+        instrument_payload = snapshot["items"][0]
+
+    def _to_float(value: object) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    last_price = _to_float((instrument_payload or {}).get("last_price"))
+    best_bid = _to_float((instrument_payload or {}).get("best_bid"))
+    best_ask = _to_float((instrument_payload or {}).get("best_ask"))
+    if last_price is None:
+        if best_bid is not None and best_ask is not None:
+            last_price = (best_bid + best_ask) / 2.0
+        elif best_bid is not None:
+            last_price = best_bid
+        elif best_ask is not None:
+            last_price = best_ask
+        else:
+            bids = (instrument_payload or {}).get("bids") or []
+            asks = (instrument_payload or {}).get("asks") or []
+            for level in bids + asks:
+                if isinstance(level, (list, tuple)) and level:
+                    maybe_price = _to_float(level[0])
+                    if maybe_price is not None:
+                        last_price = maybe_price
+                        break
+    instrument_timestamp = (instrument_payload or {}).get("timestamp") or snapshot.get("updated_at")
+    formatted_timestamp = _format_asia_shanghai(instrument_timestamp)
+    last_price_display = _format_number(last_price, digits=2) if last_price is not None else "--"
+    display_pair = (default_instrument.replace("-SWAP", "").replace("-", "") or default_instrument).upper()
+    return HTMLResponse(
+        content=_render_liquidation_map_page(
+            instrument=default_instrument,
+            display_pair=display_pair,
+            last_price=last_price_display,
+            updated_at=formatted_timestamp,
+        )
+    )
 
 
 @app.get("/settings", include_in_schema=False, response_class=HTMLResponse)
@@ -724,6 +780,22 @@ def _render_orderbook_page(snapshot: dict, instruments: Sequence[str], levels: i
         cards=cards,
         levels=levels,
         book_grid_class=grid_class,
+    )
+
+
+def _render_liquidation_map_page(
+    *,
+    instrument: str,
+    display_pair: str,
+    last_price: str,
+    updated_at: str,
+) -> str:
+    esc = _escape
+    return LIQUIDATION_MAP_TEMPLATE.substitute(
+        instrument=esc(instrument),
+        display_pair=esc(display_pair),
+        last_price=esc(last_price or "--"),
+        updated_at=esc(updated_at or "--"),
     )
 
 
@@ -1551,6 +1623,7 @@ HTML_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
         <a href="/risk" class="nav-link">风险控制</a>
@@ -1660,6 +1733,7 @@ MODEL_MANAGER_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
         <a href="/risk" class="nav-link">风险控制</a>
@@ -1740,6 +1814,7 @@ SETTINGS_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link active">币对配置</a>
         <a href="/risk" class="nav-link">风险控制</a>
@@ -1817,6 +1892,7 @@ ORDER_DEBUG_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
         <a href="/risk" class="nav-link">风险控制</a>
@@ -1891,6 +1967,7 @@ RISK_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">盘口深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">管道设置</a>
         <a href="/risk" class="nav-link active">风险控制</a>
@@ -2168,6 +2245,7 @@ OKX_TEMPLATE = r"""
         <a href="/okx" class="nav-link active">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
         <a href="/risk" class="nav-link">风险控制</a>
@@ -2327,6 +2405,7 @@ SCHEDULER_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
         <a href="/risk" class="nav-link">风险控制</a>
@@ -2494,6 +2573,7 @@ PROMPT_EDITOR_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/prompts" class="nav-link active">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
         <a href="/risk" class="nav-link">风险控制</a>
@@ -2647,6 +2727,7 @@ LIQUIDATION_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link active">爆仓监控</a>
         <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
         <a href="/risk" class="nav-link">风险控制</a>
@@ -3073,6 +3154,7 @@ ORDERBOOK_TEMPLATE = r"""
         <a href="/okx" class="nav-link">OKX 模拟</a>
         <a href="/liquidations" class="nav-link">爆仓监控</a>
         <a href="/orderbook" class="nav-link active">市场深度</a>
+        <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/prompts" class="nav-link">提示词</a>
         <a href="/settings" class="nav-link">币对配置</a>
         <a href="/risk" class="nav-link">风险控制</a>
@@ -3587,3 +3669,433 @@ ORDERBOOK_TEMPLATE = r"""
 </html>
 """
 
+LIQUIDATION_MAP_TEMPLATE = Template(r"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>清算地图</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }
+        h1 { margin-bottom: 0.4rem; }
+        .hint { color: #94a3b8; margin-bottom: 1.5rem; }
+        .top-nav { display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }
+        .nav-link { padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }
+        .nav-link.active { background-color: #38bdf8; color: #0f172a; }
+        .map-card { background: #0f1b2d; border-radius: 16px; padding: 24px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.18); }
+        .map-meta { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin-bottom: 1.5rem; font-size: 0.95rem; }
+        .map-meta strong { font-size: 1.05rem; color: #f8fafc; }
+        .timestamp { color: #38bdf8; }
+        .map-chart { display: grid; grid-template-columns: auto 1fr auto; gap: 16px; align-items: center; margin-bottom: 1.25rem; }
+        .axis { font-size: 0.85rem; color: #94a3b8; writing-mode: vertical-rl; transform: rotate(180deg); }
+        .map-bars { position: relative; display: flex; gap: 10px; align-items: flex-end; padding: 18px; border-radius: 14px; background: rgba(8, 22, 48, 0.85); min-height: 240px; overflow-x: auto; }
+        .map-column { flex: 0 0 52px; display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 0.75rem; color: #cbd5f5; }
+        .map-bar { width: 100%; border-radius: 6px 6px 0 0; background: rgba(59, 130, 246, 0.7); min-height: 6px; transition: height 0.25s ease; }
+        .map-bar.buy { background: linear-gradient(180deg, rgba(34, 197, 94, 0.9), rgba(16, 185, 129, 0.7)); }
+        .map-bar.sell { background: linear-gradient(180deg, rgba(248, 113, 113, 0.9), rgba(244, 63, 94, 0.7)); }
+        .map-center { flex: 0 0 2px; align-self: stretch; background: rgba(248, 250, 252, 0.4); position: relative; }
+        .map-center span { position: absolute; top: -18px; left: -46px; font-size: 0.75rem; color: #bfdbfe; white-space: nowrap; }
+        .price-label { text-align: center; width: 100%; display: block; }
+        .amount-label { font-size: 0.7rem; color: #94a3b8; }
+        .chart-x-axis { margin-top: 8px; text-align: center; font-size: 0.85rem; color: #94a3b8; }
+        .chart-x-axis strong { color: #f8fafc; }
+        .history-tables { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 1.5rem; }
+        .history-tables table { width: 100%; border-collapse: collapse; background: rgba(6, 12, 24, 0.6); border-radius: 14px; overflow: hidden; }
+        .history-tables th, .history-tables td { padding: 12px 14px; border-bottom: 1px solid rgba(71, 85, 105, 0.4); text-align: left; }
+        .history-tables th { background: rgba(15, 23, 42, 0.8); font-size: 0.85rem; color: #cbd5f5; }
+        .history-tables tr:nth-child(even) { background: rgba(15, 23, 42, 0.45); }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; background: rgba(6, 12, 24, 0.6); border-radius: 14px; overflow: hidden; }
+        th, td { padding: 12px 14px; border-bottom: 1px solid rgba(71, 85, 105, 0.4); text-align: left; }
+        th { background: rgba(15, 23, 42, 0.8); font-size: 0.85rem; color: #cbd5f5; }
+        tr:nth-child(even) { background: rgba(15, 23, 42, 0.45); }
+        .empty-state { text-align: center; color: #94a3b8; padding: 12px; width: 100%; }
+        .side-pill { padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: bold; }
+        .side-buy { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.35); }
+        .side-sell { background: rgba(248, 113, 113, 0.15); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.35); }
+        @media (max-width: 768px) {
+            .map-column { flex: 0 0 40px; }
+            .map-center span { left: -35px; }
+            .map-chart { grid-template-columns: 1fr; }
+            .axis { writing-mode: horizontal-tb; transform: none; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="top-nav">
+        <a href="/" class="nav-link">主页</a>
+        <a href="/models" class="nav-link">模型管理</a>
+        <a href="/okx" class="nav-link">OKX 模块</a>
+        <a href="/liquidations" class="nav-link">清算警报</a>
+        <a href="/orderbook" class="nav-link">市场深度</a>
+        <a href="/liquidation-map" class="nav-link active">清算地图</a>
+        <a href="/prompts" class="nav-link">提示词</a>
+        <a href="/settings" class="nav-link">管道配置</a>
+        <a href="/risk" class="nav-link">风控设置</a>
+        <a href="/scheduler" class="nav-link">计划任务</a>
+        <a href="/orders/debug" class="nav-link">下单调试</a>
+    </nav>
+    <h1>ETHUSDT 清算地图</h1>
+    <p class="hint">默认读取 http://localhost:8000/orderbook?levels=400 的市场深度，将订单金额按 1 USDT 区间累加展示。</p>
+    <section class="map-card">
+        <div class="map-meta">
+            <span>交易对：<strong id="map-symbol">$display_pair</strong></span>
+            <span>最新成交价：<strong id="map-last-price">$last_price</strong> USDT</span>
+            <span>最后刷新：<span class="timestamp" id="map-updated">$updated_at</span></span>
+            <span>统计区间：<strong id="map-range">--</strong></span>
+        </div>
+        <div class="map-chart" id="liquidation-map-root" data-instrument="$instrument" data-bin-size="1" data-levels="400">
+            <span class="axis axis-left">低价</span>
+            <div class="map-bars" id="liquidation-bars">
+                <p class="empty-state">等待市场深度数据...</p>
+            </div>
+            <span class="axis axis-right">高价</span>
+        </div>
+        <div class="chart-x-axis" id="map-price-axis">价格轴：--</div>
+        <div class="history-tables">
+            <table>
+                <thead>
+                    <tr>
+                        <th>买盘价格 (USDT)</th>
+                        <th>区间金额 (USD)</th>
+                        <th>累计金额 (USD)</th>
+                    </tr>
+                </thead>
+                <tbody id="map-table-body-bids">
+                    <tr><td colspan="3" class="empty-state">等待历史买盘数据...</td></tr>
+                </tbody>
+            </table>
+            <table>
+                <thead>
+                    <tr>
+                        <th>卖盘价格 (USDT)</th>
+                        <th>区间金额 (USD)</th>
+                        <th>累计金额 (USD)</th>
+                    </tr>
+                </thead>
+                <tbody id="map-table-body-asks">
+                    <tr><td colspan="3" class="empty-state">等待历史卖盘数据...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+    <script>
+      (function() {
+        const root = document.getElementById('liquidation-map-root');
+        if (!root) { return; }
+        const barsContainer = document.getElementById('liquidation-bars');
+        const buyTableBody = document.getElementById('map-table-body-bids');
+        const sellTableBody = document.getElementById('map-table-body-asks');
+        const priceAxisEl = document.getElementById('map-price-axis');
+        const lastPriceEl = document.getElementById('map-last-price');
+        const updatedEl = document.getElementById('map-updated');
+        const rangeEl = document.getElementById('map-range');
+        const instrument = (root.dataset.instrument || 'ETH-USDT-SWAP').toUpperCase();
+        const binSize = Number(root.dataset.binSize) || 1;
+        const maxLevels = Number(root.dataset.levels) || 400;
+        const REFRESH_MS = 4000;
+        const HISTORY_HOURS = 24;
+        let lastHistoryPayload = null;
+
+        const formatNumber = (value, digits = 2) => {
+          const num = Number(value);
+          if (!Number.isFinite(num)) { return '--'; }
+          return num.toFixed(digits);
+        };
+
+        const formatCurrency = (value) => {
+          const num = Number(value);
+          if (!Number.isFinite(num)) { return '--'; }
+          if (num >= 1_000_000) { return (num / 1_000_000).toFixed(2) + 'M'; }
+          if (num >= 1_000) { return (num / 1_000).toFixed(2) + 'K'; }
+          return num.toFixed(0);
+        };
+
+        const formatPrice = (value) => {
+          const num = Number(value);
+          if (!Number.isFinite(num)) { return '--'; }
+          if (num >= 100) { return num.toFixed(0); }
+          return num.toFixed(2);
+        };
+
+        const formatTimestamp = (value) => {
+          if (!value) { return '--'; }
+          const date = new Date(value);
+          if (!isFinite(date)) { return value; }
+          return date.toLocaleString('zh-CN', { hour12: false });
+        };
+
+        const normalizeLevels = (entries) => {
+          if (!Array.isArray(entries)) { return []; }
+          return entries.map((entry) => {
+            let price;
+            let size;
+            if (Array.isArray(entry)) {
+              price = Number(entry[0]);
+              size = Number(entry[1]);
+            } else if (entry && typeof entry === 'object') {
+              price = Number(entry.price ?? entry[0]);
+              size = Number(entry.size ?? entry.qty ?? entry[1]);
+            }
+            if (!Number.isFinite(price) || !Number.isFinite(size)) {
+              return null;
+            }
+            const absoluteSize = Math.abs(size);
+            return { price, size: absoluteSize, notional: Math.abs(price * absoluteSize) };
+          }).filter(Boolean);
+        };
+
+        const groupBins = (levels) => {
+          const buckets = new Map();
+          levels.forEach((level) => {
+            const bucketKey = Math.floor(level.price / binSize) * binSize;
+            if (!Number.isFinite(bucketKey)) { return; }
+            const existing = buckets.get(bucketKey) || { price: bucketKey, notional: 0, size: 0 };
+            existing.notional += level.notional;
+            existing.size += level.size;
+            buckets.set(bucketKey, existing);
+          });
+          return Array.from(buckets.values());
+        };
+
+        const accumulateSide = (bins, side) => {
+          const comparator = side === 'bid' ? (a, b) => b.price - a.price : (a, b) => a.price - b.price;
+          const filtered = bins.filter((bin) => Number.isFinite(bin?.price)).sort(comparator);
+          let cumulative = 0;
+          const withCumulative = filtered.map((bin) => {
+            cumulative += bin.notional;
+            return { ...bin, cumulative, side };
+          });
+          return withCumulative.sort((a, b) => a.price - b.price);
+        };
+
+        const deriveLatestPrice = (entry) => {
+          const candidates = [entry?.last_price, entry?.best_bid, entry?.best_ask];
+          for (const candidate of candidates) {
+            const num = Number(candidate);
+            if (Number.isFinite(num) && num > 0) { return num; }
+          }
+          const firstBid = Array.isArray(entry?.bids) && entry.bids.length ? Number(entry.bids[0][0]) : NaN;
+          const firstAsk = Array.isArray(entry?.asks) && entry.asks.length ? Number(entry.asks[0][0]) : NaN;
+          if (Number.isFinite(firstBid) && Number.isFinite(firstAsk)) { return (firstBid + firstAsk) / 2; }
+          if (Number.isFinite(firstBid)) { return firstBid; }
+          if (Number.isFinite(firstAsk)) { return firstAsk; }
+          return NaN;
+        };
+
+        const showEmpty = (message) => {
+          barsContainer.innerHTML = '<p class="empty-state">' + message + '</p>';
+        };
+
+        const updatePriceAxis = (bins, latestPrice) => {
+          if (!priceAxisEl) { return; }
+          if (!Array.isArray(bins) || !bins.length) {
+            priceAxisEl.textContent = '价格轴：--';
+            return;
+          }
+          const prices = bins.map((bin) => Number(bin.price)).filter((value) => Number.isFinite(value));
+          if (!prices.length) {
+            priceAxisEl.textContent = '价格轴：--';
+            return;
+          }
+          const minPrice = Math.min(...prices);
+          const maxPrice = Math.max(...prices);
+          let mid = Number(latestPrice);
+          if (!Number.isFinite(mid)) {
+            mid = (minPrice + maxPrice) / 2;
+          }
+          priceAxisEl.innerHTML = `价格轴：<strong>${formatPrice(minPrice)}</strong> ← <strong>${formatPrice(mid)}</strong> → <strong>${formatPrice(maxPrice)}</strong>`;
+        };
+
+        const renderBars = (bins, latestPrice) => {
+          if (!bins.length) {
+            showEmpty('暂无深度数据');
+            updatePriceAxis([], latestPrice);
+            return;
+          }
+          const maxCumulative = Math.max(...bins.map((bin) => bin.cumulative), 0) || 1;
+          const fragment = document.createDocumentFragment();
+          let insertedCenter = false;
+          const appendCenterLine = () => {
+            if (insertedCenter) { return; }
+            const center = document.createElement('div');
+            center.className = 'map-center';
+            center.innerHTML = '<span>' + formatNumber(latestPrice, 2) + '</span>';
+            fragment.appendChild(center);
+            insertedCenter = true;
+          };
+          const buildColumn = (bin) => {
+            const column = document.createElement('div');
+            column.className = 'map-column';
+            const priceLabel = document.createElement('span');
+            priceLabel.className = 'price-label';
+            priceLabel.textContent = formatPrice(bin.price);
+            const bar = document.createElement('div');
+            bar.className = 'map-bar ' + (bin.side === 'bid' ? 'buy' : 'sell');
+            const ratio = (bin.cumulative / maxCumulative) * 100;
+            const height = Math.min(100, Math.max(1, ratio));
+            bar.style.height = height + '%';
+            bar.title = '价格区间 ' + formatPrice(bin.price) + '~' + formatPrice(bin.price + binSize) + ' 累计金额 ' + formatCurrency(bin.cumulative) + ' USD';
+            const amountLabel = document.createElement('span');
+            amountLabel.className = 'amount-label';
+            amountLabel.textContent = formatCurrency(bin.cumulative) + ' USD';
+            column.appendChild(priceLabel);
+            column.appendChild(bar);
+            column.appendChild(amountLabel);
+            return column;
+          };
+          bins.forEach((bin) => {
+            if (!insertedCenter && Number.isFinite(latestPrice) && bin.price >= latestPrice) {
+              appendCenterLine();
+            }
+            fragment.appendChild(buildColumn(bin));
+          });
+          if (!insertedCenter) { appendCenterLine(); }
+          barsContainer.innerHTML = '';
+          barsContainer.appendChild(fragment);
+          updatePriceAxis(bins, latestPrice);
+        };
+
+        const renderHistoryTables = (historyPayload) => {
+          const bins = Array.isArray(historyPayload?.bins) ? historyPayload.bins : [];
+          if (bins.length) {
+            lastHistoryPayload = historyPayload;
+          }
+          if (rangeEl) {
+            const start = historyPayload?.range_start ? formatTimestamp(historyPayload.range_start) : '--';
+            const end = historyPayload?.range_end ? formatTimestamp(historyPayload.range_end) : '--';
+            rangeEl.textContent = (start && end) ? (start + ' ~ ' + end) : '--';
+          }
+          const bidRows = [];
+          const askRows = [];
+          if (!bins.length) {
+            buyTableBody.innerHTML = "<tr><td colspan='3' class='empty-state'>暂无24小时聚合买盘</td></tr>";
+            sellTableBody.innerHTML = "<tr><td colspan='3' class='empty-state'>暂无24小时聚合卖盘</td></tr>";
+            updatePriceAxis([], null);
+            return;
+          }
+          bins.forEach((bin) => {
+            const priceText = formatPrice(bin.price);
+            const row = '<tr>' +
+              '<td>' + priceText + '</td>' +
+              '<td>' + formatCurrency(bin.notional) + '</td>' +
+              '<td>' + formatCurrency(bin.cumulative) + '</td>' +
+              '</tr>';
+            if (bin.side === 'bid') {
+              bidRows.push(row);
+            } else {
+              askRows.push(row);
+            }
+          });
+          if (!bidRows.length) {
+            bidRows.push("<tr><td colspan='3' class='empty-state'>暂无24小时聚合买盘</td></tr>");
+          }
+          if (!askRows.length) {
+            askRows.push("<tr><td colspan='3' class='empty-state'>暂无24小时聚合卖盘</td></tr>");
+          }
+          buyTableBody.innerHTML = bidRows.join('');
+          sellTableBody.innerHTML = askRows.join('');
+          renderBars(bins, Number(historyPayload?.latest_price));
+        };
+
+        const persistBins = (bins, latestPrice, sourceTimestamp) => {
+          if (!bins.length) { return; }
+          const payload = {
+            instrument,
+            latest_price: Number.isFinite(latestPrice) ? latestPrice : null,
+            timestamp: sourceTimestamp || new Date().toISOString(),
+            bin_size: binSize,
+            bins: bins.map((bin) => ({
+              price: bin.price,
+              notional: bin.notional,
+              cumulative: bin.cumulative,
+              size: Number.isFinite(bin.size) ? bin.size : null,
+              side: bin.side,
+            })),
+          };
+          fetch('/api/liquidation-map/bins', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }).catch((error) => console.error('Persist liquidation map bins failed', error));
+        };
+
+        const render = (payload) => {
+          const items = Array.isArray(payload?.items) ? payload.items : [];
+          const instrumentItem = items.find((entry) => (entry?.instrument_id || '').toUpperCase() === instrument) || items[0];
+          if (!instrumentItem) {
+            showEmpty('暂无深度数据');
+            if (lastHistoryPayload) {
+              renderHistoryTables(lastHistoryPayload);
+            }
+            return;
+          }
+          const latestPrice = deriveLatestPrice(instrumentItem);
+          if (Number.isFinite(latestPrice)) {
+            lastPriceEl.textContent = formatNumber(latestPrice, 2);
+          }
+          updatedEl.textContent = formatTimestamp(instrumentItem.timestamp || payload.updated_at);
+          const bids = normalizeLevels(instrumentItem.bids);
+          const asks = normalizeLevels(instrumentItem.asks);
+          if (!bids.length && !asks.length) {
+            showEmpty('暂无深度数据');
+            if (lastHistoryPayload) {
+              renderHistoryTables(lastHistoryPayload);
+            }
+            return;
+          }
+          const bidBins = accumulateSide(groupBins(bids), 'bid');
+          const askBins = accumulateSide(groupBins(asks), 'ask');
+          const allBins = [...bidBins, ...askBins].sort((a, b) => a.price - b.price);
+          if (!lastHistoryPayload || !(lastHistoryPayload.bins || []).length) {
+            renderBars(allBins, latestPrice);
+          }
+          persistBins(allBins, latestPrice, instrumentItem.timestamp || payload.updated_at);
+        };
+
+        const fetchDepth = () => {
+          const url = new URL('/api/streams/orderbook/latest', window.location.origin);
+          url.searchParams.set('instrument', instrument);
+          url.searchParams.set('limit', String(maxLevels));
+          return fetch(url.toString(), { headers: { 'Accept': 'application/json' } }).then((res) => {
+            if (!res.ok) { throw new Error('无法获取市场深度'); }
+            return res.json();
+          });
+        };
+
+        const fetchHistory = () => {
+          const url = new URL('/api/liquidation-map/history', window.location.origin);
+          url.searchParams.set('instrument', instrument);
+          url.searchParams.set('hours', String(HISTORY_HOURS));
+          return fetch(url.toString(), { headers: { 'Accept': 'application/json' } })
+            .then((res) => {
+              if (!res.ok) { throw new Error('无法获取历史下单数据'); }
+              return res.json();
+            });
+        };
+
+        const refresh = () => {
+          fetchHistory()
+            .then((history) => renderHistoryTables(history))
+            .catch((error) => {
+              console.error(error);
+              if (lastHistoryPayload) {
+                renderHistoryTables(lastHistoryPayload);
+              }
+            })
+            .finally(() => {
+              fetchDepth()
+                .then((payload) => render(payload))
+                .catch((error) => {
+                  console.error(error);
+                  showEmpty('深度获取失败');
+                });
+            });
+        };
+
+refresh();
+        setInterval(refresh, REFRESH_MS);
+      })();
+    </script>
+</body>
+</html>
+""")

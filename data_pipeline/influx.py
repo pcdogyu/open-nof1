@@ -6,12 +6,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List
 import json
 import os
-import random
+import threading
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client.client.exceptions import InfluxDBError
+
+
+STATE_DIR = Path(__file__).resolve().parent.parent / "data" / "state"
+PROFILE_CACHE_FILE = STATE_DIR / "active_influx_profile.json"
+_PROFILE_CACHE_LOCK = threading.Lock()
+_PROFILE_MEMORY_CACHE: dict[str, str] | None = None
 
 
 @dataclass(slots=True)
@@ -25,65 +33,94 @@ class InfluxConfig:
 
     @staticmethod
     def from_env() -> "InfluxConfig":
-        token = os.getenv("INFLUX_TOKEN")
-        url = os.getenv("INFLUX_URL")
-        org = os.getenv("INFLUX_ORG")
-        bucket = os.getenv("INFLUX_BUCKET")
+        # Gather candidate tokens from env/config and pick the first reachable one.
         tokens_env = os.getenv("INFLUX_TOKENS")
+        base_url = os.getenv("INFLUX_URL") or "http://localhost:8086"
+        base_org = os.getenv("INFLUX_ORG") or "nof"
+        base_bucket = os.getenv("INFLUX_BUCKET") or "nof"
+        raw_token = os.getenv("INFLUX_TOKEN")
+
+        try:
+            import config as config_module  # type: ignore
+        except ModuleNotFoundError:
+            config_module = None  # type: ignore
+
+        if config_module is not None:
+            base_url = os.getenv("INFLUX_URL") or getattr(config_module, "INFLUX_URL", base_url)
+            base_org = os.getenv("INFLUX_ORG") or getattr(config_module, "INFLUX_ORG", base_org)
+            base_bucket = os.getenv("INFLUX_BUCKET") or getattr(config_module, "INFLUX_BUCKET", base_bucket)
+
+        candidate_profiles: list[dict[str, str]] = []
+        seen_profiles: set[tuple[str, str, str, str]] = set()
+
+        def add_candidate(
+            *,
+            token_value: str | None,
+            profile_data: dict[str, Any] | None = None,
+        ) -> None:
+            if not token_value:
+                return
+            if str(token_value).upper().startswith("REPLACE"):
+                return
+            profile_dict = profile_data or {}
+            normalized = _normalize_profile(
+                {
+                    "url": profile_dict.get("url") or base_url,
+                    "org": profile_dict.get("org") or base_org,
+                    "bucket": profile_dict.get("bucket") or base_bucket,
+                    "token": token_value,
+                }
+            )
+            key = (
+                normalized["url"],
+                normalized["org"],
+                normalized["bucket"],
+                normalized["token"],
+            )
+            if key in seen_profiles:
+                return
+            seen_profiles.add(key)
+            candidate_profiles.append(normalized)
+
         if tokens_env:
-            candidates = [
+            for token_candidate in [
                 t.strip()
                 for t in tokens_env.split(",")
-                if t.strip() and not t.upper().startswith("REPLACE")
-            ]
-            if candidates:
-                token = random.choice(candidates)
+                if t.strip()
+            ]:
+                add_candidate(token_value=token_candidate)
+        add_candidate(token_value=raw_token)
 
-        chosen_profile: dict[str, str] | None = None
+        if config_module is not None:
+            if hasattr(config_module, "INFLUX_PROFILES"):
+                raw_profiles = getattr(config_module, "INFLUX_PROFILES")
+                if isinstance(raw_profiles, (list, tuple)):
+                    for profile in raw_profiles:
+                        if not isinstance(profile, dict):
+                            continue
+                        if not profile.get("enabled", True):
+                            continue
+                        add_candidate(token_value=profile.get("token"), profile_data=profile)
+            if hasattr(config_module, "INFLUX_TOKENS"):
+                raw_tokens = getattr(config_module, "INFLUX_TOKENS")
+                if isinstance(raw_tokens, (list, tuple)):
+                    for token_value in raw_tokens:
+                        add_candidate(token_value=token_value)
+            if hasattr(config_module, "INFLUX_TOKEN"):
+                add_candidate(token_value=getattr(config_module, "INFLUX_TOKEN"))
 
-        if not token:
-            try:  # fallback to config.py
-                import config as config_module  # type: ignore
+        working_profile = _select_working_profile(candidate_profiles)
+        if working_profile is None and candidate_profiles:
+            working_profile = candidate_profiles[0]
 
-                profile_pool: list[dict[str, str]] = []
-                if hasattr(config_module, "INFLUX_PROFILES"):
-                    raw_profiles = getattr(config_module, "INFLUX_PROFILES")
-                    if isinstance(raw_profiles, (list, tuple)):
-                        for profile in raw_profiles:
-                            if not isinstance(profile, dict):
-                                continue
-                            if not profile.get("enabled", True):
-                                continue
-                            token_candidate = profile.get("token")
-                            if token_candidate and not str(token_candidate).upper().startswith("REPLACE"):
-                                profile_pool.append(profile)
-                if profile_pool:
-                    chosen_profile = random.choice(profile_pool)
-                    token = chosen_profile.get("token")
-                else:
-                    token_pool = []
-                    if hasattr(config_module, "INFLUX_TOKENS"):
-                        raw_tokens = getattr(config_module, "INFLUX_TOKENS")
-                        if isinstance(raw_tokens, (list, tuple)):
-                            token_pool.extend(
-                                [t for t in raw_tokens if t and not str(t).upper().startswith("REPLACE")]
-                            )
-                    if hasattr(config_module, "INFLUX_TOKEN"):
-                        default_token = getattr(config_module, "INFLUX_TOKEN")
-                        if default_token and not str(default_token).upper().startswith("REPLACE"):
-                            token_pool.append(default_token)
-                    if token_pool:
-                        token = random.choice(token_pool)
-                url = (chosen_profile or {}).get("url") or url or getattr(config_module, "INFLUX_URL", None)
-                org = (chosen_profile or {}).get("org") or org or getattr(config_module, "INFLUX_ORG", None)
-                bucket = (chosen_profile or {}).get("bucket") or bucket or getattr(config_module, "INFLUX_BUCKET", None)
-            except ModuleNotFoundError:
-                pass
+        if working_profile is None:
+            raise ValueError("InfluxDB token is required. Set INFLUX_TOKEN environment variable.")
+
         return InfluxConfig(
-            url=url or "http://localhost:8086",
-            token=token,
-            org=org or "nof",
-            bucket=bucket or "nof",
+            url=working_profile["url"],
+            token=working_profile["token"],
+            org=working_profile["org"],
+            bucket=working_profile["bucket"],
         )
 
 
@@ -216,3 +253,106 @@ class InfluxWriter:
         point = point.field("asks_json", json.dumps(asks_list, ensure_ascii=False))
         point = point.time(timestamp_ns, WritePrecision.NS)
         self._write_api.write(bucket=self.config.bucket, org=self.config.org, record=point)
+
+
+def _normalize_profile(profile: dict[str, Any]) -> dict[str, str]:
+    return {
+        "url": str(profile.get("url") or "http://localhost:8086"),
+        "org": str(profile.get("org") or "nof"),
+        "bucket": str(profile.get("bucket") or "nof"),
+        "token": str(profile.get("token")),
+    }
+
+
+def _profiles_equal(a: dict[str, str], b: dict[str, str]) -> bool:
+    return (
+        a.get("url") == b.get("url")
+        and a.get("org") == b.get("org")
+        and a.get("bucket") == b.get("bucket")
+        and a.get("token") == b.get("token")
+    )
+
+
+def _select_working_profile(candidates: list[dict[str, str]]) -> dict[str, str] | None:
+    prioritized = _prioritize_candidates(candidates)
+    for profile in prioritized:
+        if _test_influx_profile(profile):
+            _save_cached_profile(profile)
+            return profile
+    return None
+
+
+def _prioritize_candidates(candidates: list[dict[str, str]]) -> list[dict[str, str]]:
+    cached = _load_cached_profile()
+    if not cached:
+        return candidates
+    normalized_cached = _normalize_profile(cached)
+    for idx, profile in enumerate(candidates):
+        if _profiles_equal(profile, normalized_cached):
+            return [profile] + candidates[:idx] + candidates[idx + 1 :]
+    return [normalized_cached] + candidates
+
+
+def _test_influx_profile(profile: dict[str, str]) -> bool:
+    client: InfluxDBClient | None = None
+    try:
+        client = InfluxDBClient(
+            url=profile["url"],
+            token=profile["token"],
+            org=profile["org"],
+        )
+        buckets_api = client.buckets_api()
+        try:
+            buckets_api.find_bucket_by_name(profile["bucket"])
+            return True
+        except InfluxDBError as exc:
+            status_code = getattr(exc, "status_code", None)
+            if status_code is None and hasattr(exc, "response"):
+                status_code = getattr(exc.response, "status", None)  # type: ignore[attr-defined]
+            if status_code in (401, 403):
+                return False
+            if status_code == 404:
+                return True  # Bucket missing, but auth works.
+            raise
+    except InfluxDBError:
+        return False
+    except Exception:
+        return False
+    finally:
+        if client is not None:
+            client.close()
+
+
+def _load_cached_profile() -> dict[str, str] | None:
+    global _PROFILE_MEMORY_CACHE
+    with _PROFILE_CACHE_LOCK:
+        if _PROFILE_MEMORY_CACHE is not None:
+            return _PROFILE_MEMORY_CACHE
+        try:
+            with PROFILE_CACHE_FILE.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            return None
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        if not data.get("token"):
+            return None
+        _PROFILE_MEMORY_CACHE = {
+            "url": str(data.get("url") or "http://localhost:8086"),
+            "org": str(data.get("org") or "nof"),
+            "bucket": str(data.get("bucket") or "nof"),
+            "token": str(data["token"]),
+        }
+        return _PROFILE_MEMORY_CACHE
+
+
+def _save_cached_profile(profile: dict[str, str]) -> None:
+    normalized = _normalize_profile(profile)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with _PROFILE_CACHE_LOCK:
+        with PROFILE_CACHE_FILE.open("w", encoding="utf-8") as handle:
+            json.dump(normalized, handle, ensure_ascii=False, indent=2)
+        global _PROFILE_MEMORY_CACHE
+        _PROFILE_MEMORY_CACHE = normalized
