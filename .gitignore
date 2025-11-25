@@ -44,3 +44,4 @@ data/state/active_influx_profile.json
 services/webapp/__pycache__/main.cpython-312.pyc
 services/webapp/__pycache__/routes.cpython-312.pyc
 data/logs/ai_signals.jsonl
+services/webapp/__pycache__/main.cpython-312.pyc

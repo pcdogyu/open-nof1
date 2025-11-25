@@ -3694,8 +3694,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         .map-chart { display: grid; grid-template-columns: auto 1fr auto; gap: 16px; align-items: center; margin-bottom: 1.25rem; }
         .axis { font-size: 0.85rem; color: #94a3b8; writing-mode: vertical-rl; transform: rotate(180deg); }
         .map-chart-body { display: flex; align-items: flex-end; gap: 12px; width: 100%; }
-        .map-axis-y { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; gap: 8px; font-size: 0.75rem; color: #94a3b8; min-width: 80px; }
-        .map-axis-y span { display: inline-flex; align-items: center; justify-content: flex-end; width: 100%; }
+        .map-axis-y { display: none; }
         .map-bars { position: relative; width: 100%; padding: 0; border-radius: 14px; background: rgba(8, 22, 48, 0.85); min-height: 320px; overflow: hidden; }
         .map-bars svg { width: 100%; height: 360px; display: block; }
         .map-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #94a3b8; font-size: 0.9rem; background: transparent; }
@@ -3816,6 +3815,10 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         const REFRESH_MS = 4000;
         const HISTORY_HOURS = 24;
         let lastHistoryPayload = null;
+        let zoomLevel = 1;
+        let panOffset = 0;
+        let lastRenderBins = [];
+        let lastRenderPrice = null;
 
         const formatNumber = (value, digits = 2) => {
           const num = Number(value);
@@ -3912,15 +3915,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
 
         const updateAmountAxis = (maxValue) => {
           if (!amountAxisEl) { return; }
-          if (!Number.isFinite(maxValue) || maxValue <= 0) {
-            amountAxisEl.innerHTML = '<span>--</span><span>--</span><span>0</span>';
-            return;
-          }
-          const mid = maxValue / 2;
-          amountAxisEl.innerHTML =
-            '<span>' + formatCurrency(maxValue) + ' USD</span>' +
-            '<span>' + formatCurrency(mid) + ' USD</span>' +
-            '<span>0 USD</span>';
+          amountAxisEl.innerHTML = '';
         };
 
         const updatePriceAxis = (bins, latestPrice) => {
@@ -3947,6 +3942,8 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
 
         const renderBars = (bins, latestPrice) => {
           if (!chartSvg || !barsContainer) { return; }
+          lastRenderBins = Array.isArray(bins) ? bins.slice() : [];
+          lastRenderPrice = Number.isFinite(latestPrice) ? latestPrice : null;
           if (!Array.isArray(bins) || !bins.length) {
             showEmpty('暂无深度数据');
             updatePriceAxis([], latestPrice);
@@ -3956,7 +3953,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           barsContainer.classList.add('has-data');
           if (emptyMessage) { emptyMessage.textContent = ''; }
           const rect = chartSvg.getBoundingClientRect();
-          const width = Math.max(rect.width || chartSvg.parentElement?.clientWidth || 800, 800);
+          const width = Math.max(rect.width || (chartSvg.parentElement ? chartSvg.parentElement.clientWidth : 800) || 800, 800);
           const height = Math.max(rect.height || 360, 360);
           chartSvg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
           chartSvg.innerHTML = '';
@@ -3966,18 +3963,28 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           const prices = bins.map((bin) => Number(bin.price)).filter((value) => Number.isFinite(value));
           const minPrice = Math.min(...prices);
           const maxPrice = Math.max(...prices);
-          const priceRange = Math.max(maxPrice - minPrice, 1);
+          const priceRangeFull = Math.max(maxPrice - minPrice, 1);
+          const centerPrice = Number.isFinite(latestPrice) ? latestPrice : (minPrice + maxPrice) / 2;
+          const visibleRange = priceRangeFull / Math.max(zoomLevel, 1);
+          const halfRange = visibleRange / 2;
+          const clampedCenter = Math.min(
+            Math.max(centerPrice + panOffset * halfRange, minPrice + halfRange),
+            maxPrice - halfRange
+          );
+          const visibleMin = clampedCenter - halfRange;
+          const visibleMax = clampedCenter + halfRange;
+          const priceRange = Math.max(visibleMax - visibleMin, 1);
           const bids = bins.filter((bin) => (bin.side || '').toLowerCase() === 'bid');
           const asks = bins.filter((bin) => (bin.side || '').toLowerCase() === 'ask');
           const maxNotional = Math.max(...bins.map((bin) => Number(bin.notional) || 0), 0);
-          const maxCumulative = Math.max(...bins.map((bin) => Number(bin.cumulative) || 0), 0);
-          const yMax = Math.max(maxNotional, maxCumulative, 1);
+          const yMax = Math.max(maxNotional, 1);
           updateAmountAxis(yMax);
           updatePriceAxis(bins, latestPrice);
+          const markerPrice = Number.isFinite(latestPrice) ? latestPrice : clampedCenter;
           if (legendPriceEl) {
-            legendPriceEl.textContent = Number.isFinite(latestPrice) ? formatPrice(latestPrice) : '--';
+            legendPriceEl.textContent = Number.isFinite(markerPrice) ? formatPrice(markerPrice) : '--';
           }
-          const scaleX = (price) => padding.left + ((price - minPrice) / priceRange) * chartWidth;
+          const scaleX = (price) => padding.left + ((price - visibleMin) / priceRange) * chartWidth;
           const barWidth = Math.max(2, (chartWidth / Math.max(bins.length, 1)) * 0.6);
           const scaleBarHeight = (value) => (value / yMax) * chartHeight;
           const scaleLineY = (value) => padding.top + chartHeight - (value / yMax) * chartHeight;
@@ -4013,16 +4020,40 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           };
           drawBars(asks, '#fbbf24');
           drawBars(bids, '#38bdf8');
-          const leftArea = document.createElementNS(svgNS, 'path');
-          leftArea.setAttribute('d', `M ${padding.left} ${padding.top + chartHeight} L ${padding.left} ${padding.top} L ${padding.left + chartWidth / 2} ${padding.top} L ${padding.left + chartWidth / 2} ${padding.top + chartHeight} Z`);
-          leftArea.setAttribute('fill', 'rgba(248, 113, 113, 0.08)');
-          chartSvg.appendChild(leftArea);
-          const rightArea = document.createElementNS(svgNS, 'path');
-          rightArea.setAttribute('d', `M ${padding.left + chartWidth / 2} ${padding.top + chartHeight} L ${padding.left + chartWidth / 2} ${padding.top} L ${padding.left + chartWidth} ${padding.top} L ${padding.left + chartWidth} ${padding.top + chartHeight} Z`);
-          rightArea.setAttribute('fill', 'rgba(34, 197, 94, 0.08)');
-          chartSvg.appendChild(rightArea);
           if (Number.isFinite(latestPrice)) {
             const latestX = scaleX(latestPrice);
+            const leftArea = document.createElementNS(svgNS, 'rect');
+            leftArea.setAttribute('x', padding.left);
+            leftArea.setAttribute('y', padding.top);
+            leftArea.setAttribute('width', Math.max(0, latestX - padding.left));
+            leftArea.setAttribute('height', chartHeight);
+            leftArea.setAttribute('fill', 'rgba(248, 113, 113, 0.08)');
+            chartSvg.appendChild(leftArea);
+            const rightArea = document.createElementNS(svgNS, 'rect');
+            rightArea.setAttribute('x', latestX);
+            rightArea.setAttribute('y', padding.top);
+            rightArea.setAttribute('width', Math.max(0, padding.left + chartWidth - latestX));
+            rightArea.setAttribute('height', chartHeight);
+            rightArea.setAttribute('fill', 'rgba(34, 197, 94, 0.08)');
+            chartSvg.appendChild(rightArea);
+          }
+          const leftArea = document.createElementNS(svgNS, 'rect');
+          const markerX = scaleX(markerPrice);
+          leftArea.setAttribute('x', padding.left);
+          leftArea.setAttribute('y', padding.top);
+          leftArea.setAttribute('width', Math.max(0, markerX - padding.left));
+          leftArea.setAttribute('height', chartHeight);
+          leftArea.setAttribute('fill', 'rgba(248, 113, 113, 0.08)');
+          chartSvg.appendChild(leftArea);
+          const rightArea = document.createElementNS(svgNS, 'rect');
+          rightArea.setAttribute('x', markerX);
+          rightArea.setAttribute('y', padding.top);
+          rightArea.setAttribute('width', Math.max(0, padding.left + chartWidth - markerX));
+          rightArea.setAttribute('height', chartHeight);
+          rightArea.setAttribute('fill', 'rgba(34, 197, 94, 0.08)');
+          chartSvg.appendChild(rightArea);
+          if (Number.isFinite(markerPrice)) {
+            const latestX = markerX;
             const marker = document.createElementNS(svgNS, 'line');
             marker.setAttribute('x1', latestX);
             marker.setAttribute('x2', latestX);
@@ -4033,9 +4064,31 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
             marker.setAttribute('opacity', '0.8');
             chartSvg.appendChild(marker);
           }
-          const tickCount = 6;
-          for (let i = 0; i < tickCount; i += 1) {
-            const ratio = i / (tickCount - 1);
+          const yTickCount = 5;
+          for (let i = 0; i < yTickCount; i += 1) {
+            const ratio = i / (yTickCount - 1);
+            const value = yMax * ratio;
+            const y = padding.top + chartHeight - ratio * chartHeight;
+            const line = document.createElementNS(svgNS, 'line');
+            line.setAttribute('x1', padding.left);
+            line.setAttribute('x2', padding.left + chartWidth);
+            line.setAttribute('y1', y);
+            line.setAttribute('y2', y);
+            line.setAttribute('stroke', 'rgba(148, 163, 184, 0.18)');
+            line.setAttribute('stroke-dasharray', '4 4');
+            chartSvg.appendChild(line);
+            const textEl = document.createElementNS(svgNS, 'text');
+            textEl.setAttribute('x', padding.left - 8);
+            textEl.setAttribute('y', y + 4);
+            textEl.setAttribute('fill', '#94a3b8');
+            textEl.setAttribute('font-size', '12');
+            textEl.setAttribute('text-anchor', 'end');
+            textEl.textContent = formatCurrency(value);
+            chartSvg.appendChild(textEl);
+          }
+          const xTickCount = 6;
+          for (let i = 0; i < xTickCount; i += 1) {
+            const ratio = i / (xTickCount - 1);
             const price = minPrice + priceRange * ratio;
             const x = padding.left + chartWidth * ratio;
             const textEl = document.createElementNS(svgNS, 'text');
@@ -4186,8 +4239,35 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
             });
         };
 
-refresh();
+        refresh();
         setInterval(refresh, REFRESH_MS);
+
+        if (chartSvg) {
+          chartSvg.addEventListener('wheel', (event) => {
+            event.preventDefault();
+            const direction = event.deltaY > 0 ? 1 : -1;
+            const factor = direction > 0 ? 0.9 : 1.1;
+            zoomLevel = Math.min(5, Math.max(1, zoomLevel * factor));
+            renderBars(lastRenderBins, lastRenderPrice);
+          });
+          let isDragging = false;
+          let startX = 0;
+          chartSvg.addEventListener('mousedown', (event) => {
+            isDragging = true;
+            startX = event.clientX;
+          });
+          window.addEventListener('mouseup', () => { isDragging = false; });
+          window.addEventListener('mousemove', (event) => {
+            if (!isDragging) { return; }
+            const rectMove = chartSvg.getBoundingClientRect();
+            const widthMove = rectMove.width || 1;
+            const deltaX = event.clientX - startX;
+            startX = event.clientX;
+            const normalizedShift = deltaX / Math.max(widthMove, 1);
+            panOffset = Math.max(-1, Math.min(1, panOffset - normalizedShift * 2));
+            renderBars(lastRenderBins, lastRenderPrice);
+          });
+        }
       })();
     </script>
 </body>
