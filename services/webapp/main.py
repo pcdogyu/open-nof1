@@ -2065,26 +2065,26 @@ RISK_TEMPLATE = r"""
                 <button type="submit">保存策略参数</button>
             </form>
             <script>
-                (function enforceSilenceRange() {
+                (function enforceSilenceRange() {{
                     const silenceField = document.getElementById('liquidation-silence');
-                    if (!silenceField) {
+                    if (!silenceField) {{
                         return;
-                    }
+                    }}
                     silenceField.min = '0';
                     silenceField.max = '300';
-                    const validate = () => {
+                    const validate = () => {{
                         const value = Number(silenceField.value);
-                        if (!Number.isFinite(value)) {
+                        if (!Number.isFinite(value)) {{
                             silenceField.setCustomValidity('请输入 0-300 之间的数字。');
-                        } else if (value < 0 || value > 300) {
+                        }} else if (value < 0 || value > 300) {{
                             silenceField.setCustomValidity('冷静期需在 0-300 秒之间。');
-                        } else {
+                        }} else {{
                             silenceField.setCustomValidity('');
-                        }
-                    };
+                        }}
+                    }};
                     validate();
                     silenceField.addEventListener('input', validate);
-                })();
+                }})();
             </script>
         </section>
         
@@ -2775,7 +2775,7 @@ LIQUIDATION_TEMPLATE = r"""
                     <th>FLV / 均值</th>
                     <th>价格跌幅</th>
                     <th>LE 爆仓弹性(单位跌幅触发强平数)</th>
-                    <th>PC Pressure Cost 价格压力</th>
+                    <th>PC 价格压力(潜在剧烈波动)</th>
                     <th>密度</th>
                     <th>LPI 强平压力指数</th>
                     <th>信号</th>
@@ -3701,19 +3701,6 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         .map-bars.has-data .map-empty { display: none; }
         .chart-x-axis { margin-top: 8px; text-align: center; font-size: 0.85rem; color: #94a3b8; }
         .chart-x-axis strong { color: #f8fafc; }
-        .history-tables { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 1.5rem; }
-        .history-tables table { width: 100%; border-collapse: collapse; background: rgba(6, 12, 24, 0.6); border-radius: 14px; overflow: hidden; }
-        .history-tables th, .history-tables td { padding: 12px 14px; border-bottom: 1px solid rgba(71, 85, 105, 0.4); text-align: left; }
-        .history-tables th { background: rgba(15, 23, 42, 0.8); font-size: 0.85rem; color: #cbd5f5; }
-        .history-tables tr:nth-child(even) { background: rgba(15, 23, 42, 0.45); }
-        table { width: 100%; border-collapse: collapse; margin-top: 1rem; background: rgba(6, 12, 24, 0.6); border-radius: 14px; overflow: hidden; }
-        th, td { padding: 12px 14px; border-bottom: 1px solid rgba(71, 85, 105, 0.4); text-align: left; }
-        th { background: rgba(15, 23, 42, 0.8); font-size: 0.85rem; color: #cbd5f5; }
-        tr:nth-child(even) { background: rgba(15, 23, 42, 0.45); }
-        .empty-state { text-align: center; color: #94a3b8; padding: 12px; width: 100%; }
-        .side-pill { padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: bold; }
-        .side-buy { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.35); }
-        .side-sell { background: rgba(248, 113, 113, 0.15); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.35); }
         @media (max-width: 768px) {
             .map-column { flex: 0 0 40px; }
             .map-center span { left: -35px; }
@@ -3767,32 +3754,6 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
             <span class="axis axis-right">高价</span>
         </div>
         <div class="chart-x-axis" id="map-price-axis">价格轴：--</div>
-        <div class="history-tables">
-            <table>
-                <thead>
-                    <tr>
-                        <th>买盘价格 (USDT)</th>
-                        <th>区间金额 (USD)</th>
-                        <th>累计金额 (USD)</th>
-                    </tr>
-                </thead>
-                <tbody id="map-table-body-bids">
-                    <tr><td colspan="3" class="empty-state">等待历史买盘数据...</td></tr>
-                </tbody>
-            </table>
-            <table>
-                <thead>
-                    <tr>
-                        <th>卖盘价格 (USDT)</th>
-                        <th>区间金额 (USD)</th>
-                        <th>累计金额 (USD)</th>
-                    </tr>
-                </thead>
-                <tbody id="map-table-body-asks">
-                    <tr><td colspan="3" class="empty-state">等待历史卖盘数据...</td></tr>
-                </tbody>
-            </table>
-        </div>
     </section>
     <script>
       (function() {
@@ -3801,8 +3762,6 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         const barsContainer = document.getElementById('liquidation-bars');
         const chartSvg = document.getElementById('liquidation-chart');
         const emptyMessage = document.getElementById('map-empty-message');
-        const buyTableBody = document.getElementById('map-table-body-bids');
-        const sellTableBody = document.getElementById('map-table-body-asks');
         const priceAxisEl = document.getElementById('map-price-axis');
         const amountAxisEl = document.getElementById('map-amount-axis');
         const lastPriceEl = document.getElementById('map-last-price');
@@ -4053,14 +4012,14 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           leftArea.setAttribute('y', padding.top);
           leftArea.setAttribute('width', Math.max(0, markerX - padding.left));
           leftArea.setAttribute('height', chartHeight);
-          leftArea.setAttribute('fill', 'rgba(248, 113, 113, 0.2)');
+          leftArea.setAttribute('fill', 'rgba(34, 197, 94, 0.2)');
           chartSvg.appendChild(leftArea);
           const rightArea = document.createElementNS(svgNS, 'rect');
           rightArea.setAttribute('x', markerX);
           rightArea.setAttribute('y', padding.top);
           rightArea.setAttribute('width', Math.max(0, padding.left + chartWidth - markerX));
           rightArea.setAttribute('height', chartHeight);
-          rightArea.setAttribute('fill', 'rgba(34, 197, 94, 0.18)');
+          rightArea.setAttribute('fill', 'rgba(248, 113, 113, 0.18)');
           chartSvg.appendChild(rightArea);
           if (Number.isFinite(markerPrice)) {
             const latestX = markerX;
@@ -4099,7 +4058,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           const xTickCount = 6;
           for (let i = 0; i < xTickCount; i += 1) {
             const ratio = i / (xTickCount - 1);
-            const price = minPrice + priceRange * ratio;
+            const price = visibleMin + priceRange * ratio;
             const x = padding.left + chartWidth * ratio;
             const textEl = document.createElementNS(svgNS, 'text');
             textEl.setAttribute('x', x);
@@ -4122,35 +4081,10 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
             const end = historyPayload?.range_end ? formatTimestamp(historyPayload.range_end) : '--';
             rangeEl.textContent = (start && end) ? (start + ' ~ ' + end) : '--';
           }
-          const bidRows = [];
-          const askRows = [];
           if (!bins.length) {
-            buyTableBody.innerHTML = "<tr><td colspan='3' class='empty-state'>暂无24小时聚合买盘</td></tr>";
-            sellTableBody.innerHTML = "<tr><td colspan='3' class='empty-state'>暂无24小时聚合卖盘</td></tr>";
-            renderBars(bins, Number(historyPayload?.latest_price));
+            showEmpty('暂无24小时聚合数据');
             return;
           }
-          bins.forEach((bin) => {
-            const priceText = formatPrice(bin.price);
-            const row = '<tr>' +
-              '<td>' + priceText + '</td>' +
-              '<td>' + formatCurrency(bin.notional) + '</td>' +
-              '<td>' + formatCurrency(bin.cumulative) + '</td>' +
-              '</tr>';
-            if (bin.side === 'bid') {
-              bidRows.push(row);
-            } else {
-              askRows.push(row);
-            }
-          });
-          if (!bidRows.length) {
-            bidRows.push("<tr><td colspan='3' class='empty-state'>暂无24小时聚合买盘</td></tr>");
-          }
-          if (!askRows.length) {
-            askRows.push("<tr><td colspan='3' class='empty-state'>暂无24小时聚合卖盘</td></tr>");
-          }
-          buyTableBody.innerHTML = bidRows.join('');
-          sellTableBody.innerHTML = askRows.join('');
           renderBars(bins, Number(historyPayload?.latest_price));
         };
 
