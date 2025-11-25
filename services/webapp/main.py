@@ -3683,20 +3683,25 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         .nav-link { padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }
         .nav-link.active { background-color: #38bdf8; color: #0f172a; }
         .map-card { background: #0f1b2d; border-radius: 16px; padding: 24px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.18); }
-        .map-meta { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin-bottom: 1.5rem; font-size: 0.95rem; }
+        .map-meta { display: flex; flex-direction: column; gap: 6px; margin-bottom: 1.5rem; font-size: 0.95rem; }
+        .map-meta-row { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
         .map-meta strong { font-size: 1.05rem; color: #f8fafc; }
+        .map-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.85rem; color: #cbd5f5; }
+        .legend-dot { display: inline-flex; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+        .legend-dot.buy { background: #34d399; }
+        .legend-dot.sell { background: #f87171; }
+        .legend-dot.bar { background: #facc15; }
+        .legend-price { color: #f8fafc; }
         .timestamp { color: #38bdf8; }
         .map-chart { display: grid; grid-template-columns: auto 1fr auto; gap: 16px; align-items: center; margin-bottom: 1.25rem; }
         .axis { font-size: 0.85rem; color: #94a3b8; writing-mode: vertical-rl; transform: rotate(180deg); }
-        .map-bars { position: relative; display: flex; gap: 10px; align-items: flex-end; padding: 18px; border-radius: 14px; background: rgba(8, 22, 48, 0.85); min-height: 240px; overflow-x: auto; }
-        .map-column { flex: 0 0 52px; display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 0.75rem; color: #cbd5f5; }
-        .map-bar { width: 100%; border-radius: 6px 6px 0 0; background: rgba(59, 130, 246, 0.7); min-height: 6px; transition: height 0.25s ease; }
-        .map-bar.buy { background: linear-gradient(180deg, rgba(34, 197, 94, 0.9), rgba(16, 185, 129, 0.7)); }
-        .map-bar.sell { background: linear-gradient(180deg, rgba(248, 113, 113, 0.9), rgba(244, 63, 94, 0.7)); }
-        .map-center { flex: 0 0 2px; align-self: stretch; background: rgba(248, 250, 252, 0.4); position: relative; }
-        .map-center span { position: absolute; top: -18px; left: -46px; font-size: 0.75rem; color: #bfdbfe; white-space: nowrap; }
-        .price-label { text-align: center; width: 100%; display: block; }
-        .amount-label { font-size: 0.7rem; color: #94a3b8; }
+        .map-chart-body { display: flex; align-items: flex-end; gap: 12px; width: 100%; }
+        .map-axis-y { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; gap: 8px; font-size: 0.75rem; color: #94a3b8; min-width: 80px; }
+        .map-axis-y span { display: inline-flex; align-items: center; justify-content: flex-end; width: 100%; }
+        .map-bars { position: relative; width: 100%; padding: 0; border-radius: 14px; background: rgba(8, 22, 48, 0.85); min-height: 320px; overflow: hidden; }
+        .map-bars svg { width: 100%; height: 360px; display: block; }
+        .map-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #94a3b8; font-size: 0.9rem; background: transparent; }
+        .map-bars.has-data .map-empty { display: none; }
         .chart-x-axis { margin-top: 8px; text-align: center; font-size: 0.85rem; color: #94a3b8; }
         .chart-x-axis strong { color: #f8fafc; }
         .history-tables { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 1.5rem; }
@@ -3738,15 +3743,31 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
     <p class="hint">默认读取 http://localhost:8000/orderbook?levels=400 的市场深度，将订单金额按 1 USDT 区间累加展示。</p>
     <section class="map-card">
         <div class="map-meta">
-            <span>交易对：<strong id="map-symbol">$display_pair</strong></span>
-            <span>最新成交价：<strong id="map-last-price">$last_price</strong> USDT</span>
-            <span>最后刷新：<span class="timestamp" id="map-updated">$updated_at</span></span>
-            <span>统计区间：<strong id="map-range">--</strong></span>
+            <div class="map-meta-row">
+                <span>交易对：<strong id="map-symbol">$display_pair</strong></span>
+                <span>最新成交价：<strong id="map-last-price">$last_price</strong> USDT</span>
+                <span>最后刷新：<span class="timestamp" id="map-updated">$updated_at</span></span>
+                <span>统计区间：<strong id="map-range">--</strong></span>
+            </div>
+            <div class="map-legend">
+                <span><i class="legend-dot buy"></i>累计买盘强度</span>
+                <span><i class="legend-dot sell"></i>累计卖盘强度</span>
+                <span><i class="legend-dot bar"></i>区间金额</span>
+                <span class="legend-price">当前价格：<strong id="map-legend-price">--</strong></span>
+            </div>
         </div>
         <div class="map-chart" id="liquidation-map-root" data-instrument="$instrument" data-bin-size="1" data-levels="400">
             <span class="axis axis-left">低价</span>
-            <div class="map-bars" id="liquidation-bars">
-                <p class="empty-state">等待市场深度数据...</p>
+            <div class="map-chart-body">
+                <div class="map-axis-y" id="map-amount-axis">
+                    <span>--</span>
+                    <span>--</span>
+                    <span>0</span>
+                </div>
+                <div class="map-bars" id="liquidation-bars">
+                    <svg id="liquidation-chart"></svg>
+                    <div class="map-empty" id="map-empty-message">等待市场深度数据...</div>
+                </div>
             </div>
             <span class="axis axis-right">高价</span>
         </div>
@@ -3783,10 +3804,14 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         const root = document.getElementById('liquidation-map-root');
         if (!root) { return; }
         const barsContainer = document.getElementById('liquidation-bars');
+        const chartSvg = document.getElementById('liquidation-chart');
+        const emptyMessage = document.getElementById('map-empty-message');
         const buyTableBody = document.getElementById('map-table-body-bids');
         const sellTableBody = document.getElementById('map-table-body-asks');
         const priceAxisEl = document.getElementById('map-price-axis');
+        const amountAxisEl = document.getElementById('map-amount-axis');
         const lastPriceEl = document.getElementById('map-last-price');
+        const legendPriceEl = document.getElementById('map-legend-price');
         const updatedEl = document.getElementById('map-updated');
         const rangeEl = document.getElementById('map-range');
         const instrument = (root.dataset.instrument || 'ETH-USDT-SWAP').toUpperCase();
@@ -3883,7 +3908,23 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         };
 
         const showEmpty = (message) => {
-          barsContainer.innerHTML = '<p class="empty-state">' + message + '</p>';
+          if (barsContainer) { barsContainer.classList.remove('has-data'); }
+          if (chartSvg) { chartSvg.innerHTML = ''; }
+          if (emptyMessage) { emptyMessage.textContent = message; }
+          if (legendPriceEl) { legendPriceEl.textContent = '--'; }
+        };
+
+        const updateAmountAxis = (maxValue) => {
+          if (!amountAxisEl) { return; }
+          if (!Number.isFinite(maxValue) || maxValue <= 0) {
+            amountAxisEl.innerHTML = '<span>--</span><span>--</span><span>0</span>';
+            return;
+          }
+          const mid = maxValue / 2;
+          amountAxisEl.innerHTML =
+            '<span>' + formatCurrency(maxValue) + ' USD</span>' +
+            '<span>' + formatCurrency(mid) + ' USD</span>' +
+            '<span>0 USD</span>';
         };
 
         const updatePriceAxis = (bins, latestPrice) => {
@@ -3903,56 +3944,126 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           if (!Number.isFinite(mid)) {
             mid = (minPrice + maxPrice) / 2;
           }
-          priceAxisEl.innerHTML = `价格轴：<strong>${formatPrice(minPrice)}</strong> ← <strong>${formatPrice(mid)}</strong> → <strong>${formatPrice(maxPrice)}</strong>`;
+          priceAxisEl.innerHTML =
+            '价格轴：<strong>' + formatPrice(minPrice) + '</strong> ← <strong>' +
+            formatPrice(mid) + '</strong> → <strong>' + formatPrice(maxPrice) + '</strong>';
         };
 
         const renderBars = (bins, latestPrice) => {
-          if (!bins.length) {
+          if (!chartSvg || !barsContainer) { return; }
+          if (!Array.isArray(bins) || !bins.length) {
             showEmpty('暂无深度数据');
             updatePriceAxis([], latestPrice);
+            updateAmountAxis(null);
             return;
           }
-          const maxCumulative = Math.max(...bins.map((bin) => bin.cumulative), 0) || 1;
-          const fragment = document.createDocumentFragment();
-          let insertedCenter = false;
-          const appendCenterLine = () => {
-            if (insertedCenter) { return; }
-            const center = document.createElement('div');
-            center.className = 'map-center';
-            center.innerHTML = '<span>' + formatNumber(latestPrice, 2) + '</span>';
-            fragment.appendChild(center);
-            insertedCenter = true;
-          };
-          const buildColumn = (bin) => {
-            const column = document.createElement('div');
-            column.className = 'map-column';
-            const priceLabel = document.createElement('span');
-            priceLabel.className = 'price-label';
-            priceLabel.textContent = formatPrice(bin.price);
-            const bar = document.createElement('div');
-            bar.className = 'map-bar ' + (bin.side === 'bid' ? 'buy' : 'sell');
-            const ratio = (bin.cumulative / maxCumulative) * 100;
-            const height = Math.min(100, Math.max(1, ratio));
-            bar.style.height = height + '%';
-            bar.title = '价格区间 ' + formatPrice(bin.price) + '~' + formatPrice(bin.price + binSize) + ' 累计金额 ' + formatCurrency(bin.cumulative) + ' USD';
-            const amountLabel = document.createElement('span');
-            amountLabel.className = 'amount-label';
-            amountLabel.textContent = formatCurrency(bin.cumulative) + ' USD';
-            column.appendChild(priceLabel);
-            column.appendChild(bar);
-            column.appendChild(amountLabel);
-            return column;
-          };
-          bins.forEach((bin) => {
-            if (!insertedCenter && Number.isFinite(latestPrice) && bin.price >= latestPrice) {
-              appendCenterLine();
-            }
-            fragment.appendChild(buildColumn(bin));
-          });
-          if (!insertedCenter) { appendCenterLine(); }
-          barsContainer.innerHTML = '';
-          barsContainer.appendChild(fragment);
+          barsContainer.classList.add('has-data');
+          if (emptyMessage) { emptyMessage.textContent = ''; }
+          const rect = chartSvg.getBoundingClientRect();
+          const width = Math.max(rect.width || chartSvg.parentElement?.clientWidth || 800, 800);
+          const height = Math.max(rect.height || 360, 360);
+          chartSvg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+          chartSvg.innerHTML = '';
+          const padding = { left: 90, right: 40, top: 24, bottom: 48 };
+          const chartWidth = width - padding.left - padding.right;
+          const chartHeight = height - padding.top - padding.bottom;
+          const prices = bins.map((bin) => Number(bin.price)).filter((value) => Number.isFinite(value));
+          const minPrice = Math.min(...prices);
+          const maxPrice = Math.max(...prices);
+          const priceRange = Math.max(maxPrice - minPrice, 1);
+          const bids = bins.filter((bin) => (bin.side || '').toLowerCase() === 'bid');
+          const asks = bins.filter((bin) => (bin.side || '').toLowerCase() === 'ask');
+          const maxNotional = Math.max(...bins.map((bin) => Number(bin.notional) || 0), 0);
+          const maxCumulative = Math.max(...bins.map((bin) => Number(bin.cumulative) || 0), 0);
+          const yMax = Math.max(maxNotional, maxCumulative, 1);
+          updateAmountAxis(yMax);
           updatePriceAxis(bins, latestPrice);
+          if (legendPriceEl) {
+            legendPriceEl.textContent = Number.isFinite(latestPrice) ? formatPrice(latestPrice) : '--';
+          }
+          const scaleX = (price) => padding.left + ((price - minPrice) / priceRange) * chartWidth;
+          const barWidth = Math.max(2, (chartWidth / Math.max(bins.length, 1)) * 0.6);
+          const scaleBarHeight = (value) => (value / yMax) * chartHeight;
+          const scaleLineY = (value) => padding.top + chartHeight - (value / yMax) * chartHeight;
+          const svgNS = 'http://www.w3.org/2000/svg';
+          const background = document.createElementNS(svgNS, 'rect');
+          background.setAttribute('x', padding.left);
+          background.setAttribute('y', padding.top);
+          background.setAttribute('width', chartWidth);
+          background.setAttribute('height', chartHeight);
+          background.setAttribute('fill', 'rgba(15,23,42,0.35)');
+          chartSvg.appendChild(background);
+          const drawBars = (collection, color) => {
+            collection.forEach((bin) => {
+              const price = Number(bin.price);
+              if (!Number.isFinite(price)) { return; }
+              const x = scaleX(price) - barWidth / 2;
+              const value = Number(bin.notional) || 0;
+              const h = Math.max(1, scaleBarHeight(value));
+              const y = padding.top + chartHeight - h;
+              const rectEl = document.createElementNS(svgNS, 'rect');
+              rectEl.setAttribute('x', x);
+              rectEl.setAttribute('y', y);
+              rectEl.setAttribute('width', barWidth);
+              rectEl.setAttribute('height', h);
+              rectEl.setAttribute('fill', color);
+              rectEl.setAttribute('opacity', '0.8');
+              rectEl.setAttribute('rx', '3');
+              const title = document.createElementNS(svgNS, 'title');
+              title.textContent = '价格：' + formatPrice(price) + ' ｜ 区间金额：' + formatCurrency(value) + ' USD';
+              rectEl.appendChild(title);
+              chartSvg.appendChild(rectEl);
+            });
+          };
+          drawBars(asks, '#fbbf24');
+          drawBars(bids, '#38bdf8');
+          const drawLine = (collection, color) => {
+            if (!collection.length) { return; }
+            const sorted = collection.slice().sort((a, b) => Number(a.price) - Number(b.price));
+            let pathData = '';
+            sorted.forEach((bin, index) => {
+              const price = Number(bin.price);
+              if (!Number.isFinite(price)) { return; }
+              const x = scaleX(price);
+              const y = scaleLineY(Number(bin.cumulative) || 0);
+              pathData += (index === 0 ? 'M ' : ' L ') + x + ' ' + y;
+            });
+            if (!pathData) { return; }
+            const pathEl = document.createElementNS(svgNS, 'path');
+            pathEl.setAttribute('d', pathData);
+            pathEl.setAttribute('fill', 'none');
+            pathEl.setAttribute('stroke', color);
+            pathEl.setAttribute('stroke-width', '2');
+            chartSvg.appendChild(pathEl);
+          };
+          drawLine(asks, '#f97316');
+          drawLine(bids, '#14b8a6');
+          if (Number.isFinite(latestPrice)) {
+            const latestX = scaleX(latestPrice);
+            const marker = document.createElementNS(svgNS, 'line');
+            marker.setAttribute('x1', latestX);
+            marker.setAttribute('x2', latestX);
+            marker.setAttribute('y1', padding.top);
+            marker.setAttribute('y2', padding.top + chartHeight);
+            marker.setAttribute('stroke', '#f8fafc');
+            marker.setAttribute('stroke-dasharray', '4 4');
+            marker.setAttribute('opacity', '0.8');
+            chartSvg.appendChild(marker);
+          }
+          const tickCount = 6;
+          for (let i = 0; i < tickCount; i += 1) {
+            const ratio = i / (tickCount - 1);
+            const price = minPrice + priceRange * ratio;
+            const x = padding.left + chartWidth * ratio;
+            const textEl = document.createElementNS(svgNS, 'text');
+            textEl.setAttribute('x', x);
+            textEl.setAttribute('y', height - 10);
+            textEl.setAttribute('fill', '#94a3b8');
+            textEl.setAttribute('font-size', '12');
+            textEl.setAttribute('text-anchor', 'middle');
+            textEl.textContent = formatPrice(price);
+            chartSvg.appendChild(textEl);
+          }
         };
 
         const renderHistoryTables = (historyPayload) => {
@@ -3970,7 +4081,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           if (!bins.length) {
             buyTableBody.innerHTML = "<tr><td colspan='3' class='empty-state'>暂无24小时聚合买盘</td></tr>";
             sellTableBody.innerHTML = "<tr><td colspan='3' class='empty-state'>暂无24小时聚合卖盘</td></tr>";
-            updatePriceAxis([], null);
+            renderBars(bins, Number(historyPayload?.latest_price));
             return;
           }
           bins.forEach((bin) => {

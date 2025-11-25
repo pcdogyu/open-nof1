@@ -985,8 +985,9 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
                 detail=f"金字塔同向订单已达 {pyramid_cap} 笔，阻止继续加仓。",
             )
 
+    matching_positions: list[dict] = []
+    matching_positions: list[dict] = []
     if event_price and event_price > 0 and reentry_pct > 0 and positions:
-        matching_positions = []
         for pos in positions:
             if (pos.get("instrument_id") or "").upper() != symbol:
                 continue
@@ -996,14 +997,18 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
             if side == "sell" and side_text not in {"sell", "short"}:
                 continue
             matching_positions.append(pos)
-    for pos in matching_positions:
-        entry_price = _try_float(pos.get("entry_price"))
-        if entry_price and entry_price > 0:
-            deviation = abs((entry_price - event_price) / entry_price) * 100.0
-            if deviation < reentry_pct:
+    if event_price and matching_positions:
+        for pos in matching_positions:
+            entry_price = _try_float(pos.get("entry_price"))
+            if entry_price and entry_price > 0:
+                deviation = abs((entry_price - event_price) / entry_price) * 100.0
+                if deviation < reentry_pct:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"{symbol} 最近持仓 {entry_price:.4f} 与信号价 {event_price:.4f} 偏离 {deviation:.2f}% < {reentry_pct:.2f}%，跳过自动加仓。",
+                        detail=(
+                            f"{symbol} ����ֲ� {entry_price:.4f} ���źż� "
+                            f"{event_price:.4f} ƫ�� {deviation:.2f}% < {reentry_pct:.2f}%�������Զ��Ӳ֡�"
+                        ),
                     )
 
     instrument_meta = _get_okx_instrument_meta(symbol) or {}
