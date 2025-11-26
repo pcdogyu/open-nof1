@@ -32,7 +32,11 @@ from models.schemas import MarketSnapshot, RiskContext, SignalRequest, SignalRes
 from risk.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from risk.engine import RiskEngine
 from risk.order_validation import BasicOrderValidator, OrderValidationError, ensure_valid_order
-from risk.notional_limits import OrderNotionalGuard, ProfitLossGuard
+from risk.notional_limits import (
+    InstrumentExposureGuard,
+    OrderNotionalGuard,
+    ProfitLossGuard,
+)
 from risk.price_limits import PriceLimitValidator
 from risk.schemas import MarketContext, OrderIntent
 from services.okx.catalog import load_catalog_cache
@@ -131,6 +135,7 @@ _DEFAULT_RISK_CONFIG = {
     "liquidation_same_direction_count": 4,
     "liquidation_opposite_count": 3,
     "liquidation_silence_seconds": 300,
+    "max_capital_pct_per_instrument": 0.1,
 }
 
 
@@ -157,6 +162,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
             "liquidation_same_direction_count",
             "liquidation_opposite_count",
             "liquidation_silence_seconds",
+            "max_capital_pct_per_instrument",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -168,6 +174,9 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     max_position = float(config.get("max_position", 0.0))
     default_leverage = float(config.get("default_leverage", 2.0))
     max_leverage = float(config.get("max_leverage", max(default_leverage, 1.0)))
+    max_capital_pct = float(config.get("max_capital_pct_per_instrument", 0.0))
+    max_capital_pct = max(0.0, min(1.0, max_capital_pct))
+    config["max_capital_pct_per_instrument"] = max_capital_pct
     pyramid_max = int(config.get("pyramid_max_orders", 0))
     take_profit = float(config.get("take_profit_pct", 0.0))
     stop_loss = float(config.get("stop_loss_pct", 0.0))
@@ -327,6 +336,7 @@ def update_risk_configuration(
     liquidation_same_direction_count: int = 4,
     liquidation_opposite_count: int = 3,
     liquidation_silence_seconds: float = 300.0,
+    max_capital_pct_per_instrument: float = 0.1,
 ) -> None:
     """Refresh the in-memory risk configuration."""
     normalized = _sanitize_risk_config(
@@ -344,10 +354,11 @@ def update_risk_configuration(
             "position_stop_loss_pct": position_stop_loss_pct,
             "pyramid_max_orders": pyramid_max_orders,
             "pyramid_reentry_pct": pyramid_reentry_pct,
-            "liquidation_notional_threshold": liquidation_notional_threshold,
-            "liquidation_same_direction_count": liquidation_same_direction_count,
-            "liquidation_opposite_count": liquidation_opposite_count,
-            "liquidation_silence_seconds": liquidation_silence_seconds,
+        "liquidation_notional_threshold": liquidation_notional_threshold,
+        "liquidation_same_direction_count": liquidation_same_direction_count,
+        "liquidation_opposite_count": liquidation_opposite_count,
+        "liquidation_silence_seconds": liquidation_silence_seconds,
+        "max_capital_pct_per_instrument": max_capital_pct_per_instrument,
         }
     )
     with _RISK_CONFIG_LOCK:
@@ -369,6 +380,9 @@ def _build_risk_engine() -> RiskEngine:
         min_notional=float(config.get("min_notional_usd", 0.0)),
         max_notional=float(config.get("max_order_notional_usd", 0.0)),
     )
+    exposure_guard = InstrumentExposureGuard(
+        max_capital_pct=float(config.get("max_capital_pct_per_instrument", 0.0)),
+    )
     pnl_guard = ProfitLossGuard(
         take_profit_pct=float(config.get("take_profit_pct", 0.0)),
         stop_loss_pct=float(config.get("stop_loss_pct", 0.0)),
@@ -378,6 +392,7 @@ def _build_risk_engine() -> RiskEngine:
         circuit_breaker=circuit_breaker,
         notional_guard=notional_guard,
         pnl_guard=pnl_guard,
+        exposure_guard=exposure_guard,
     )
 
 
@@ -1356,6 +1371,8 @@ async def _process_account_signal(
         raise
 
     signal_summary = _summarize_ai_signal(response, request, routed)
+    leverage_value = _resolve_leverage(meta, routed.intent.metadata.get("leverage"))
+    routed.intent.metadata["leverage"] = leverage_value
     _prime_price_band(risk_engine, routed.market)
     evaluation = risk_engine.evaluate(routed.intent, routed.market, routed.portfolio_metrics)
     if not evaluation.approved:

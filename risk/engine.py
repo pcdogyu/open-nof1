@@ -7,7 +7,11 @@ from __future__ import annotations
 from typing import Iterable, List
 
 from risk.circuit_breaker import CircuitBreaker
-from risk.notional_limits import OrderNotionalGuard, ProfitLossGuard
+from risk.notional_limits import (
+    InstrumentExposureGuard,
+    OrderNotionalGuard,
+    ProfitLossGuard,
+)
 from risk.price_limits import PriceLimitValidator
 from risk.schemas import MarketContext, OrderIntent, PortfolioMetrics, RiskEvaluation
 
@@ -20,6 +24,7 @@ class RiskEngine:
         *,
         price_validator: PriceLimitValidator | None = None,
         circuit_breaker: CircuitBreaker | None = None,
+        exposure_guard: InstrumentExposureGuard | None = None,
         notional_guard: OrderNotionalGuard | None = None,
         pnl_guard: ProfitLossGuard | None = None,
     ) -> None:
@@ -28,6 +33,7 @@ class RiskEngine:
         self.notional_guard = notional_guard
         self.pnl_guard = pnl_guard
         self._hooks: List = []
+        self.exposure_guard = exposure_guard
 
     def add_hook(self, hook) -> None:
         """Register custom hook callable(evaluation, order, context)."""
@@ -43,6 +49,8 @@ class RiskEngine:
         self.price_validator.validate(order, evaluation)
         if self.notional_guard:
             self.notional_guard.validate(order, market, evaluation)
+        if self.exposure_guard:
+            self.exposure_guard.validate(order, market, portfolio, evaluation)
         if self.circuit_breaker:
             self.circuit_breaker.evaluate(portfolio, evaluation)
         if self.pnl_guard:

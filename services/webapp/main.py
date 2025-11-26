@@ -1063,6 +1063,7 @@ def _render_risk_page(settings: dict) -> str:
     min_notional = max(0.0, float(settings.get("min_notional_usd") or 0.0))
     max_order_notional = max(0.0, min(1_000_000.0, float(settings.get("max_order_notional_usd") or 0.0)))
     max_position_val = max(0.0, float(settings.get("max_position") or 0.0))
+    max_capital_pct = max(0.0, min(1.0, float(settings.get("max_capital_pct_per_instrument") or 0.1)))
     pyramid_max_orders = max(0, min(100, int(settings.get("pyramid_max_orders") or 0)))
     take_profit_pct = max(0.0, min(500.0, float(settings.get("take_profit_pct") or settings.get("portfolio_take_profit_pct") or 0.0)))
     stop_loss_pct = max(0.0, min(95.0, float(settings.get("stop_loss_pct") or settings.get("portfolio_stop_loss_pct") or 0.0)))
@@ -1091,6 +1092,8 @@ def _render_risk_page(settings: dict) -> str:
     position_take_profit_text = _compact(position_take_profit_pct, 2)
     position_stop_loss_text = _compact(position_stop_loss_pct, 2)
     max_position_text = _compact(max_position_val, 4)
+    max_capital_pct_percent = max_capital_pct * 100.0
+    max_capital_pct_text = _compact(max_capital_pct_percent, 2)
     default_leverage_text = _compact(default_leverage, 0)
     max_leverage_text = _compact(max_leverage, 0)
     cooldown_minutes = cooldown_seconds / 60
@@ -1113,6 +1116,8 @@ def _render_risk_page(settings: dict) -> str:
         min_notional_display=esc(min_notional_text),
         max_order_notional_usd=esc(f"{max_order_notional:.2f}"),
         max_order_notional_display=esc(max_order_notional_text),
+        max_capital_pct_per_instrument=esc(f"{max_capital_pct_percent:.2f}"),
+        max_capital_pct_display=esc(max_capital_pct_text),
         max_position=esc(f"{max_position_val:.4f}"),
         max_position_display=esc(max_position_text),
         pyramid_reentry_pct=esc(f"{pyramid_reentry_pct:.2f}"),
@@ -1324,30 +1329,29 @@ def _render_close_all_button(account_id: str | None) -> str:
 
 def _render_trades_table(trades: Sequence[dict] | None) -> str:
     esc = _escape
-    valid_symbols = {"ETH-USDT-SWAP", "BTC-USDT-SWAP"}
     rows = []
     for trade in trades or []:
-        instrument = (trade.get("instrument_id") or "").upper()
-        if instrument not in valid_symbols:
-            continue
+        instrument = (trade.get("instrument_id") or trade.get("instId") or "--").upper()
+        timestamp = trade.get("executed_at") or trade.get("timestamp")
+        model = trade.get("model_id") or "--"
+        account = trade.get("account_id") or trade.get("portfolio_id") or "--"
+        side_raw = (trade.get("side") or trade.get("direction") or "").lower()
+        side_label = "买入" if side_raw == "buy" else "卖出" if side_raw == "sell" else "--"
+        side_class = "trade-buy" if side_raw == "buy" else "trade-sell" if side_raw == "sell" else ""
+        quantity = trade.get("quantity") or trade.get("size") or trade.get("sz")
         entry_price = trade.get("entry_price") or trade.get("price")
-        exit_price = (
-            trade.get("close_price")
-            or trade.get("exit_price")
-            or trade.get("price")
-        )
+        exit_price = trade.get("close_price") or trade.get("exit_price") or trade.get("price")
         fee = trade.get("fee") or trade.get("feeCcy") or trade.get("feeUsd")
-        realized_pnl = trade.get("realized_pnl")
-        # 仅在平仓侧显示盈亏；开仓侧为空。非零才显示数值。
+        realized_pnl = trade.get("realized_pnl") or trade.get("pnl")
         pnl_cell = _format_number(realized_pnl, digits=4) if realized_pnl not in (None, 0) else ""
         rows.append(
             "<tr>"
-            f"<td>{esc(_format_asia_shanghai(trade.get('executed_at')))}</td>"
-            f"<td>{esc(trade.get('model_id'))}</td>"
-            f"<td>{esc(trade.get('account_id') or trade.get('portfolio_id'))}</td>"
+            f"<td>{esc(_format_asia_shanghai(timestamp))}</td>"
+            f"<td>{esc(model)}</td>"
+            f"<td>{esc(account)}</td>"
             f"<td>{esc(instrument)}</td>"
-            f"<td>{esc(trade.get('side'))}</td>"
-            f"<td>{_format_number(trade.get('quantity'))}</td>"
+            f"<td class='{side_class} trade-side'>{side_label}</td>"
+            f"<td>{_format_number(quantity)}</td>"
             f"<td>{_format_number(entry_price)}</td>"
             f"<td>{_format_number(exit_price)}</td>"
             f"<td>{_format_number(fee, digits=4)}</td>"
@@ -1360,13 +1364,13 @@ def _render_trades_table(trades: Sequence[dict] | None) -> str:
     return (
         "<table class='dense'>"
         "<thead>"
-        "<tr><th>成交时间</th><th>模型</th><th>投资组合</th><th>合约</th>"
-        "<th>方向</th><th>数量</th><th>入场价</th><th>离场价</th><th>手续费</th><th>盈亏(USD)</th></tr>"
+        "<tr><th>成交时间</th><th>模型</th><th>投资账户</th><th>合约</th>"
+        "<th>方向</th><th>数量</th><th>开仓价</th><th>平仓价</th><th>手续费</th><th>收益(USD)</th></tr>"
         "</thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
+        "<div class='trade-pagination' id='trade-pagination'></div>"
     )
-
 
 def _render_orders_table(orders: Sequence[dict] | None, *, account_id: str | None = None) -> str:
     esc = _escape
@@ -2003,6 +2007,10 @@ RISK_TEMPLATE = r"""
                         <input id="max-order-notional" type="number" name="max_order_notional_usd" min="0" step="0.01" value="{max_order_notional_usd}" required>
                         <span class="hint">上限：<span id="hint-max-order-notional">{max_order_notional_display}</span> USDT，0 表示不限制。</span>
                     </label>
+                    <label for="max-capital-allocation">单币对最大资金占比（%）
+                        <input id="max-capital-allocation" type="number" name="max_capital_pct_per_instrument" min="0" max="100" step="0.1" value="{max_capital_pct_per_instrument}" required>
+                        <span class="hint">当前每笔订单最多使用账户资金的 <span id="hint-max-capital-pct">{max_capital_pct_display}</span>% × 杠杆。</span>
+                    </label>
                     <label for="liquidation-threshold">爆仓金额阈值（USDT）
                         <input id="liquidation-threshold" type="number" name="liquidation_notional_threshold" min="0" step="1" value="{liquidation_notional_threshold}" required>
                         <span class="hint">若 15 分钟内净爆仓金额 ≥ <span id="hint-liq-threshold">{liquidation_notional_display}</span> USDT 则满足触发条件之一。</span>
@@ -2125,6 +2133,12 @@ OKX_TEMPLATE = r"""
         .split .panel:first-child {{ flex: 0.9 1 320px; }}
         .split .panel:last-child {{ flex: 1.5 1 520px; min-width: 360px; }}
         .recent-trades-panel table {{ table-layout: auto; }}
+        .trade-side {{ font-weight: 600; }}
+        .trade-buy {{ color: #4ade80; }}
+        .trade-sell {{ color: #f87171; }}
+        .trade-pagination {{ display: flex; gap: 6px; flex-wrap: wrap; margin-top: 0.35rem; }}
+        .trade-page-btn {{ padding: 4px 10px; border-radius: 6px; border: 1px solid rgba(148, 163, 184, 0.4); background: transparent; color: #cbd5f5; cursor: pointer; }}
+        .trade-page-btn.active {{ background: #38bdf8; color: #0f172a; border-color: #38bdf8; }}
         table.dense {{ width: 100%; border-collapse: collapse; margin-top: 0.5rem; background-color: rgba(15, 23, 42, 0.6); border-radius: 6px; overflow: hidden; }}
         table.dense th, table.dense td {{ padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 0.9rem; }}
         table.dense th.action-col, table.dense td.action-col {{ text-align: center; }}
@@ -2307,7 +2321,7 @@ OKX_TEMPLATE = r"""
     {error_block}
     {account_sections}
     <script>
-      (function() {{
+        (function() {{
         function pad(n) {{ return n < 10 ? '0' + n : '' + n; }}
         function fmt(d) {{
           var y=d.getFullYear();
@@ -2337,6 +2351,32 @@ OKX_TEMPLATE = r"""
           orderType.addEventListener('change', togglePrice);
           togglePrice();
         }}
+        (function paginateTrades() {{
+          const perPage = 13;
+          const table = document.querySelector('.recent-trades-panel table.dense');
+          const pagination = document.getElementById('trade-pagination');
+          if (!table || !pagination) {{ return; }}
+          const rows = Array.from(table.tBodies[0].rows);
+          if (!rows.length) {{ pagination.style.display = 'none'; return; }}
+          const pageCount = Math.ceil(rows.length / perPage);
+          let current = 0;
+          const renderPage = (page) => {{
+            rows.forEach((row, idx) => {{
+              row.style.display = (idx >= page * perPage && idx < (page + 1) * perPage) ? '' : 'none';
+            }});
+            pagination.innerHTML = '';
+            for (let i = 0; i < pageCount; i += 1) {{
+              const btn = document.createElement('button');
+              btn.type = 'button';
+              btn.className = 'trade-page-btn' + (i === page ? ' active' : '');
+              btn.textContent = `${{i + 1}}`;
+              btn.disabled = i === page;
+              btn.addEventListener('click', () => renderPage(i));
+              pagination.appendChild(btn);
+            }}
+          }};
+          renderPage(0);
+        }})();
       }})();
     </script>
 </body>
@@ -2717,17 +2757,47 @@ LIQUIDATION_TEMPLATE = r"""
             cursor: pointer;
             font-size: 0.78rem;
         }}
+        .order-action-group {{
+            display: flex;
+            gap: 6px;
+        }}
         .order-btn[disabled] {{
             opacity: 0.5;
             cursor: not-allowed;
         }}
-        .order-btn.active {{
-            background: #38bdf8;
-            color: #0f172a;
-            border-color: #38bdf8;
-            font-weight: 700;
-        }}
-        .signal-subtext {{ font-size: 0.75rem; color: #94a3b8; margin-top: 4px; display: block; }}
+    .order-btn.active {{
+        background: #38bdf8;
+        color: #0f172a;
+        border-color: #38bdf8;
+        font-weight: 700;
+    }}
+    .payload-panel {{
+        background: #0f172a;
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 12px 16px;
+        margin: 1rem 0;
+        font-family: "Fira Code", Consolas, monospace;
+        color: #e2e8f0;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.5);
+    }}
+    .payload-panel h3 {{
+        margin: 0 0 6px;
+        font-size: 0.9rem;
+        color: #38bdf8;
+    }}
+    .payload-panel pre {{
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 0.75rem;
+        line-height: 1.4;
+        background: rgba(15, 23, 42, 0.4);
+        padding: 8px;
+        border-radius: 8px;
+        border: 1px dashed rgba(56, 189, 248, 0.5);
+    }}
+    .signal-subtext {{ font-size: 0.75rem; color: #94a3b8; margin-top: 4px; display: block; }}
     </style>
 </head>
 <body>
@@ -2770,6 +2840,10 @@ LIQUIDATION_TEMPLATE = r"""
             </select>
         </label>
         <span>最后更新：<span class="timestamp" id="liquidations-updated">{updated_at}</span></span>
+    </div>
+    <div class="payload-panel" id="okx-payload-panel">
+        <h3>OKX Payload</h3>
+        <pre id="okx-payload-display">等待买卖操作后显示请求体。</pre>
     </div>
     <div class="wave-section">
         <div class="wave-header">
@@ -2820,6 +2894,7 @@ LIQUIDATION_TEMPLATE = r"""
         const minSizeInput = document.getElementById('min-size');
         const minNotionalInput = document.getElementById('min-notional');
         const autoNotionalInput = document.getElementById('auto-order-notional');
+        const payloadDisplay = document.getElementById('okx-payload-display');
         const waveTableBody = document.getElementById('wave-body');
         const FETCH_LIMIT = 400;
         let latestItems = [];
@@ -2932,12 +3007,19 @@ LIQUIDATION_TEMPLATE = r"""
           return null;
         }};
         const renderOrderAction = (signal) => {{
-          const config = signalOrderConfig(signal);
           const instrument = signal.instrument || '';
-          if (!config || !instrument) {{
+          if (!instrument) {{
             return '<span style="opacity:0.6">--</span>';
           }}
-          return `<button type="button" class="order-btn" data-instrument="${{instrument}}" data-side="${{config.side}}">${{config.label}}</button>`;
+          const config = signalOrderConfig(signal);
+          const recommended = config?.side || null;
+          const buyActive = recommended === 'buy' ? ' active' : '';
+          const sellActive = recommended === 'sell' ? ' active' : '';
+          return `
+            <div class="order-action-group">
+              <button type="button" class="order-btn${{buyActive}}" data-instrument="${{instrument}}" data-side="buy">买入</button>
+              <button type="button" class="order-btn${{sellActive}}" data-instrument="${{instrument}}" data-side="sell">卖出</button>
+            </div>`;
         }};
         const renderWaveTable = (signals) => {{
           const body = waveTableBody;
@@ -2990,26 +3072,30 @@ LIQUIDATION_TEMPLATE = r"""
         }};
         const placeAutoOrder = (instrument, side, button) => {{
           if (!instrument || !side) {{
-            alert('缺少合约或方向信息，无法下单。');
+            alert('ȱ�ٺ�Լ������Ϣ���޷��µ���');
             return;
           }}
           const notionalValue = Number(autoNotionalInput?.value);
           if (!Number.isFinite(notionalValue) || notionalValue <= 0) {{
-            alert('请在 “Auto Order Notional” 中输入大于 0 的金额。');
+            alert('���� ��Auto Order Notional�� ��������� 0 �Ľ�');
             return;
           }}
           const originalText = button.textContent;
           button.disabled = true;
-          button.textContent = '下单中...';
+          button.textContent = '�µ���...';
+          const requestBody = {{
+            instrument_id: instrument,
+            side,
+            size: notionalValue,
+            order_mode: 'notional',
+          }};
+          if (payloadDisplay) {{
+            payloadDisplay.textContent = JSON.stringify(requestBody, null, 2);
+          }}
           fetch('/api/okx/wave-order', {{
             method: 'POST',
             headers: {{ 'Content-Type': 'application/json' }},
-            body: JSON.stringify({{
-              instrument_id: instrument,
-              side,
-              size: notionalValue,
-              order_mode: 'notional',
-            }}),
+            body: JSON.stringify(requestBody),
           }})
             .then(async (res) => {{
               const data = await res.json().catch(() => ({{}}));
@@ -3019,14 +3105,14 @@ LIQUIDATION_TEMPLATE = r"""
               if (ok) {{
                 const est = Number(data.notional_estimate);
                 const confirmation = Number.isFinite(est) ? est : notionalValue;
-                alert(`已提交 ${{side === 'buy' ? '买入' : '卖出'}} 订单 ≈ $${{confirmation.toFixed(2)}} USDT。`);
+                alert(`���ύ ${{side === 'buy' ? '����' : '����'}} ���� �� $${{confirmation.toFixed(2)}} USDT��`);
               }} else {{
-                alert(data.detail || '下单失败，请稍后重试。');
+                alert(data.detail || '�µ�ʧ�ܣ����Ժ����ԡ�');
               }}
             }})
             .catch((err) => {{
               console.error(err);
-              alert('下单失败，请稍后重试。');
+              alert('�µ�ʧ�ܣ����Ժ����ԡ�');
             }})
             .finally(() => {{
               button.disabled = false;
@@ -3754,6 +3840,10 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         .range-btn { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.45); border-radius: 999px; padding: 2px 12px; font-size: 0.8rem; cursor: pointer; }
         .range-btn.active { background: #38bdf8; color: #0f172a; }
         .range-btn:hover { border-color: #7dd3fc; }
+        .order-mode-buttons { display: inline-flex; gap: 8px; }
+        .order-mode-btn { background: rgba(248, 250, 252, 0.08); color: #e2e8f0; border: 1px solid rgba(148, 163, 184, 0.4); border-radius: 999px; padding: 2px 12px; font-size: 0.8rem; cursor: pointer; }
+        .order-mode-btn.active { background: #fbbf24; color: #1f2937; border-color: #fbbf24; }
+        .order-mode-btn:hover { border-color: rgba(251, 191, 36, 0.8); }
         .history-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-top: 1.5rem; }
         .history-table-card { background: #0f1b2d; border-radius: 16px; padding: 20px; border: 1px solid rgba(148, 163, 184, 0.18); box-shadow: 0 8px 20px rgba(15, 23, 42, 0.4); }
         .history-table-card h2 { margin: 0 0 0.75rem; font-size: 1rem; color: #f8fafc; }
@@ -3800,6 +3890,10 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
                     <div class="range-buttons">
                         <button type="button" class="range-btn active" data-hours="24">回看24小时</button>
                         <button type="button" class="range-btn" data-hours="48">回看48小时</button>
+                    </div>
+                    <div class="order-mode-buttons">
+                        <button type="button" class="order-mode-btn active" data-mode="all">全量订单</button>
+                        <button type="button" class="order-mode-btn" data-mode="open">未清算订单</button>
                     </div>
                 </div>
             </div>
@@ -3876,19 +3970,16 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         const buyTableBody = document.getElementById('history-buy-body');
         const sellTableBody = document.getElementById('history-sell-body');
         const rangeButtons = document.querySelectorAll('.range-btn');
+        const orderModeButtons = document.querySelectorAll('.order-mode-btn');
         const instrument = (root.dataset.instrument || 'ETH-USDT-SWAP').toUpperCase();
         const binSize = Number(root.dataset.binSize) || 1;
         const maxLevels = Number(root.dataset.levels) || 400;
         const REFRESH_MS = 4000;
-        let historyHours = 24;
-        try {
-          const urlHours = Number(new URL(window.location.href).searchParams.get('hours'));
-          if (Number.isFinite(urlHours) && urlHours >= 1 && urlHours <= 168) {
-            historyHours = urlHours;
-          }
-        } catch (err) {
-          console.warn('Failed to parse hours from query', err);
-        }
+        const currentUrl = new URL(window.location.href);
+        const urlHours = Number(currentUrl.searchParams.get('hours'));
+        let historyHours = (Number.isFinite(urlHours) && urlHours >= 1 && urlHours <= 168) ? urlHours : 24;
+        const urlMode = (currentUrl.searchParams.get('mode') || 'all').toLowerCase();
+        let orderMode = urlMode === 'open' ? 'open' : 'all';
         let lastHistoryPayload = null;
         let zoomLevel = 1;
         let panOffset = 0;
@@ -4256,13 +4347,15 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
             const end = historyPayload?.range_end ? formatTimestamp(historyPayload.range_end) : '--';
             rangeEl.textContent = (start && end) ? (start + ' ~ ' + end) : '--';
           }
-          if (!bins.length) {
+          const latestPrice = Number(historyPayload?.latest_price);
+          const filteredBins = applyOrderFilter(bins, latestPrice);
+          if (!filteredBins.length) {
             updateHistoryTablesUI([]);
-            showEmpty('暂无24小时聚合数据');
+            showEmpty(orderMode === 'open' ? '暂无未清算订单' : '最近24小时无数据');
             return;
           }
-          updateHistoryTablesUI(bins);
-          renderBars(bins, Number(historyPayload?.latest_price));
+          updateHistoryTablesUI(filteredBins);
+          renderBars(filteredBins, latestPrice);;
         };
 
         const persistBins = (bins, latestPrice, sourceTimestamp) => {
@@ -4351,6 +4444,33 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           });
         };
 
+        const syncOrderModeButtons = () => {
+          if (!orderModeButtons.length) { return; }
+          orderModeButtons.forEach((btn) => {
+            const btnMode = (btn.dataset.mode || 'all').toLowerCase();
+            btn.classList.toggle('active', btnMode === orderMode);
+          });
+        };
+
+        const applyOrderFilter = (bins, latestPrice) => {
+          if (!Array.isArray(bins)) { return []; }
+          if (orderMode !== 'open' || !Number.isFinite(latestPrice)) {
+            return bins.slice();
+          }
+          return bins.filter((bin) => {
+            const price = Number(bin?.price);
+            if (!Number.isFinite(price)) { return false; }
+            const side = String(bin?.side || '').toLowerCase();
+            if (side === 'bid') {
+              return price <= latestPrice + 1e-9;
+            }
+            if (side === 'ask') {
+              return price >= latestPrice - 1e-9;
+            }
+            return true;
+          });
+        };
+
         const refresh = () => {
           fetchHistory()
             .then((history) => renderHistoryTables(history))
@@ -4382,6 +4502,29 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
               try {
                 const url = new URL(window.location.href);
                 url.searchParams.set('hours', String(historyHours));
+                url.searchParams.set('mode', orderMode);
+                window.location.href = url.toString();
+              } catch (err) {
+                console.warn('Failed to update URL, reloading fallback', err);
+                window.location.reload();
+              }
+            });
+          });
+        }
+
+        if (orderModeButtons.length) {
+          orderModeButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+              const mode = (button.dataset.mode || 'all').toLowerCase();
+              if (orderMode === mode) {
+                return;
+              }
+              orderMode = mode === 'open' ? 'open' : 'all';
+              syncOrderModeButtons();
+              try {
+                const url = new URL(window.location.href);
+                url.searchParams.set('mode', orderMode);
+                url.searchParams.set('hours', String(historyHours));
                 window.location.href = url.toString();
               } catch (err) {
                 console.warn('Failed to update URL, reloading fallback', err);
@@ -4392,6 +4535,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         }
 
         syncRangeButtons();
+        syncOrderModeButtons();
 
         refresh();
         setInterval(refresh, REFRESH_MS);

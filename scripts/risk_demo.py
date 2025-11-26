@@ -8,6 +8,7 @@ import json
 
 from risk.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from risk.engine import RiskEngine
+from risk.notional_limits import InstrumentExposureGuard
 from risk.schemas import MarketContext, OrderIntent, PortfolioMetrics
 
 
@@ -19,7 +20,8 @@ def main() -> None:
                 max_loss_absolute=300.0,
                 cooldown_seconds=120,
             )
-        )
+        ),
+        exposure_guard=InstrumentExposureGuard(max_capital_pct=0.1),
     )
 
     market = MarketContext(instrument_id="BTC-USDT-SWAP", last_price=34000, mid_price=34010)

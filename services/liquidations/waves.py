@@ -300,6 +300,7 @@ class WaveDetector:
             metrics.flv < metrics.baseline and abs(metrics.price_change_pct) < self.settle_threshold
         )
         absorbing = metrics.price_drop_pct < self.settle_threshold and metrics.flv > metrics.baseline
+        short_absorb = absorbing and liquidation_side == "short"
         top_condition = (
             metrics.price_rise_pct >= self.price_drop_threshold
             and metrics.flv > metrics.baseline * self.multiplier
@@ -318,6 +319,15 @@ class WaveDetector:
             signal_text = f"Wave {state.current_wave} 进行中"
             signal_class = "wave-signal-warn"
             severity = 4
+        elif short_absorb:
+            status = "顶部预警"
+            signal_text = "空单被强平 → 顶部信号"
+            base_text = "空单被强平 → 顶部信号"
+            signal_text = f"{base_text} · {liquidation_label}" if liquidation_label else base_text
+            signal_class = "wave-signal-warn"
+            signal_code = "top_signal"
+            direction = "sell"
+            severity = 3
         elif absorbing:
             status = "吸收"
             signal_text = "强平被吸收 → 底部信号"

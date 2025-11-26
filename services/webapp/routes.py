@@ -205,6 +205,7 @@ _DEFAULT_RISK_SETTINGS = {
     "liquidation_same_direction_count": 4,
     "liquidation_opposite_count": 3,
     "liquidation_silence_seconds": 300,
+    "max_capital_pct_per_instrument": 0.1,
 }
 
 
@@ -254,6 +255,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
             "liquidation_same_direction_count",
             "liquidation_opposite_count",
             "liquidation_silence_seconds",
+            "max_capital_pct_per_instrument",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -271,6 +273,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     same_direction_count = int(config.get("liquidation_same_direction_count", 4))
     opposite_count = int(config.get("liquidation_opposite_count", 3))
     silence_seconds = float(config.get("liquidation_silence_seconds", 300.0))
+    max_capital_pct = float(config.get("max_capital_pct_per_instrument", 0.0))
     price = max(0.001, min(0.5, price))
     drawdown = max(0.1, min(95.0, drawdown))
     max_loss = max(1.0, max_loss)
@@ -293,6 +296,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     same_direction_count = max(1, min(20, same_direction_count))
     opposite_count = max(0, min(20, opposite_count))
     silence_seconds = max(0.0, min(300.0, silence_seconds))
+    max_capital_pct = max(0.0, min(1.0, max_capital_pct))
     return {
         "price_tolerance_pct": price,
         "max_drawdown_pct": drawdown,
@@ -311,6 +315,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
         "liquidation_same_direction_count": same_direction_count,
         "liquidation_opposite_count": opposite_count,
         "liquidation_silence_seconds": silence_seconds,
+        "max_capital_pct_per_instrument": max_capital_pct,
     }
 
 
@@ -511,10 +516,11 @@ def get_risk_settings() -> dict:
             "max_drawdown_pct": float(_RISK_SETTINGS["max_drawdown_pct"]),
             "max_loss_absolute": float(_RISK_SETTINGS["max_loss_absolute"]),
             "cooldown_seconds": int(_RISK_SETTINGS["cooldown_seconds"]),
-            "min_notional_usd": float(_RISK_SETTINGS.get("min_notional_usd", 0.0)),
-            "max_order_notional_usd": float(_RISK_SETTINGS.get("max_order_notional_usd", 0.0)),
-            "max_position": float(_RISK_SETTINGS.get("max_position", 0.0)),
-            "take_profit_pct": float(_RISK_SETTINGS.get("take_profit_pct", 0.0)),
+        "min_notional_usd": float(_RISK_SETTINGS.get("min_notional_usd", 0.0)),
+        "max_order_notional_usd": float(_RISK_SETTINGS.get("max_order_notional_usd", 0.0)),
+        "max_position": float(_RISK_SETTINGS.get("max_position", 0.0)),
+        "max_capital_pct_per_instrument": float(_RISK_SETTINGS.get("max_capital_pct_per_instrument", 0.0)),
+        "take_profit_pct": float(_RISK_SETTINGS.get("take_profit_pct", 0.0)),
             "stop_loss_pct": float(_RISK_SETTINGS.get("stop_loss_pct", 0.0)),
             "position_take_profit_pct": float(_RISK_SETTINGS.get("position_take_profit_pct", 5.0)),
             "position_stop_loss_pct": float(_RISK_SETTINGS.get("position_stop_loss_pct", 3.0)),
@@ -551,6 +557,7 @@ def update_risk_settings(
     liquidation_same_direction_count: int,
     liquidation_opposite_count: int,
     liquidation_silence_seconds: int,
+    max_capital_pct_per_instrument: float,
 ) -> dict:
     """Update risk parameters and persist them to config.py."""
     try:
@@ -572,6 +579,7 @@ def update_risk_settings(
         same_direction_val = int(liquidation_same_direction_count)
         opposite_count_val = int(liquidation_opposite_count)
         silence_seconds_val = int(liquidation_silence_seconds)
+        max_capital_pct_percent = float(max_capital_pct_per_instrument)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="数值需要为数字。")
     try:
@@ -620,6 +628,9 @@ def update_risk_settings(
     if silence_seconds_val < 0 or silence_seconds_val > 300:
         raise HTTPException(status_code=400, detail="冷静时长需在 0-300 秒之间。")
 
+    if max_capital_pct_percent < 0 or max_capital_pct_percent > 100:
+        raise HTTPException(status_code=400, detail="单币对最大占用比例应在 0-100% 之间")
+    max_capital_pct = max(0.0, min(1.0, max_capital_pct_percent / 100.0))
     normalized = {
         "price_tolerance_pct": price,
         "max_drawdown_pct": drawdown,
@@ -640,6 +651,7 @@ def update_risk_settings(
         "liquidation_same_direction_count": same_direction_val,
         "liquidation_opposite_count": opposite_count_val,
         "liquidation_silence_seconds": silence_seconds_val,
+        "max_capital_pct_per_instrument": max_capital_pct,
     }
     with _RISK_SETTINGS_LOCK:
         for key, value in normalized.items():

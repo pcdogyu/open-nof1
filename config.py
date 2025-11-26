@@ -51,7 +51,7 @@ TRADABLE_INSTRUMENTS = [   'XRP-USDT-SWAP',
     'PUMP-USDT-SWAP']
 
 # Default polling interval (seconds) for the market data pipeline loop.
-PIPELINE_POLL_INTERVAL = 120
+PIPELINE_POLL_INTERVAL = 3600
 
 # Web OKX page cache TTL (seconds) for Influx-backed snapshots.
 OKX_CACHE_TTL_SECONDS = 600
@@ -114,11 +114,12 @@ RISK_SETTINGS = {   'price_tolerance_pct': 0.02,
     'stop_loss_pct': 0.0,
     'position_take_profit_pct': 5.0,
     'position_stop_loss_pct': 3.0,
-    'default_leverage': 2,
+    'default_leverage': 1,
     'max_leverage': 125,
     'pyramid_max_orders': 5,
     'pyramid_reentry_pct': 2.0,
     'liquidation_notional_threshold': 10000.0,
     'liquidation_same_direction_count': 5,
     'liquidation_opposite_count': 1,
-    'liquidation_silence_seconds': 15}
+    'liquidation_silence_seconds': 60,
+    'max_capital_pct_per_instrument': 0.1}
