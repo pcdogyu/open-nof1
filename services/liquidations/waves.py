@@ -303,7 +303,7 @@ class WaveDetector:
         short_absorb = absorbing and liquidation_side == "short"
         top_condition = (
             metrics.price_rise_pct >= self.price_drop_threshold
-            and metrics.flv > metrics.baseline * self.multiplier
+            and metrics.lpi >= self.multiplier
         )
         short_reversal = top_condition and liquidation_side == "short"
 
@@ -345,6 +345,14 @@ class WaveDetector:
             signal_code = "short_reversal"
             direction = "sell"
             severity = 4
+        elif flv_dropping and liquidation_side == "short":
+            status = "衰减"
+            base_text = "空单爆仓量快速下降"
+            signal_text = f"{base_text} · {liquidation_label}" if liquidation_label else base_text
+            signal_class = "wave-signal-bottom"
+            signal_code = "short_decay"
+            direction = "buy"
+            severity = 2
         elif top_condition:
             status = "顶部预警"
             signal_text = "顶部信号"

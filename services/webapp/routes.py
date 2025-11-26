@@ -1494,13 +1494,16 @@ def place_manual_okx_order(
     stop_loss_pct = float(risk_config.get("stop_loss_pct", 0.0))
     entry_price_hint: float | None = None
 
+    margin_mode_value = _choose_margin_mode(instrument_id, meta, margin_mode)
+    leverage_value = _resolve_leverage(meta)
+
     payload: dict[str, object] = {
         "instrument_id": instrument_id.upper(),
         "side": normalized_side,
         "order_type": normalized_type,
         "size": str(size),
-        "margin_mode": _choose_margin_mode(instrument_id, meta, margin_mode),
-        "leverage": _resolve_leverage(meta),
+        "margin_mode": margin_mode_value,
+        "leverage": leverage_value,
     }
     if normalized_type == "limit":
         if price is None:
@@ -1519,6 +1522,15 @@ def place_manual_okx_order(
     client = OkxPaperClient()
     try:
         client.authenticate(credentials)
+        try:
+            client.set_leverage(
+                instrument_id=payload["instrument_id"],
+                leverage=leverage_value,
+                margin_mode=margin_mode_value,
+                position_side=(payload.get("pos_side") if isinstance(payload.get("pos_side"), str) else None),
+            )
+        except OkxClientError as exc:
+            raise HTTPException(status_code=400, detail=f"设置杠杆失败: {exc}") from exc
         if entry_price_hint is None:
             try:
                 ticker = client.fetch_ticker(payload["instrument_id"])

@@ -2841,7 +2841,7 @@ LIQUIDATION_TEMPLATE = r"""
         </label>
         <span>最后更新：<span class="timestamp" id="liquidations-updated">{updated_at}</span></span>
     </div>
-    <div class="payload-panel" id="okx-payload-panel">
+    <div class="payload-panel" id="okx-payload-panel" hidden>
         <h3>OKX Payload</h3>
         <pre id="okx-payload-display">等待买卖操作后显示请求体。</pre>
     </div>

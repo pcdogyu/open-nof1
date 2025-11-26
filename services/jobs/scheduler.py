@@ -2337,12 +2337,13 @@ def _place_order(meta: Dict[str, str], intent: OrderIntent, entry_price: float |
         return None, str(exc)
 
     try:
+        margin_mode = _choose_margin_mode(intent.instrument_id, meta)
         payload: Dict[str, object] = {
             "instrument_id": intent.instrument_id,
             "side": intent.side,
             "order_type": intent.order_type,
             "size": intent.size,
-            "margin_mode": _choose_margin_mode(intent.instrument_id, meta),
+            "margin_mode": margin_mode,
         }
         meta_payload = intent.metadata if isinstance(intent.metadata, dict) else {}
         leverage_value = _resolve_leverage(meta, meta_payload.get("leverage"))
@@ -2374,6 +2375,22 @@ def _place_order(meta: Dict[str, str], intent: OrderIntent, entry_price: float |
         )
         raw_response = None
         try:
+            try:
+                client.set_leverage(
+                    instrument_id=payload["instrument_id"],
+                    leverage=leverage_value,
+                    margin_mode=margin_mode,
+                    position_side=str(payload.get("pos_side")).upper() if payload.get("pos_side") else None,
+                )
+            except OkxClientError as exc:
+                logger.error(
+                    "[%s] Failed to set leverage %.2f for %s: %s",
+                    account_id,
+                    leverage_value,
+                    payload["instrument_id"],
+                    exc,
+                )
+                raise
             result = client.place_order(payload)
             raw_response = result.get("raw")
             return result, None

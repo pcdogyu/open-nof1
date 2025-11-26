@@ -178,6 +178,30 @@ class OkxPaperClient(ExchangeClient):
             "raw": response,
         }
 
+    def set_leverage(
+        self,
+        *,
+        instrument_id: str,
+        leverage: float,
+        margin_mode: str,
+        position_side: Optional[str] = None,
+    ) -> dict:
+        """Configure leverage for a specific instrument before placing orders."""
+        if leverage <= 0:
+            raise ValueError("Leverage must be positive")
+        normalized_mode = (margin_mode or "cross").lower()
+        if normalized_mode not in {"cross", "isolated"}:
+            normalized_mode = "cross"
+        body: dict = {
+            "instId": instrument_id,
+            "lever": str(leverage),
+            "mgnMode": normalized_mode,
+        }
+        if normalized_mode == "isolated" and position_side:
+            body["posSide"] = position_side.upper()
+        response = self._request("POST", "/api/v5/account/set-leverage", json_body=body)
+        return _single_item(response)
+
     def cancel_order(self, order_id: str, instrument_id: Optional[str] = None) -> dict:
         if not instrument_id:
             raise ValueError("instrument_id is required to cancel an OKX order")

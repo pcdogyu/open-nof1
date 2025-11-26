@@ -59,3 +59,11 @@ data/logs/ai_signals.jsonl
 .gitignore
 services/webapp/__pycache__/main.cpython-312.pyc
 services/webapp/__pycache__/routes.cpython-312.pyc
+__pycache__/config.cpython-313.pyc
+exchanges/okx/__pycache__/paper.cpython-313.pyc
+risk/__pycache__/__init__.cpython-313.pyc
+risk/__pycache__/engine.cpython-313.pyc
+risk/__pycache__/notional_limits.cpython-313.pyc
+services/jobs/__pycache__/scheduler.cpython-313.pyc
+services/webapp/__pycache__/main.cpython-313.pyc
+services/webapp/__pycache__/routes.cpython-313.pyc
