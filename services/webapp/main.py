@@ -136,6 +136,8 @@ def okx_manual_order(
     display_type = "限价" if normalized_type == "limit" else "市价"
     size_text = _fmt_decimal(size)
     price_text = "市价" if price is None else _fmt_decimal(price)
+    amount_value = None if price is None else size * price
+    amount_text = f"{amount_value:.2f} USD" if amount_value is not None else "市价撮合"
     margin_label = _margin_label(margin_mode)
     info_params = {
         "order_account": normalized_account,
@@ -170,10 +172,20 @@ def okx_manual_order(
             price=price,
             margin_mode=(margin_mode or "").strip() or None,
         )
-        detail = result.get("message") or result.get("order_id") or ""
-        return _build_redirect("success", str(detail))
+        order_id_value = result.get("order_id")
+        core_detail = (
+            f"{display_side}{normalized_instrument} 数量 {size_text} 张，价格 {price_text}，金额 {amount_text}"
+        )
+        if order_id_value:
+            success_detail = f"订单ID {order_id_value} · {core_detail}"
+        else:
+            success_detail = core_detail
+        return _build_redirect("success", success_detail)
     except Exception as exc:
-        return _build_redirect("error", str(exc))
+        error_detail = (
+            f"{display_side}{normalized_instrument} 数量 {size_text} 张 下单失败：{exc}"
+        )
+        return _build_redirect("error", error_detail)
 
 
 @app.post("/okx/close-position", include_in_schema=False)
@@ -183,23 +195,69 @@ def okx_close_position(
     position_side: str = Form(...),
     quantity: float = Form(...),
     margin_mode: Optional[str] = Form(None),
+    action_label: str = Form(""),
+    reference_price: str = Form(""),
+    side_display: str = Form(""),
 ) -> RedirectResponse:
+    def _fmt_decimal(value: float) -> str:
+        text = f"{value:.8f}"
+        text = text.rstrip("0").rstrip(".")
+        return text or "0"
+
+    instrument_display = instrument_id.strip().upper()
+    action_text = (action_label or "").strip() or "平仓"
+    side_label = (side_display or "").strip()
+    if not side_label:
+        normalized = position_side.strip().lower()
+        if normalized in {"long", "buy"}:
+            side_label = "多单"
+        elif normalized in {"short", "sell"}:
+            side_label = "空单"
+        else:
+            side_label = position_side
+    qty_text = _fmt_decimal(quantity)
+    reference_value: Optional[float]
+    try:
+        reference_value = float(reference_price) if reference_price else None
+    except ValueError:
+        reference_value = None
+    if reference_value is not None and reference_value <= 0:
+        reference_value = None
+    if reference_value is not None:
+        price_text = _fmt_decimal(reference_value)
+        amount_value = reference_value * quantity
+        amount_text = f"{amount_value:.2f} USD"
+    else:
+        price_text = "市价"
+        amount_text = "市价撮合"
+
+    def _build_detail(order_id: object | None) -> str:
+        core = (
+            f"{instrument_display} · {side_label} · {action_text} 数量 {qty_text} 张 · 金额 {amount_text}"
+        )
+        if reference_value is not None:
+            core += f" · 参考价 {price_text}"
+        if order_id:
+            return f"订单ID {order_id} · {core}"
+        return core
+
     try:
         result = routes.close_okx_position(
             account_id=account_id.strip(),
-            instrument_id=instrument_id.strip(),
+            instrument_id=instrument_display,
             position_side=position_side.strip(),
             quantity=quantity,
             margin_mode=(margin_mode or "").strip() or None,
         )
-        detail = result.get("order_id") or ""
+        detail = _build_detail(result.get("order_id"))
         return RedirectResponse(
-            url=f"/okx?refresh=1&order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
+            url=f"/okx?refresh=1&order_status=success&detail={urllib.parse.quote_plus(detail)}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
     except Exception as exc:
+        error_detail = _build_detail(None) + f" · 错误：{exc}"
         return RedirectResponse(
-            url=f"/okx?refresh=1&order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
+            url=f"/okx?refresh=1&order_status=error&detail={urllib.parse.quote_plus(error_detail)}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
@@ -1341,7 +1399,11 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             amount_text = _format_number(amount_value, digits=2) if amount_value is not None else "--"
             return f"币对 {instrument_value} {action_label} 数量：{qty_text}，金额：{amount_text} USD"
 
-        def _close_form(label: str, qty_value: str, tooltip: str) -> str:
+        price_reference_text = ""
+        if price_reference and price_reference > 0:
+            price_reference_text = _fmt_quantity(price_reference)
+
+        def _close_form(label: str, qty_value: str, tooltip: str, price_hint: str) -> str:
             btn_class = "btn-close"
             if label == "全部平仓":
                 btn_class += " btn-close-full"
@@ -1351,6 +1413,9 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
                 f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
                 f"<input type='hidden' name='position_side' value='{side_value}'>"
                 f"<input type='hidden' name='quantity' value='{qty_value}'>"
+                f"<input type='hidden' name='action_label' value='{esc(label)}'>"
+                f"<input type='hidden' name='reference_price' value='{price_hint}'>"
+                f"<input type='hidden' name='side_display' value='{side_display_escaped}'>"
                 f"<button type='submit' class='{btn_class}' title='{esc(tooltip)}'>{label}</button>"
                 "</form>"
             )
@@ -1384,18 +1449,19 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
                 scale_qty = max(qty * scale_portion, 0.0001)
                 close_qty_text = _fmt_quantity(close_qty)
                 scale_qty_text = _fmt_quantity(scale_qty)
-                close_tooltip = _build_action_tooltip("平仓", close_qty_text, _calc_amount(close_qty, price_reference))
+                close_amount = _calc_amount(close_qty, price_reference)
+                close_tooltip = _build_action_tooltip("平仓", close_qty_text, close_amount)
                 scale_tooltip = _build_action_tooltip("补仓", scale_qty_text, _calc_amount(scale_qty, price_reference))
                 stack = (
                     "<div class='action-pair'>"
                     f"{_scale_form(scale_label, esc(scale_qty_text), scale_tooltip)}"
-                    f"{_close_form(close_label, esc(close_qty_text), close_tooltip)}"
+                    f"{_close_form(close_label, esc(close_qty_text), close_tooltip, price_reference_text)}"
                     "</div>"
                 )
                 action_pairs.append(stack)
         action_pairs.append(
             "<div class='action-pair full'>"
-            f"{_close_form('全部平仓', esc(total_qty_text), _build_action_tooltip('平仓', total_qty_text, _calc_amount(qty, price_reference)))}"
+            f"{_close_form('全部平仓', esc(total_qty_text), _build_action_tooltip('平仓', total_qty_text, _calc_amount(qty, price_reference)), price_reference_text)}"
             "</div>"
         )
         action_html = (

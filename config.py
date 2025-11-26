@@ -51,6 +51,7 @@ TRADABLE_INSTRUMENTS = [   'XRP-USDT-SWAP',
 
 # Default polling interval (seconds) for the market data pipeline loop.
 PIPELINE_POLL_INTERVAL = 3600
+LIQUIDATION_INSTRUMENT_OVERRIDES = {}
 
 # Web OKX page cache TTL (seconds) for Influx-backed snapshots.
 OKX_CACHE_TTL_SECONDS = 600
