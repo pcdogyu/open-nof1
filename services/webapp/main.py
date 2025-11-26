@@ -11,7 +11,7 @@ import logging
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from string import Template
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Form, status, Request
@@ -404,12 +404,15 @@ def pipeline_settings_page() -> HTMLResponse:
 
 
 @app.post("/settings/update", include_in_schema=False)
-def submit_pipeline_settings(
+async def submit_pipeline_settings(
+    request: Request,
     poll_interval: int = Form(...),
     instruments: str = Form(""),
 ) -> RedirectResponse:
     instrument_list = _parse_instrument_input(instruments)
-    routes.update_pipeline_settings(instrument_list, poll_interval)
+    form_data = await request.form()
+    overrides = _collect_override_payload(form_data, instrument_list)
+    routes.update_pipeline_settings(instrument_list, poll_interval, overrides)
     return RedirectResponse(url="/settings", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -1081,6 +1084,12 @@ def _render_settings_page(settings: dict, catalog: Sequence[dict]) -> str:
 
     instruments_text = "\n".join(instruments)
     current_value_attr = ",".join(instruments)
+    overrides_map_raw = settings.get("liquidation_overrides") or {}
+    overrides_map = (
+        {str(symbol).upper(): dict(values) for symbol, values in overrides_map_raw.items()}
+        if isinstance(overrides_map_raw, dict)
+        else {}
+    )
 
     usdt_records: list[tuple[str, str]] = []
     for entry in catalog:
@@ -1128,9 +1137,49 @@ def _render_settings_page(settings: dict, catalog: Sequence[dict]) -> str:
     )
     catalog_count = len(catalog)
     if catalog_count:
-        catalog_hint = f"已缓存 {catalog_count} 个 OKX 交易对信息"
+        catalog_hint = f"已缓存 {catalog_count} 条 OKX 合约信息"
     else:
-        catalog_hint = "未发现已缓存的币对，请点击\"刷新币对库\" 按钮获取"
+        catalog_hint = "未发现已缓存的币对，请点击“刷新合约库”按钮获取"
+
+    override_rows: list[str] = []
+    if instruments:
+        for inst in instruments:
+            symbol = inst.strip().upper()
+            entry = overrides_map.get(symbol) or overrides_map.get(inst)
+            same_val = entry.get("same_direction") if entry else None
+            opp_val = entry.get("opposite_direction") if entry else None
+            notional_val = entry.get("notional_threshold") if entry else None
+            silence_val = entry.get("silence_seconds") if entry else None
+
+            def _format_input_value(value: object, digits: int = 2) -> str:
+                if value in (None, ""):
+                    return ""
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    return ""
+                if numeric.is_integer():
+                    return str(int(numeric))
+                return f"{numeric:.{digits}f}".rstrip("0").rstrip(".")
+
+            same_attr = esc(str(int(same_val))) if same_val is not None else ""
+            opp_attr = esc(str(int(opp_val))) if opp_val is not None else ""
+            notional_attr = esc(_format_input_value(notional_val))
+            silence_attr = esc(_format_input_value(silence_val, digits=1))
+            inst_label = esc(inst)
+            inst_name = inst.strip().upper()
+            override_rows.append(
+                "<tr>"
+                f"<td>{inst_label}</td>"
+                f"<td><input type=\"number\" min=\"1\" max=\"50\" name=\"override_same_{inst_name}\" value=\"{same_attr}\" placeholder=\"继承\"></td>"
+                f"<td><input type=\"number\" min=\"0\" max=\"50\" name=\"override_opp_{inst_name}\" value=\"{opp_attr}\" placeholder=\"继承\"></td>"
+                f"<td><input type=\"number\" min=\"0\" step=\"1\" name=\"override_notional_{inst_name}\" value=\"{notional_attr}\" placeholder=\"继承\"></td>"
+                f"<td><input type=\"number\" min=\"0\" max=\"3600\" name=\"override_silence_{inst_name}\" value=\"{silence_attr}\" placeholder=\"继承\"></td>"
+                "</tr>"
+            )
+    else:
+        override_rows.append("<tr><td colspan=\"5\" class=\"empty-state\">请先添加可交易币对。</td></tr>")
+    override_rows_html = "\n".join(override_rows)
 
     return SETTINGS_TEMPLATE.format(
         poll_interval=poll_interval,
@@ -1140,6 +1189,7 @@ def _render_settings_page(settings: dict, catalog: Sequence[dict]) -> str:
         current_instruments_value=esc(current_value_attr),
         datalist_options_usdt=options_html_usdt,
         catalog_hint=esc(catalog_hint),
+        override_rows=override_rows_html,
     )
 
 
@@ -1732,6 +1782,61 @@ def _parse_instrument_input(raw: str) -> list[str]:
     return cleaned
 
 
+def _collect_override_payload(form: Mapping[str, object], instruments: Sequence[str]) -> dict[str, dict]:
+    overrides: dict[str, dict] = {}
+    if not instruments:
+        return overrides
+
+    def _parse_int(value: object, minimum: Optional[int] = None, maximum: Optional[int] = None) -> Optional[int]:
+        text = str(value).strip() if isinstance(value, str) else str(value) if value is not None else ""
+        if not text:
+            return None
+        try:
+            number = int(float(text))
+        except (TypeError, ValueError):
+            return None
+        if minimum is not None:
+            number = max(minimum, number)
+        if maximum is not None:
+            number = min(maximum, number)
+        return number
+
+    def _parse_float(value: object, minimum: Optional[float] = None, maximum: Optional[float] = None) -> Optional[float]:
+        text = str(value).strip() if isinstance(value, str) else str(value) if value is not None else ""
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except (TypeError, ValueError):
+            return None
+        if minimum is not None:
+            number = max(minimum, number)
+        if maximum is not None:
+            number = min(maximum, number)
+        return number
+
+    for inst in instruments:
+        symbol = inst.strip().upper()
+        if not symbol:
+            continue
+        same_val = _parse_int(form.get(f"override_same_{inst}"), minimum=1, maximum=50)
+        opp_val = _parse_int(form.get(f"override_opp_{inst}"), minimum=0, maximum=50)
+        notional_val = _parse_float(form.get(f"override_notional_{inst}"), minimum=0.0)
+        silence_val = _parse_float(form.get(f"override_silence_{inst}"), minimum=0.0, maximum=3600.0)
+        entry: dict[str, object] = {}
+        if same_val is not None:
+            entry["same_direction"] = same_val
+        if opp_val is not None:
+            entry["opposite_direction"] = opp_val
+        if notional_val is not None:
+            entry["notional_threshold"] = notional_val
+        if silence_val is not None:
+            entry["silence_seconds"] = silence_val
+        if entry:
+            overrides[symbol] = entry
+    return overrides
+
+
 def _format_asia_shanghai(value: Optional[str]) -> str:
     if not value:
         return "N/A"
@@ -1992,6 +2097,11 @@ SETTINGS_TEMPLATE = r"""
         .hint {{ color: #94a3b8; font-size: 0.85rem; margin: 0 0 12px 0; }}
         .updated {{ color: #94a3b8; font-size: 0.9rem; margin-top: -0.2rem; }}
         .timestamp {{ color: #38bdf8; }}
+        .override-table {{ width: 100%; border-collapse: collapse; margin-top: 0.5rem; }}
+        .override-table th, .override-table td {{ border: 1px solid #334155; padding: 8px 10px; font-size: 0.85rem; text-align: left; }}
+        .override-table th {{ background-color: rgba(15, 23, 42, 0.6); }}
+        .override-table td input {{ width: 100%; box-sizing: border-box; }}
+        .override-table .empty-state {{ text-align: center; padding: 12px 0; color: #94a3b8; }}
         @media (max-width: 768px) {{
             .inline-form {{ flex-direction: column; align-items: stretch; }}
             .inline-form label {{ width: 100%; }}
@@ -2028,6 +2138,22 @@ SETTINGS_TEMPLATE = r"""
                 <label for="instrument-list">当前合约列表（每行一个）</label>
                 <textarea id="instrument-list" name="instruments" spellcheck="false">{instruments_text}</textarea>
                 <div class="chip-row">{chips_html}</div>
+                <h3>爆仓阈值覆盖</h3>
+                <p class="hint">留空表示继承“风险控制”中的全局参数；阈值仅对当前列出的币对生效。</p>
+                <table class="override-table">
+                    <thead>
+                        <tr>
+                            <th>合约</th>
+                            <th>同向爆仓笔数</th>
+                            <th>逆向确认笔数</th>
+                            <th>名义金额阈值（USDT）</th>
+                            <th>同向冷静期（秒）</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {override_rows}
+                    </tbody>
+                </table>
                 <button type="submit">保存配置</button>
             </form>
         </section>
@@ -2168,7 +2294,7 @@ RISK_TEMPLATE = r"""
         <a href="/orderbook" class="nav-link">盘口深度</a>
         <a href="/liquidation-map" class="nav-link">清算地图</a>
         <a href="/prompts" class="nav-link">提示词</a>
-        <a href="/settings" class="nav-link">管道设置</a>
+        <a href="/settings" class="nav-link">币对配置</a>
         <a href="/risk" class="nav-link active">风险控制</a>
         <a href="/scheduler" class="nav-link">调度器</a>
         <a href="/orders/debug" class="nav-link">下单链路</a>
@@ -4117,9 +4243,9 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         <a href="/orderbook" class="nav-link">市场深度</a>
         <a href="/liquidation-map" class="nav-link active">清算地图</a>
         <a href="/prompts" class="nav-link">提示词</a>
-        <a href="/settings" class="nav-link">管道配置</a>
+        <a href="/settings" class="nav-link">币对配置</a>
         <a href="/risk" class="nav-link">风控设置</a>
-        <a href="/scheduler" class="nav-link">计划任务</a>
+        <a href="/scheduler" class="nav-link">调度器</a>
         <a href="/orders/debug" class="nav-link">下单调试</a>
     </nav>
     <h1>ETHUSDT 清算地图</h1>

@@ -65,6 +65,7 @@ try:
         OKX_ACCOUNTS,
         PIPELINE_POLL_INTERVAL,
         TRADABLE_INSTRUMENTS,
+        LIQUIDATION_INSTRUMENT_OVERRIDES,
     )
     try:
         from config import OKX_CACHE_TTL_SECONDS as _OKX_TTL
@@ -80,6 +81,7 @@ try:
         LIQUIDATION_CHECK_INTERVAL = _DEFAULT_LIQUIDATION_INTERVAL
     else:
         LIQUIDATION_CHECK_INTERVAL = _LIQ_INTERVAL
+    _LIQUIDATION_OVERRIDE_DEFAULTS = dict(LIQUIDATION_INSTRUMENT_OVERRIDES or {})
 except ImportError:  # pragma: no cover - fallback for test envs
     MODEL_DEFAULTS = {
         "deepseek-v1": {
@@ -110,6 +112,7 @@ except ImportError:  # pragma: no cover - fallback for test envs
     LIQUIDATION_CHECK_INTERVAL = _DEFAULT_LIQUIDATION_INTERVAL
     _OKX_TTL = 600
     _RISK_DEFAULTS = {}
+    _LIQUIDATION_OVERRIDE_DEFAULTS = {}
 router = APIRouter()
 _OKX_CACHE_TTL_SECONDS = int(_OKX_TTL)
 
@@ -173,6 +176,7 @@ _PIPELINE_SETTINGS: dict[str, object] = {
     "tradable_instruments": list(TRADABLE_INSTRUMENTS),
     "poll_interval": int(PIPELINE_POLL_INTERVAL),
     "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+    "liquidation_overrides": {},
 }
 
 _SCHEDULER_SETTINGS_LOCK = Lock()
@@ -329,6 +333,13 @@ _ORDERBOOK_WRITER: InfluxWriter | None = None
 OKX_REST_BASE = "https://www.okx.com"
 
 
+class InstrumentOverridePayload(BaseModel):
+    same_direction: Optional[int] = Field(None, ge=1, le=50)
+    opposite_direction: Optional[int] = Field(None, ge=0, le=50)
+    notional_threshold: Optional[float] = Field(None, ge=0)
+    silence_seconds: Optional[int] = Field(None, ge=0, le=3600)
+
+
 class PipelineSettingsPayload(BaseModel):
     """Request payload for updating pipeline configuration."""
 
@@ -337,6 +348,10 @@ class PipelineSettingsPayload(BaseModel):
     )
     poll_interval: int = Field(
         ..., ge=30, le=3600, description="Polling interval for the data pipeline in seconds."
+    )
+    liquidation_overrides: Optional[Dict[str, InstrumentOverridePayload]] = Field(
+        default=None,
+        description="Optional per-instrument liquidation thresholds.",
     )
 
     @validator("tradable_instruments")
@@ -417,10 +432,15 @@ def get_pipeline_settings() -> dict:
             "tradable_instruments": list(_PIPELINE_SETTINGS["tradable_instruments"]),
             "poll_interval": int(_PIPELINE_SETTINGS["poll_interval"]),
             "updated_at": _PIPELINE_SETTINGS["updated_at"],
+            "liquidation_overrides": _clone_override_map(_PIPELINE_SETTINGS.get("liquidation_overrides")),  # type: ignore[arg-type]
         }
 
 
-def update_pipeline_settings(tradable_instruments: List[str], poll_interval: int) -> dict:
+def update_pipeline_settings(
+    tradable_instruments: List[str],
+    poll_interval: int,
+    liquidation_overrides: Optional[Dict[str, Dict[str, object]]] = None,
+) -> dict:
     """Update pipeline settings and persist them to config.py."""
     normalized = _normalize_instrument_list(tradable_instruments)
     if not normalized:
@@ -430,17 +450,27 @@ def update_pipeline_settings(tradable_instruments: List[str], poll_interval: int
         raise HTTPException(status_code=400, detail="Polling interval must be between 30 and 3600 seconds.")
 
     global TRADABLE_INSTRUMENTS, PIPELINE_POLL_INTERVAL
+    base_overrides = liquidation_overrides
+    with _PIPELINE_SETTINGS_LOCK:
+        if base_overrides is None:
+            base_overrides = _PIPELINE_SETTINGS.get("liquidation_overrides")  # type: ignore[assignment]
+    sanitized_overrides = _sanitize_liquidation_overrides(base_overrides, normalized)
     with _PIPELINE_SETTINGS_LOCK:
         _PIPELINE_SETTINGS["tradable_instruments"] = normalized
         _PIPELINE_SETTINGS["poll_interval"] = poll
         _PIPELINE_SETTINGS["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
+        _PIPELINE_SETTINGS["liquidation_overrides"] = sanitized_overrides
         TRADABLE_INSTRUMENTS = normalized
         PIPELINE_POLL_INTERVAL = poll
-        _persist_pipeline_settings(normalized, poll)
+        _persist_pipeline_settings(normalized, poll, sanitized_overrides)
     try:
         scheduler_module.refresh_pipeline(normalized)
     except Exception as exc:  # pragma: no cover - scheduler optional
         logger.debug("Unable to refresh scheduler pipeline: %s", exc)
+    try:
+        scheduler_module.update_liquidation_overrides(sanitized_overrides)
+    except Exception as exc:
+        logger.debug("Unable to refresh liquidation overrides: %s", exc)
     try:
         set_websocket_instruments(normalized)
     except Exception as exc:  # pragma: no cover - websocket optional
@@ -449,6 +479,7 @@ def update_pipeline_settings(tradable_instruments: List[str], poll_interval: int
         "tradable_instruments": list(normalized),
         "poll_interval": poll,
         "updated_at": _PIPELINE_SETTINGS["updated_at"],
+        "liquidation_overrides": _clone_override_map(sanitized_overrides),
     }
 
 
@@ -734,6 +765,98 @@ def _normalize_instrument_list(instruments: List[str]) -> List[str]:
         seen.add(inst_id)
         normalized.append(inst_id)
     return normalized
+
+
+def _sanitize_liquidation_overrides(
+    overrides: Optional[Dict[str, Dict[str, object]]],
+    instruments: Sequence[str],
+) -> dict[str, dict]:
+    allowed = {inst.strip().upper() for inst in instruments if inst and inst.strip()}
+    sanitized: dict[str, dict] = {}
+    if not overrides:
+        return sanitized
+
+    def _parse_int_value(value: object, *, minimum: Optional[int] = None, maximum: Optional[int] = None) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            number = int(float(str(value)))
+        except (TypeError, ValueError):
+            return None
+        if minimum is not None:
+            number = max(minimum, number)
+        if maximum is not None:
+            number = min(maximum, number)
+        return number
+
+    def _parse_float_value(value: object, *, minimum: Optional[float] = None, maximum: Optional[float] = None) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if minimum is not None:
+            number = max(minimum, number)
+        if maximum is not None:
+            number = min(maximum, number)
+        return number
+
+    for key, raw in overrides.items():
+        symbol = str(key or "").strip().upper()
+        if not symbol or (allowed and symbol not in allowed):
+            continue
+        payload = raw or {}
+        entry: dict[str, object] = {}
+        same_val = _parse_int_value(
+            payload.get("same_direction")
+            or payload.get("same_direction_count")
+            or payload.get("same"),
+            minimum=1,
+            maximum=50,
+        )
+        opposite_val = _parse_int_value(
+            payload.get("opposite_direction")
+            or payload.get("opposite_direction_count")
+            or payload.get("opposite"),
+            minimum=0,
+            maximum=50,
+        )
+        notional_val = _parse_float_value(
+            payload.get("notional_threshold")
+            or payload.get("liquidation_notional_threshold")
+            or payload.get("notional"),
+            minimum=0.0,
+        )
+        silence_val = _parse_float_value(
+            payload.get("silence_seconds")
+            or payload.get("liquidation_silence_seconds"),
+            minimum=0.0,
+            maximum=3600.0,
+        )
+        if same_val is not None:
+            entry["same_direction"] = same_val
+        if opposite_val is not None:
+            entry["opposite_direction"] = opposite_val
+        if notional_val is not None:
+            entry["notional_threshold"] = notional_val
+        if silence_val is not None:
+            entry["silence_seconds"] = silence_val
+        if entry:
+            sanitized[symbol] = entry
+    return sanitized
+
+
+def _clone_override_map(data: Optional[Dict[str, Dict[str, object]]]) -> dict[str, dict]:
+    if not data:
+        return {}
+    return {symbol: dict(values) for symbol, values in data.items()}
+
+
+_PIPELINE_SETTINGS["liquidation_overrides"] = _sanitize_liquidation_overrides(
+    _LIQUIDATION_OVERRIDE_DEFAULTS,
+    _PIPELINE_SETTINGS["tradable_instruments"],
+)
 
 
 @router.get("/health", summary="Service health probe")
@@ -1142,7 +1265,13 @@ def pipeline_settings_api() -> dict:
     summary="Update pipeline configuration (interval + instruments)",
 )
 def update_pipeline_settings_api(payload: PipelineSettingsPayload) -> dict:
-    return update_pipeline_settings(payload.tradable_instruments, payload.poll_interval)
+    overrides_payload: Optional[Dict[str, Dict[str, object]]] = None
+    if payload.liquidation_overrides:
+        overrides_payload = {
+            (key or "").strip().upper(): value.dict(exclude_none=True)
+            for key, value in payload.liquidation_overrides.items()
+        }
+    return update_pipeline_settings(payload.tradable_instruments, payload.poll_interval, overrides_payload)
 
 
 @router.get(
@@ -3257,15 +3386,21 @@ def _persist_scheduler_settings(market_interval: int, ai_interval: int, liquidat
         pass
 
 
-def _persist_pipeline_settings(tradable_instruments: List[str], poll_interval: int) -> None:
+def _persist_pipeline_settings(
+    tradable_instruments: List[str],
+    poll_interval: int,
+    overrides: Dict[str, Dict[str, object]],
+) -> None:
     """Persist pipeline tradable instruments and poll interval to config.py."""
     _replace_config_assignment("TRADABLE_INSTRUMENTS", tradable_instruments)
     _replace_config_assignment("PIPELINE_POLL_INTERVAL", poll_interval)
+    _replace_config_assignment("LIQUIDATION_INSTRUMENT_OVERRIDES", overrides)
     try:
         import config as config_module  # type: ignore
 
         config_module.TRADABLE_INSTRUMENTS = tradable_instruments  # type: ignore[attr-defined]
         config_module.PIPELINE_POLL_INTERVAL = poll_interval  # type: ignore[attr-defined]
+        config_module.LIQUIDATION_INSTRUMENT_OVERRIDES = overrides  # type: ignore[attr-defined]
     except ImportError:
         pass
 

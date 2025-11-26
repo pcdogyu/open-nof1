@@ -81,6 +81,7 @@ try:  # pragma: no cover - config is optional for tests
         MARKET_SYNC_INTERVAL,
         OKX_ACCOUNTS,
         TRADABLE_INSTRUMENTS,
+        LIQUIDATION_INSTRUMENT_OVERRIDES,
     )
     try:
         from config import LIQUIDATION_CHECK_INTERVAL as _LIQ_INTERVAL
@@ -92,6 +93,10 @@ try:  # pragma: no cover - config is optional for tests
         from config import RISK_SETTINGS as _RISK_DEFAULTS  # type: ignore[attr-defined]
     except Exception:
         _RISK_DEFAULTS = {}
+    try:
+        _LIQUIDATION_OVERRIDE_DEFAULTS = dict(LIQUIDATION_INSTRUMENT_OVERRIDES or {})
+    except Exception:
+        _LIQUIDATION_OVERRIDE_DEFAULTS = {}
 except ImportError:  # pragma: no cover
     OKX_ACCOUNTS = {}
     TRADABLE_INSTRUMENTS: Sequence[str] = ()
@@ -99,6 +104,7 @@ except ImportError:  # pragma: no cover
     AI_INTERACTION_INTERVAL = 300
     LIQUIDATION_CHECK_INTERVAL = _DEFAULT_LIQUIDATION_INTERVAL
     _RISK_DEFAULTS = {}
+    _LIQUIDATION_OVERRIDE_DEFAULTS = {}
 
 _SCHEDULER: Optional["AsyncIOScheduler"] = None
 _FEATURE_CLIENT: Optional["InfluxDBClient"] = None
@@ -239,6 +245,83 @@ _PIPELINE_SETTINGS = PipelineSettings(
     instruments=list(TRADABLE_INSTRUMENTS) if TRADABLE_INSTRUMENTS else ["BTC-USDT-SWAP"],
     signal_log_path=AI_SIGNAL_LOG_PATH,
 )
+_LIQUIDATION_OVERRIDE_LOCK = Lock()
+_LIQUIDATION_OVERRIDES: Dict[str, Dict[str, float | int]] = {}
+
+
+def _sanitize_liquidation_override_map(
+    raw: Optional[Dict[str, Dict[str, object]]]
+) -> Dict[str, Dict[str, float | int]]:
+    sanitized: Dict[str, Dict[str, float | int]] = {}
+    if not isinstance(raw, dict):
+        return sanitized
+
+    def _parse_int(value: object, minimum: Optional[int] = None, maximum: Optional[int] = None) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            number = int(float(value))
+        except (TypeError, ValueError):
+            return None
+        if minimum is not None:
+            number = max(minimum, number)
+        if maximum is not None:
+            number = min(maximum, number)
+        return number
+
+    def _parse_float(value: object, minimum: Optional[float] = None, maximum: Optional[float] = None) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if minimum is not None:
+            number = max(minimum, number)
+        if maximum is not None:
+            number = min(maximum, number)
+        return number
+
+    for key, payload in raw.items():
+        symbol = str(key or "").strip().upper()
+        if not symbol:
+            continue
+        entry_raw = payload or {}
+        entry: Dict[str, float | int] = {}
+        same_val = _parse_int(
+            entry_raw.get("same_direction") or entry_raw.get("same_direction_count"),
+            minimum=1,
+            maximum=50,
+        )
+        opp_val = _parse_int(
+            entry_raw.get("opposite_direction") or entry_raw.get("opposite_direction_count"),
+            minimum=0,
+            maximum=50,
+        )
+        notional_val = _parse_float(
+            entry_raw.get("notional_threshold") or entry_raw.get("liquidation_notional_threshold"),
+            minimum=0.0,
+        )
+        silence_val = _parse_float(
+            entry_raw.get("silence_seconds") or entry_raw.get("liquidation_silence_seconds"),
+            minimum=0.0,
+            maximum=3600.0,
+        )
+        if same_val is not None:
+            entry["same_direction"] = same_val
+        if opp_val is not None:
+            entry["opposite_direction"] = opp_val
+        if notional_val is not None:
+            entry["notional_threshold"] = notional_val
+        if silence_val is not None:
+            entry["silence_seconds"] = silence_val
+        if entry:
+            sanitized[symbol] = entry
+    return sanitized
+
+
+with _LIQUIDATION_OVERRIDE_LOCK:
+    _LIQUIDATION_OVERRIDES = _sanitize_liquidation_override_map(_LIQUIDATION_OVERRIDE_DEFAULTS)
 _PIPELINE: Optional[MarketDataPipeline] = None
 _RISK_CONFIG_LOCK = Lock()
 _RISK_CONFIG = _sanitize_risk_config(_RISK_DEFAULTS)
@@ -609,6 +692,14 @@ def refresh_pipeline(instruments: Sequence[str]) -> None:
         cash_available=_PIPELINE_SETTINGS.cash_available,
     )
     _close_pipeline()
+
+
+def update_liquidation_overrides(overrides: Dict[str, Dict[str, object]]) -> None:
+    """Update per-instrument liquidation thresholds."""
+    sanitized = _sanitize_liquidation_override_map(overrides)
+    with _LIQUIDATION_OVERRIDE_LOCK:
+        global _LIQUIDATION_OVERRIDES
+        _LIQUIDATION_OVERRIDES = sanitized
 
 
 def start_scheduler() -> None:
@@ -1999,6 +2090,25 @@ def _finalize_liquidation_response(
     base_response.raw_output = raw_output
     return base_response
 
+def _resolve_liquidation_parameters(symbol: str) -> tuple[float, int, int, float]:
+    with _RISK_CONFIG_LOCK:
+        liq_threshold = float(_RISK_CONFIG.get("liquidation_notional_threshold", 50_000.0))
+        same_required = int(_RISK_CONFIG.get("liquidation_same_direction_count", 4))
+        confirmation_required = int(_RISK_CONFIG.get("liquidation_opposite_count", 3))
+        silence_required = float(_RISK_CONFIG.get("liquidation_silence_seconds", 300.0))
+    with _LIQUIDATION_OVERRIDE_LOCK:
+        override = _LIQUIDATION_OVERRIDES.get(symbol.upper())
+    if override:
+        if "notional_threshold" in override:
+            liq_threshold = max(0.0, float(override["notional_threshold"]))
+        if "same_direction" in override:
+            same_required = max(1, int(override["same_direction"]))
+        if "opposite_direction" in override:
+            confirmation_required = max(0, int(override["opposite_direction"]))
+        if "silence_seconds" in override:
+            silence_required = max(0.0, float(override["silence_seconds"]))
+    return liq_threshold, same_required, confirmation_required, silence_required
+
 
 def _evaluate_liquidation_reversal_state(
     instrument: str,
@@ -2017,11 +2127,8 @@ def _evaluate_liquidation_reversal_state(
         price_hint = _try_float(features.get("liq_last_price")) or _try_float(features.get("last_price"))
         if price_hint is not None:
             notional = abs(net_qty) * price_hint
-    with _RISK_CONFIG_LOCK:
-        liq_threshold = float(_RISK_CONFIG.get("liquidation_notional_threshold", 50_000.0))
-        same_required = int(_RISK_CONFIG.get("liquidation_same_direction_count", 4))
-        confirmation_required = int(_RISK_CONFIG.get("liquidation_opposite_count", 3))
-        silence_required = float(_RISK_CONFIG.get("liquidation_silence_seconds", 300.0))
+    symbol = instrument.upper()
+    liq_threshold, same_required, confirmation_required, silence_required = _resolve_liquidation_parameters(symbol)
     zero_confirmation = confirmation_required <= 0
     confirmation_required = max(0, confirmation_required)
     liq_threshold = max(_MIN_LIQUIDATION_NOTIONAL_USD, liq_threshold)
@@ -2033,7 +2140,6 @@ def _evaluate_liquidation_reversal_state(
     silence = (now - event_time).total_seconds()
     if silence < _LIQUIDATION_MIN_EVENT_AGE_SECONDS or silence > _LIQUIDATION_MAX_EVENT_LOOKBACK:
         return None
-    symbol = instrument.upper()
     state = _LIQUIDATION_REVERSAL_WATCH.setdefault(
         symbol,
         {
