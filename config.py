@@ -58,7 +58,7 @@ OKX_CACHE_TTL_SECONDS = 600
 
 # Scheduler defaults (seconds)
 MARKET_SYNC_INTERVAL = 60
-AI_INTERACTION_INTERVAL = 120
+AI_INTERACTION_INTERVAL = 1800
 
 # OKX demo accounts (API keys / secrets / passphrases).
 # Populate secrets/passphrases when available.
@@ -121,4 +121,4 @@ RISK_SETTINGS = {   'price_tolerance_pct': 0.02,
     'liquidation_notional_threshold': 10000.0,
     'liquidation_same_direction_count': 5,
     'liquidation_opposite_count': 1,
-    'liquidation_silence_seconds': 60}
+    'liquidation_silence_seconds': 15}

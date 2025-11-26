@@ -230,7 +230,11 @@ def orderbook_dashboard(request: Request) -> HTMLResponse:
 @app.get("/liquidation-map", include_in_schema=False, response_class=HTMLResponse)
 def liquidation_map_dashboard() -> HTMLResponse:
     default_instrument = "ETH-USDT-SWAP"
-    snapshot = routes.get_orderbook_snapshot(levels=400, instrument=default_instrument)
+    snapshot = routes.get_orderbook_snapshot(
+        levels=400,
+        instrument=default_instrument,
+        force_live=True,
+    )
     instrument_payload: dict | None = None
     for item in snapshot.get("items", []):
         inst_id = (item.get("instrument_id") or "").upper()
@@ -2717,6 +2721,12 @@ LIQUIDATION_TEMPLATE = r"""
             opacity: 0.5;
             cursor: not-allowed;
         }}
+        .order-btn.active {{
+            background: #38bdf8;
+            color: #0f172a;
+            border-color: #38bdf8;
+            font-weight: 700;
+        }}
         .signal-subtext {{ font-size: 0.75rem; color: #94a3b8; margin-top: 4px; display: block; }}
     </style>
 </head>
@@ -2812,6 +2822,7 @@ LIQUIDATION_TEMPLATE = r"""
         const waveTableBody = document.getElementById('wave-body');
         const FETCH_LIMIT = 400;
         let latestItems = [];
+        let activeSignals = new Map();
         const fmtNumber = (value, digits) => {{
           if (value === null || value === undefined || value === '') {{ return '-'; }}
           const num = Number(value);
@@ -3046,27 +3057,60 @@ LIQUIDATION_TEMPLATE = r"""
             return true;
           }});
         }};
-        const renderRows = () => {{
+                const renderRows = () => {{
+
           const body = document.getElementById('liquidations-body');
+
           body.innerHTML = '';
+
           const filtered = applyFilters(latestItems);
+
           if (!filtered.length) {{
-            body.innerHTML = '<tr><td colspan="7" class="empty-state">??????</td></tr>';
+
+            body.innerHTML = '<tr><td colspan="7" class="empty-state">等待数据...</td></tr>';
+
             return;
+
           }}
+
           filtered.forEach((item) => {{
+
             const tr = document.createElement('tr');
+
             const notional = computeNotional(item);
+
             tr.innerHTML = `
+
               <td>${{fmtTimestamp(item.timestamp)}}</td>
+
               <td>${{item.instrument_id || '--'}}</td>
+
               <td>${{fmtNumber(item.long_qty, 2)}}</td>
+
               <td>${{fmtNumber(item.short_qty, 2)}}</td>
+
               <td>${{fmtNumber(item.net_qty, 2)}}</td>
+
               <td>${{fmtNumber(item.last_price, 4)}}</td>
-              <td>${{notional === null ? '-' : fmtNumber(notional, 2)}}</td>`;
+
+              <td>${{notional === null ? '-' : fmtNumber(notional, 2)}}</td>
+
+              <td>
+
+                <div style="display:flex;gap:6px;">
+
+                  <button class="order-btn${{activeSignals.get(item.instrument_id || '--') === 'buy' ? ' active' : ''}}" data-side="buy" data-inst="${{item.instrument_id || '--'}}">买入</button>
+
+                  <button class="order-btn${{activeSignals.get(item.instrument_id || '--') === 'sell' ? ' active' : ''}}" data-side="sell" data-inst="${{item.instrument_id || '--'}}">卖出</button>
+
+                </div>
+
+              </td>`;
+
             body.appendChild(tr);
+
           }});
+
         }};
         function refresh() {{
           const params = new URLSearchParams({{ limit: FETCH_LIMIT.toString() }});
@@ -3701,6 +3745,17 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         .map-bars.has-data .map-empty { display: none; }
         .chart-x-axis { margin-top: 8px; text-align: center; font-size: 0.85rem; color: #94a3b8; }
         .chart-x-axis strong { color: #f8fafc; }
+        .history-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-top: 1.5rem; }
+        .history-table-card { background: #0f1b2d; border-radius: 16px; padding: 20px; border: 1px solid rgba(148, 163, 184, 0.18); box-shadow: 0 8px 20px rgba(15, 23, 42, 0.4); }
+        .history-table-card h2 { margin: 0 0 0.75rem; font-size: 1rem; color: #f8fafc; }
+        .history-table-card p { margin: 0 0 1rem; color: #94a3b8; font-size: 0.85rem; }
+        .history-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+        .history-table th { text-align: left; font-weight: 600; color: #cbd5f5; padding-bottom: 6px; border-bottom: 1px solid rgba(148, 163, 184, 0.16); }
+        .history-table td { padding: 6px 0; border-bottom: 1px solid rgba(148, 163, 184, 0.08); color: #e2e8f0; }
+        .history-table td.price { color: #38bdf8; }
+        .history-table td.cumulative { color: #facc15; }
+        .history-table tbody tr:last-child td { border-bottom: none; }
+        .history-table .empty-row td { color: #64748b; font-style: italic; }
         @media (max-width: 768px) {
             .map-column { flex: 0 0 40px; }
             .map-center span { left: -35px; }
@@ -3755,6 +3810,41 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         </div>
         <div class="chart-x-axis" id="map-price-axis">价格轴：--</div>
     </section>
+
+    <section class="history-grid">
+        <article class="history-table-card">
+            <h2>历史累计买单</h2>
+            <p>按 1 USDT 区间聚合，展示 24 小时内的累计买入金额</p>
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th>价格 (USDT)</th>
+                        <th>区间金额 (USDT)</th>
+                        <th>累计买入</th>
+                    </tr>
+                </thead>
+                <tbody id="history-buy-body">
+                    <tr class="empty-row"><td colspan="3">等待数据...</td></tr>
+                </tbody>
+            </table>
+        </article>
+        <article class="history-table-card">
+            <h2>历史累计卖单</h2>
+            <p>按 1 USDT 区间聚合，展示 24 小时内的累计卖出金额</p>
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th>价格 (USDT)</th>
+                        <th>区间金额 (USDT)</th>
+                        <th>累计卖出</th>
+                    </tr>
+                </thead>
+                <tbody id="history-sell-body">
+                    <tr class="empty-row"><td colspan="3">等待数据...</td></tr>
+                </tbody>
+            </table>
+        </article>
+    </section>
     <script>
       (function() {
         const root = document.getElementById('liquidation-map-root');
@@ -3768,6 +3858,8 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         const legendPriceEl = document.getElementById('map-legend-price');
         const updatedEl = document.getElementById('map-updated');
         const rangeEl = document.getElementById('map-range');
+        const buyTableBody = document.getElementById('history-buy-body');
+        const sellTableBody = document.getElementById('history-sell-body');
         const instrument = (root.dataset.instrument || 'ETH-USDT-SWAP').toUpperCase();
         const binSize = Number(root.dataset.binSize) || 1;
         const maxLevels = Number(root.dataset.levels) || 400;
@@ -3778,6 +3870,14 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         let panOffset = 0;
         let lastRenderBins = [];
         let lastRenderPrice = null;
+
+        const syncLegendPrice = () => {
+          if (!legendPriceEl || !lastPriceEl) { return; }
+          const text = (lastPriceEl.textContent || '').trim();
+          legendPriceEl.textContent = text || '--';
+        };
+
+        syncLegendPrice();
 
         const formatNumber = (value, digits = 2) => {
           const num = Number(value);
@@ -3806,6 +3906,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           if (!isFinite(date)) { return value; }
           return date.toLocaleString('zh-CN', { hour12: false });
         };
+
 
         const normalizeLevels = (entries) => {
           if (!Array.isArray(entries)) { return []; }
@@ -3865,11 +3966,63 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           return NaN;
         };
 
+        const aggregateHistoryBuckets = (bins, side) => {
+          if (!Array.isArray(bins)) { return []; }
+          const normalizedSide = side === 'ask' ? 'ask' : 'bid';
+          const grouped = new Map();
+          bins.forEach((bin) => {
+            const recordSide = String(bin?.side || '').toLowerCase();
+            if (recordSide !== normalizedSide) { return; }
+            const price = Number(bin?.price);
+            if (!Number.isFinite(price)) { return; }
+            const bucket = Math.floor(price);
+            const notional = Math.max(0, Number(bin?.notional) || 0);
+            const size = Math.max(0, Number(bin?.size) || 0);
+            const existing = grouped.get(bucket) || { price: bucket, interval: 0, size: 0 };
+            existing.interval += notional;
+            existing.size += size;
+            grouped.set(bucket, existing);
+          });
+          const sorted = Array.from(grouped.values()).sort((a, b) => (
+            normalizedSide === 'bid' ? b.price - a.price : a.price - b.price
+          ));
+          let cumulative = 0;
+          return sorted.map((entry) => {
+            cumulative += entry.interval;
+            return { ...entry, cumulative };
+          });
+        };
+
+        const renderHistoryTableBody = (entries, target) => {
+          if (!target) { return; }
+          if (!entries.length) {
+            target.innerHTML = '<tr class="empty-row"><td colspan="3">--</td></tr>';
+            return;
+          }
+          const maxRows = 15;
+          const rows = entries.slice(0, maxRows).map((entry) => (
+            '<tr>' +
+            `<td class="price">$${formatPrice(entry.price)}</td>` +
+            `<td>$${formatCurrency(entry.interval)}</td>` +
+            `<td class="cumulative">$${formatCurrency(entry.cumulative)}</td>` +
+            '</tr>'
+          ));
+          target.innerHTML = rows.join('');
+        };
+
+        const updateHistoryTablesUI = (bins) => {
+          if (!buyTableBody || !sellTableBody) { return; }
+          const buyEntries = aggregateHistoryBuckets(bins, 'bid');
+          const sellEntries = aggregateHistoryBuckets(bins, 'ask');
+          renderHistoryTableBody(buyEntries, buyTableBody);
+          renderHistoryTableBody(sellEntries, sellTableBody);
+        };
+
         const showEmpty = (message) => {
           if (barsContainer) { barsContainer.classList.remove('has-data'); }
           if (chartSvg) { chartSvg.innerHTML = ''; }
           if (emptyMessage) { emptyMessage.textContent = message; }
-          if (legendPriceEl) { legendPriceEl.textContent = '--'; }
+          syncLegendPrice();
         };
 
         const updateAmountAxis = (maxValue) => {
@@ -3949,9 +4102,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           if (!Number.isFinite(markerPrice)) {
             markerPrice = clampedCenter;
           }
-          if (legendPriceEl) {
-            legendPriceEl.textContent = Number.isFinite(markerPrice) ? formatPrice(markerPrice) : '--';
-          }
+          // keep legend synced separately with last price
           const scaleX = (price) => padding.left + ((price - visibleMin) / priceRange) * chartWidth;
           const barWidth = Math.max(2, (chartWidth / Math.max(bins.length, 1)) * 0.6);
           const scaleBarHeight = (value) => (value / yMax) * chartHeight;
@@ -4055,7 +4206,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
             textEl.textContent = formatCurrency(value);
             chartSvg.appendChild(textEl);
           }
-          const xTickCount = 6;
+          const xTickCount = 10;
           for (let i = 0; i < xTickCount; i += 1) {
             const ratio = i / (xTickCount - 1);
             const price = visibleMin + priceRange * ratio;
@@ -4082,9 +4233,11 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
             rangeEl.textContent = (start && end) ? (start + ' ~ ' + end) : '--';
           }
           if (!bins.length) {
+            updateHistoryTablesUI([]);
             showEmpty('暂无24小时聚合数据');
             return;
           }
+          updateHistoryTablesUI(bins);
           renderBars(bins, Number(historyPayload?.latest_price));
         };
 
@@ -4123,6 +4276,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           const latestPrice = deriveLatestPrice(instrumentItem);
           if (Number.isFinite(latestPrice)) {
             lastPriceEl.textContent = formatNumber(latestPrice, 2);
+            syncLegendPrice();
           }
           updatedEl.textContent = formatTimestamp(instrumentItem.timestamp || payload.updated_at);
           const bids = normalizeLevels(instrumentItem.bids);
@@ -4147,6 +4301,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           const url = new URL('/api/streams/orderbook/latest', window.location.origin);
           url.searchParams.set('instrument', instrument);
           url.searchParams.set('limit', String(maxLevels));
+          url.searchParams.set('fresh', '1');
           return fetch(url.toString(), { headers: { 'Accept': 'application/json' } }).then((res) => {
             if (!res.ok) { throw new Error('无法获取市场深度'); }
             return res.json();

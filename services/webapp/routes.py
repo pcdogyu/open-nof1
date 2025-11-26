@@ -1175,9 +1175,17 @@ def latest_liquidations_api(limit: int = 50, instrument: Optional[str] = None) -
     "/api/streams/orderbook/latest",
     summary="Fetch recent order book depth snapshots from InfluxDB",
 )
-def latest_orderbook_api(limit: int = 50, instrument: Optional[str] = None) -> dict:
+def latest_orderbook_api(
+    limit: int = 50,
+    instrument: Optional[str] = None,
+    fresh: bool = False,
+) -> dict:
     limit = max(1, min(limit, 500))
-    return get_orderbook_snapshot(levels=limit, instrument=instrument)
+    return get_orderbook_snapshot(
+        levels=limit,
+        instrument=instrument,
+        force_live=fresh,
+    )
 
 
 @router.post(
@@ -1927,12 +1935,17 @@ def get_liquidation_snapshot(limit: int = 50, instrument: Optional[str] = None) 
         tracked_instruments.append(instrument_filter)
     wave_detector.bulk_update(grouped_records)
     wave_signals = wave_detector.snapshot_signals(tracked_instruments or grouped_records.keys())
+    wave_payloads: list[dict] = [signal.to_payload() for signal in wave_signals]
     wave_summary = _summarize_wave_status(wave_signals)
+    if not wave_payloads:
+        wave_payloads = _fallback_wave_signals(grouped_records)
+        if wave_payloads:
+            wave_summary = "Fallback: using last 30m liquidations"
     return {
         "instrument": instrument_filter,
         "items": items,
         "updated_at": datetime.now(tz=timezone.utc).isoformat(),
-        "wave_signals": [signal.to_payload() for signal in wave_signals],
+        "wave_signals": wave_payloads,
         "wave_summary": wave_summary,
     }
 
@@ -1955,11 +1968,91 @@ def _summarize_wave_status(signals: Sequence[wave_detector.WaveSignal]) -> str:
     return f"监控 {len(signals)} 个合约"
 
 
+
+def _fallback_wave_signals(grouped_records: dict[str, list[dict]]) -> list[dict]:
+    """Build lightweight wave rows from recent liquidation records (30m lookback)."""
+    now = datetime.now(tz=timezone.utc)
+    cutoff = now - timedelta(minutes=30)
+    fallbacks: list[dict] = []
+
+    def _parse_ts(raw: Any) -> datetime | None:
+        ts = raw
+        if isinstance(raw, str):
+            try:
+                ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if isinstance(ts, datetime):
+            return ts.replace(tzinfo=ts.tzinfo or timezone.utc)
+        return None
+
+    for instrument, records in grouped_records.items():
+        recent: list[dict] = []
+        for rec in records:
+            ts = _parse_ts(rec.get("timestamp"))
+            if ts is None or ts < cutoff:
+                continue
+            recent.append(rec)
+        if not recent:
+            continue
+
+        total_notional = 0.0
+        total_count = 0
+        net_qty_sum = 0.0
+        buy_notional = 0.0
+        sell_notional = 0.0
+        for rec in recent:
+            qty = _coerce_float(rec.get("net_qty")) or 0.0
+            last_price = _coerce_float(rec.get("last_price")) or 0.0
+            notional = _coerce_float(rec.get("notional_value"))
+            if notional is None:
+                notional = abs(qty) * last_price if last_price else 0.0
+            total_notional += abs(notional or 0.0)
+            net_qty_sum += qty
+            total_count += 1
+            if qty > 0:
+                buy_notional += abs(notional or 0.0)
+            elif qty < 0:
+                sell_notional += abs(notional or 0.0)
+
+        if not total_count:
+            continue
+
+        avg_notional = total_notional / total_count if total_count else 0.0
+        density = total_count / 30.0
+        detail = f"30m buy:{buy_notional:.2f} sell:{sell_notional:.2f}"
+        fallbacks.append(
+            {
+                "instrument": instrument,
+                "wave": "historical",
+                "status": "fallback",
+                "signal": "Fallback from last 30m liquidations",
+                "signal_class": "neutral",
+                "signal_code": "",
+                "liquidation_side_label": detail,
+                "metrics": {
+                    "flv": total_notional,
+                    "baseline": avg_notional,
+                    "price_change_pct": 0.0,
+                    "price_drop_pct": 0.0,
+                    "le": total_count,
+                    "pc": total_notional,
+                    "density_per_min": density,
+                    "lpi": abs(net_qty_sum),
+                },
+            }
+        )
+
+    return fallbacks
+
+
 def get_orderbook_snapshot(
     levels: int = 10,
     instrument: Optional[str] = None,
     *,
     allow_live_fallback: bool = True,
+    force_live: bool = False,
+    stale_after_seconds: int = 5,
 ) -> dict:
     """Return latest order book snapshots for configured instruments."""
     instrument_filter = (instrument or "").strip().upper()
@@ -2061,6 +2154,19 @@ def get_orderbook_snapshot(
         if len(history_list) > max_history_points:
             del history_list[: len(history_list) - max_history_points]
 
+    def _build_history_payload(inst_id: str) -> tuple[list[dict], list[dict], float | None]:
+        raw_history = history_map.get(inst_id, [])
+        history = [
+            {"timestamp": entry["timestamp"], "net_depth": entry.get("net_depth")}
+            for entry in reversed(raw_history)
+        ]
+        cvd_history_raw = cvd_history_map.get(inst_id, [])
+        cvd_history = [
+            {"timestamp": entry["timestamp"], "cvd": entry.get("cvd")}
+            for entry in reversed(cvd_history_raw)
+        ]
+        return history, cvd_history, cvd_map.get(inst_id)
+
     for row in history_records:
         _append_history_entry(row)
 
@@ -2095,17 +2201,7 @@ def get_orderbook_snapshot(
             asks = json.loads(asks_raw)
         except (TypeError, json.JSONDecodeError):
             asks = []
-        raw_history = history_map.get(inst_id, [])
-        history = [
-            {"timestamp": entry["timestamp"], "net_depth": entry["net_depth"]}
-            for entry in reversed(raw_history)
-        ]
-        cvd_history_raw = cvd_history_map.get(inst_id, [])
-        cvd_history = [
-            {"timestamp": entry["timestamp"], "cvd": entry.get("cvd")}
-            for entry in reversed(cvd_history_raw)
-        ]
-        cvd_value = cvd_map.get(inst_id)
+        history, cvd_history, cvd_value = _build_history_payload(inst_id)
         items.append(
             {
                 "instrument_id": inst_id,
@@ -2122,21 +2218,53 @@ def get_orderbook_snapshot(
                 "cvd_history": cvd_history,
             }
         )
-    if not items:
-        if _ORDERBOOK_WARM_CACHE and _ORDERBOOK_WARM_CACHE.get("items"):
-            cached_items = _ORDERBOOK_WARM_CACHE.get("items", [])
-            if instrument_filter:
-                cached_items = [
-                    entry
-                    for entry in cached_items
-                    if (entry.get("instrument_id") or "").upper() == instrument_filter
-                ]
-            items = cached_items
-    if not items:
-        if allow_live_fallback:
-            items = _fetch_live_orderbooks(levels=levels, instrument_filter=instrument_filter)
-        else:
+    now = datetime.now(tz=timezone.utc)
+    stale_cutoff = now - timedelta(seconds=max(1, stale_after_seconds))
+    live_items: list[dict] = []
+
+    def _is_stale(entry: dict) -> bool:
+        ts = _coerce_datetime(entry.get("timestamp"), default=now)
+        return ts < stale_cutoff
+
+    needs_live_refresh = force_live or not items or any(_is_stale(entry) for entry in items)
+    if allow_live_fallback and needs_live_refresh:
+        live_items = _fetch_live_orderbooks(levels=levels, instrument_filter=instrument_filter)
+        if live_items:
             items = []
+            for entry in live_items:
+                inst_id = (entry.get("instrument_id") or "").upper()
+                if not inst_id:
+                    continue
+                history, cvd_history, cvd_value = _build_history_payload(inst_id)
+                items.append(
+                    {
+                        "instrument_id": inst_id,
+                        "timestamp": entry.get("timestamp"),
+                        "best_bid": entry.get("best_bid"),
+                        "best_ask": entry.get("best_ask"),
+                        "spread": entry.get("spread"),
+                        "total_bid_qty": entry.get("total_bid_qty"),
+                        "total_ask_qty": entry.get("total_ask_qty"),
+                        "bids": (entry.get("bids") or [])[: max(1, levels)],
+                        "asks": (entry.get("asks") or [])[: max(1, levels)],
+                        "history": history,
+                        "cvd": cvd_value,
+                        "cvd_history": cvd_history,
+                    }
+                )
+    if not items and _ORDERBOOK_WARM_CACHE and _ORDERBOOK_WARM_CACHE.get("items"):
+        cached_items = _ORDERBOOK_WARM_CACHE.get("items", [])
+        if instrument_filter:
+            cached_items = [
+                entry
+                for entry in cached_items
+                if (entry.get("instrument_id") or "").upper() == instrument_filter
+            ]
+        items = cached_items
+    if not items and not live_items and allow_live_fallback:
+        items = _fetch_live_orderbooks(levels=levels, instrument_filter=instrument_filter)
+    if not items and not allow_live_fallback:
+        items = []
     items.sort(key=lambda entry: entry["instrument_id"])
     return {
         "instrument": instrument_filter,
@@ -2749,7 +2877,7 @@ def _fetch_live_orderbooks(*, levels: int, instrument_filter: str | None) -> lis
                 asks = _sanitize_book_levels(snapshot.get("asks") or [], depth)
                 if not bids and not asks:
                     continue
-                timestamp = _parse_okx_timestamp(snapshot.get("ts")),
+                timestamp = _parse_okx_timestamp(snapshot.get("ts"))
                 if writer is not None:
                     try:
                         writer.write_orderbook(
