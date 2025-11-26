@@ -1956,9 +1956,12 @@ def _summarize_wave_status(signals: Sequence[wave_detector.WaveSignal]) -> str:
     active = [sig.instrument for sig in signals if sig.status == "波次进行"]
     absorbs = [sig.instrument for sig in signals if sig.signal_code == "bottom_absorb"]
     tops = [sig.instrument for sig in signals if sig.signal_code == "top_signal"]
+    reversals = [sig.instrument for sig in signals if sig.signal_code == "short_reversal"]
     warns = [sig.instrument for sig in signals if sig.status in {"警戒", "顶部预警"}]
     if active:
-        return f"波次进行：{', '.join(active)}"
+        return f"波次进行中：{', '.join(active)}"
+    if reversals:
+        return f"空单反转：{', '.join(reversals)}"
     if tops:
         return f"顶部：{', '.join(tops)}"
     if warns:
@@ -2287,10 +2290,31 @@ def get_liquidation_map_history_snapshot(
         instrument=instrument_filter or None,
         lookback=f"{max(1, lookback_hours)}h",
     )
+    if rows:
+        return _build_snapshot_from_bin_rows(
+            rows=rows,
+            instrument_filter=instrument_filter,
+            lookback_hours=lookback_hours,
+        )
+    return _build_snapshot_from_liquidation_orders(
+        instrument_filter=instrument_filter,
+        lookback_hours=lookback_hours,
+        limit=limit,
+    )
+
+
+def _build_snapshot_from_bin_rows(
+    *,
+    rows: list[dict],
+    instrument_filter: str,
+    lookback_hours: int,
+) -> dict:
     aggregated: dict[tuple[str, float], dict] = {}
     earliest: datetime | None = None
     latest: datetime | None = None
     bin_size_value: float | None = None
+    latest_bucket_price: float | None = None
+    latest_ts: datetime | None = None
     for row in rows:
         side = str(row.get("side") or "").lower()
         if side not in {"bid", "ask"}:
@@ -2307,6 +2331,9 @@ def get_liquidation_map_history_snapshot(
             earliest = ts
         if latest is None or ts > latest:
             latest = ts
+        if latest_ts is None or ts > latest_ts:
+            latest_ts = ts
+            latest_bucket_price = _coerce_float(row.get("price"))
         key = (side, price_bucket)
         entry = aggregated.setdefault(
             key,
@@ -2335,6 +2362,156 @@ def get_liquidation_map_history_snapshot(
         "records": len(rows),
         "updated_at": datetime.now(tz=timezone.utc).isoformat(),
     }
+    if latest_bucket_price is not None:
+        payload["latest_price"] = latest_bucket_price
+    return payload
+
+
+def _build_snapshot_from_liquidation_orders(
+    *,
+    instrument_filter: str,
+    lookback_hours: int,
+    limit: int,
+) -> dict:
+    lookback = f"{max(1, lookback_hours)}h"
+    records_limit = max(limit, lookback_hours * 400)
+    rows = _query_influx_measurement(
+        measurement="okx_liquidations",
+        limit=records_limit,
+        instrument=instrument_filter or None,
+        lookback=lookback,
+    )
+    if not rows:
+        rows = _fetch_live_liquidations(
+            instrument=instrument_filter or None,
+            limit=records_limit,
+        )
+    (
+        bins,
+        bin_size_value,
+        earliest,
+        latest,
+        latest_price,
+        processed_records,
+    ) = _aggregate_liquidation_bins(rows, instrument_filter=instrument_filter)
+    cumulative_by_side: dict[str, float] = {"bid": 0.0, "ask": 0.0}
+    for bucket in bins:
+        cumulative_by_side[bucket["side"]] += bucket["notional"]
+        bucket["cumulative"] = cumulative_by_side[bucket["side"]]
+    payload: dict[str, object] = {
+        "instrument": instrument_filter,
+        "bin_size": bin_size_value or 1.0,
+        "bins": bins,
+        "lookback_hours": lookback_hours,
+        "range_start": earliest.isoformat() if earliest else None,
+        "range_end": latest.isoformat() if latest else None,
+        "totals": cumulative_by_side,
+        "records": processed_records,
+        "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    if latest_price is not None:
+        payload["latest_price"] = latest_price
+    return payload
+
+
+def _aggregate_liquidation_bins(
+    rows: Sequence[dict],
+    *,
+    instrument_filter: str,
+) -> tuple[list[dict], float | None, datetime | None, datetime | None, float | None, int]:
+    normalized: list[dict] = []
+    earliest: datetime | None = None
+    latest: datetime | None = None
+    latest_price: float | None = None
+    latest_ts: datetime | None = None
+    price_samples: list[float] = []
+    processed_records = 0
+    for row in rows:
+        inst = (row.get("instrument_id") or row.get("instrument") or "").strip().upper()
+        if instrument_filter and inst and inst != instrument_filter:
+            continue
+        price = _coerce_float(row.get("last_price") or row.get("price"))
+        if price is None or price <= 0:
+            continue
+        net_qty = _coerce_float(row.get("net_qty"))
+        long_qty = max(0.0, _coerce_float(row.get("long_qty")) or 0.0)
+        short_qty = max(0.0, _coerce_float(row.get("short_qty")) or 0.0)
+        notional = max(0.0, _coerce_float(row.get("notional_value")) or 0.0)
+        qty_basis = max(abs(net_qty or 0.0), long_qty, short_qty)
+        if notional <= 0 and qty_basis > 0 and price > 0:
+            notional = qty_basis * price
+        if notional <= 0:
+            continue
+        size_value = qty_basis or (notional / price if price else 0.0)
+        if size_value <= 0:
+            continue
+        side = "ask"
+        if net_qty is not None:
+            side = "bid" if net_qty < 0 else "ask"
+        elif long_qty or short_qty:
+            side = "ask" if long_qty >= short_qty else "bid"
+        ts = _coerce_datetime(row.get("_time"), default=None)
+        ts = ts or datetime.now(tz=timezone.utc)
+        if earliest is None or ts < earliest:
+            earliest = ts
+        if latest is None or ts > latest:
+            latest = ts
+        if latest_ts is None or ts > latest_ts:
+            latest_ts = ts
+            latest_price = price
+        price_samples.append(price)
+        normalized.append(
+            {
+                "side": side,
+                "price": price,
+                "notional": notional,
+                "size": size_value,
+            }
+        )
+        processed_records += 1
+    if not normalized:
+        return [], None, earliest, latest, latest_price, processed_records
+    bin_size_value = _estimate_liquidation_bin_size(price_samples)
+    aggregated: dict[tuple[str, float], dict] = {}
+    for entry in normalized:
+        bucket = math.floor(entry["price"] / bin_size_value) * bin_size_value
+        key = (entry["side"], bucket)
+        bucket_entry = aggregated.setdefault(
+            key,
+            {"price": bucket, "side": entry["side"], "notional": 0.0, "size": 0.0},
+        )
+        bucket_entry["notional"] += entry["notional"]
+        bucket_entry["size"] += entry["size"]
+    bins = sorted(aggregated.values(), key=lambda item: item["price"])
+    return bins, bin_size_value, earliest, latest, latest_price, processed_records
+
+
+def _estimate_liquidation_bin_size(prices: Sequence[float]) -> float:
+    if not prices:
+        return 1.0
+    min_price = min(prices)
+    max_price = max(prices)
+    span = max(max_price - min_price, max_price * 0.001, 1e-6)
+    target_bins = 160
+    raw_step = span / target_bins
+    if raw_step <= 0:
+        raw_step = max_price * 0.001 or 1.0
+    magnitude = 10 ** math.floor(math.log10(raw_step))
+    normalized = raw_step / magnitude
+    if normalized < 1.5:
+        step = 1 * magnitude
+    elif normalized < 3:
+        step = 2 * magnitude
+    elif normalized < 7:
+        step = 5 * magnitude
+    else:
+        step = 10 * magnitude
+    # ensure tiny-priced assets still get sub-unit resolution
+    if max_price < 5:
+        step = min(step, 0.01)
+    if max_price < 1:
+        step = min(step, 0.001)
+    return max(step, 1e-6)
 
 
 def prime_orderbook_cache(levels: int = 400, instrument: Optional[str] = None) -> dict:

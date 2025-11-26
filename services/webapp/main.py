@@ -2783,7 +2783,8 @@ LIQUIDATION_TEMPLATE = r"""
                     <th>波次</th>
                     <th>状态</th>
                     <th>FLV / 均值</th>
-                    <th>价格跌幅</th>
+                    <th>最新价格</th>
+                    <th>价格涨跌幅</th>
                     <th>LE 爆仓弹性(单位跌幅触发强平数)</th>
                     <th>PC 价格压力(潜在剧烈波动)</th>
                     <th>密度</th>
@@ -2793,7 +2794,7 @@ LIQUIDATION_TEMPLATE = r"""
                 </tr>
             </thead>
             <tbody id="wave-body">
-                <tr><td colspan="11" class="empty-state">等待数据...</td></tr>
+                <tr><td colspan="12" class="empty-state">等待数据...</td></tr>
             </tbody>
         </table>
     </div>
@@ -2925,7 +2926,7 @@ LIQUIDATION_TEMPLATE = r"""
           if (code === 'bottom_absorb') {{
             return {{ side: 'buy', label: '买入' }};
           }}
-          if (code === 'top_signal') {{
+          if (code === 'top_signal' || code === 'short_reversal') {{
             return {{ side: 'sell', label: '卖出' }};
           }}
           return null;
@@ -2948,9 +2949,12 @@ LIQUIDATION_TEMPLATE = r"""
           const rows = signals.map((signal) => {{
             const metrics = signal.metrics || {{}};
             const flvText = `${{fmtNumber(metrics.flv, 2)}} / ${{fmtNumber(metrics.baseline, 2)}}`;
-            const priceText = metrics.price_drop_pct > 0
-              ? `-${{fmtNumber(metrics.price_drop_pct, 2)}}%`
-              : `${{fmtNumber(metrics.price_change_pct, 2)}}%`;
+            const priceChange = Number(metrics.price_change_pct);
+            const priceText = Number.isFinite(priceChange)
+              ? `${{priceChange >= 0 ? '+' : ''}}${{priceChange.toFixed(2)}}%`
+              : '-';
+            const endPrice = Number(metrics.end_price);
+            const latestPriceText = Number.isFinite(endPrice) ? fmtNumber(endPrice, 4) : '-';
             const leValue = Number(metrics.le);
             const leText = formatLeElasticity(leValue);
             const pcValue = Number(metrics.pc);
@@ -2969,6 +2973,7 @@ LIQUIDATION_TEMPLATE = r"""
                 <td>${{signal.wave || '--'}}</td>
                 <td>${{signal.status || '--'}}</td>
                 <td>${{flvText}}</td>
+                <td>${{latestPriceText}}</td>
                 <td>${{priceText}}</td>
                 <td>${{leText}}</td>
                 <td>${{pcText}}</td>
@@ -3730,10 +3735,11 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         .map-meta { display: flex; flex-direction: column; gap: 6px; margin-bottom: 1.5rem; font-size: 0.95rem; }
         .map-meta-row { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
         .map-meta strong { font-size: 1.05rem; color: #f8fafc; }
-        .map-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.85rem; color: #cbd5f5; }
+        .map-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.85rem; color: #cbd5f5; align-items: center; }
         .legend-dot { display: inline-flex; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
         .legend-dot.bar { background: #facc15; }
         .legend-price { color: #f8fafc; }
+        .legend-axis { color: #94a3b8; font-size: 0.82rem; }
         .timestamp { color: #38bdf8; }
         .map-chart { display: grid; grid-template-columns: auto 1fr auto; gap: 16px; align-items: center; margin-bottom: 1.25rem; }
         .axis { font-size: 0.85rem; color: #94a3b8; writing-mode: vertical-rl; transform: rotate(180deg); }
@@ -3743,8 +3749,11 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         .map-bars svg { width: 100%; height: 360px; display: block; }
         .map-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #94a3b8; font-size: 0.9rem; background: transparent; }
         .map-bars.has-data .map-empty { display: none; }
-        .chart-x-axis { margin-top: 8px; text-align: center; font-size: 0.85rem; color: #94a3b8; }
-        .chart-x-axis strong { color: #f8fafc; }
+        .range-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+        .range-buttons { display: inline-flex; gap: 8px; }
+        .range-btn { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.45); border-radius: 999px; padding: 2px 12px; font-size: 0.8rem; cursor: pointer; }
+        .range-btn.active { background: #38bdf8; color: #0f172a; }
+        .range-btn:hover { border-color: #7dd3fc; }
         .history-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-top: 1.5rem; }
         .history-table-card { background: #0f1b2d; border-radius: 16px; padding: 20px; border: 1px solid rgba(148, 163, 184, 0.18); box-shadow: 0 8px 20px rgba(15, 23, 42, 0.4); }
         .history-table-card h2 { margin: 0 0 0.75rem; font-size: 1rem; color: #f8fafc; }
@@ -3786,11 +3795,18 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
                 <span>交易对：<strong id="map-symbol">$display_pair</strong></span>
                 <span>最新成交价：<strong id="map-last-price">$last_price</strong> USDT</span>
                 <span>最后刷新：<span class="timestamp" id="map-updated">$updated_at</span></span>
-                <span>统计区间：<strong id="map-range">--</strong></span>
+                <div class="range-controls">
+                    <span>统计区间：<strong id="map-range">--</strong></span>
+                    <div class="range-buttons">
+                        <button type="button" class="range-btn active" data-hours="24">回看24小时</button>
+                        <button type="button" class="range-btn" data-hours="48">回看48小时</button>
+                    </div>
+                </div>
             </div>
-        <div class="map-legend">
-            <span><i class="legend-dot bar"></i>区间金额</span>
-                <span class="legend-price">当前价格：<strong id="map-legend-price">--</strong></span>
+            <div class="map-legend">
+                <span><i class="legend-dot bar"></i>区间金额</span>
+                <span class="legend-price">当前价格<strong id="map-legend-price">--</strong></span>
+                <span class="legend-axis" id="map-price-axis">价格轴：--</span>
             </div>
         </div>
         <div class="map-chart" id="liquidation-map-root" data-instrument="$instrument" data-bin-size="1" data-levels="400">
@@ -3808,7 +3824,6 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
             </div>
             <span class="axis axis-right">高价</span>
         </div>
-        <div class="chart-x-axis" id="map-price-axis">价格轴：--</div>
     </section>
 
     <section class="history-grid">
@@ -3860,11 +3875,20 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         const rangeEl = document.getElementById('map-range');
         const buyTableBody = document.getElementById('history-buy-body');
         const sellTableBody = document.getElementById('history-sell-body');
+        const rangeButtons = document.querySelectorAll('.range-btn');
         const instrument = (root.dataset.instrument || 'ETH-USDT-SWAP').toUpperCase();
         const binSize = Number(root.dataset.binSize) || 1;
         const maxLevels = Number(root.dataset.levels) || 400;
         const REFRESH_MS = 4000;
-        const HISTORY_HOURS = 24;
+        let historyHours = 24;
+        try {
+          const urlHours = Number(new URL(window.location.href).searchParams.get('hours'));
+          if (Number.isFinite(urlHours) && urlHours >= 1 && urlHours <= 168) {
+            historyHours = urlHours;
+          }
+        } catch (err) {
+          console.warn('Failed to parse hours from query', err);
+        }
         let lastHistoryPayload = null;
         let zoomLevel = 1;
         let panOffset = 0;
@@ -4311,12 +4335,20 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         const fetchHistory = () => {
           const url = new URL('/api/liquidation-map/history', window.location.origin);
           url.searchParams.set('instrument', instrument);
-          url.searchParams.set('hours', String(HISTORY_HOURS));
+          url.searchParams.set('hours', String(historyHours));
           return fetch(url.toString(), { headers: { 'Accept': 'application/json' } })
             .then((res) => {
               if (!res.ok) { throw new Error('无法获取历史下单数据'); }
               return res.json();
             });
+        };
+
+        const syncRangeButtons = () => {
+          if (!rangeButtons.length) { return; }
+          rangeButtons.forEach((btn) => {
+            const btnHours = Number(btn.dataset.hours) || 24;
+            btn.classList.toggle('active', btnHours === historyHours);
+          });
         };
 
         const refresh = () => {
@@ -4337,6 +4369,29 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
                 });
             });
         };
+
+        if (rangeButtons.length) {
+          rangeButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+              const hours = Number(button.dataset.hours) || 24;
+              if (historyHours === hours) {
+                return;
+              }
+              historyHours = hours;
+              syncRangeButtons();
+              try {
+                const url = new URL(window.location.href);
+                url.searchParams.set('hours', String(historyHours));
+                window.location.href = url.toString();
+              } catch (err) {
+                console.warn('Failed to update URL, reloading fallback', err);
+                window.location.reload();
+              }
+            });
+          });
+        }
+
+        syncRangeButtons();
 
         refresh();
         setInterval(refresh, REFRESH_MS);

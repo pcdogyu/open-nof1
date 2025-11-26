@@ -954,7 +954,7 @@ async def _maybe_execute_wave_strategy(
     relevant = set(inst.upper() for inst in _iter_liquidation_watch_instruments(meta))
     if not relevant:
         return None
-    events = wave_detector.iter_events(signal_codes=("bottom_absorb", "top_signal"))
+    events = wave_detector.iter_events(signal_codes=("bottom_absorb", "top_signal", "short_reversal"))
     candidates = [event for event in events if event.instrument in relevant]
     if not candidates:
         return None

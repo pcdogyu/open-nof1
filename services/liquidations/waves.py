@@ -304,6 +304,7 @@ class WaveDetector:
             metrics.price_rise_pct >= self.price_drop_threshold
             and metrics.flv > metrics.baseline * self.multiplier
         )
+        short_reversal = top_condition and liquidation_side == "short"
 
         if state.current_wave is None and start_condition:
             state.wave_counter += 1
@@ -326,6 +327,14 @@ class WaveDetector:
             signal_code = "bottom_absorb"
             direction = "buy"
             severity = 2
+        elif short_reversal:
+            status = "反转机会"
+            base_text = "空单爆仓 → 反转信号"
+            signal_text = f"{base_text} · {liquidation_label}" if liquidation_label else base_text
+            signal_class = "wave-signal-warn"
+            signal_code = "short_reversal"
+            direction = "sell"
+            severity = 4
         elif top_condition:
             status = "顶部预警"
             signal_text = "顶部信号"
@@ -355,7 +364,7 @@ class WaveDetector:
             state.last_seen_ts = latest_timestamp
 
         event_id: Optional[int] = None
-        if signal_code in {"bottom_absorb", "top_signal"} and direction:
+        if signal_code in {"bottom_absorb", "top_signal", "short_reversal"} and direction:
             trigger_new = new_tick and state.active_signal_code != signal_code
             if trigger_new:
                 count = state.event_counters.get(signal_code, 0) + 1
