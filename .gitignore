@@ -1,4 +1,6 @@
 config.py
+# Project data directory
+data/
 # Virtual environments created on this machine, keep them local
 .vopennof/
 .vopennof13/
