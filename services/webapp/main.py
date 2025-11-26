@@ -85,8 +85,22 @@ def okx_dashboard(request: Request) -> HTMLResponse:
     force_refresh = refresh_flag in ("1", "true", "yes", "y")
     order_status = request.query_params.get("order_status")
     order_detail = request.query_params.get("detail")
+    if order_status:
+        order_info = {
+            "account": request.query_params.get("order_account"),
+            "instrument": request.query_params.get("order_instrument"),
+            "side": request.query_params.get("order_side"),
+            "order_type": request.query_params.get("order_type"),
+            "size": request.query_params.get("order_size"),
+            "price": request.query_params.get("order_price"),
+            "margin_mode": request.query_params.get("order_margin_mode"),
+        }
+    else:
+        order_info = None
     summary = routes.get_okx_summary(force_refresh=force_refresh)
-    return HTMLResponse(content=_render_okx_dashboard(summary, order_status, order_detail))
+    return HTMLResponse(
+        content=_render_okx_dashboard(summary, order_status, order_detail, order_info)
+    )
 
 
 @app.post("/okx/manual-order", include_in_schema=False)
@@ -99,10 +113,57 @@ def okx_manual_order(
     price: Optional[float] = Form(None),
     margin_mode: Optional[str] = Form(None),
 ) -> RedirectResponse:
+    def _fmt_decimal(value: float) -> str:
+        text = f"{value:.8f}"
+        text = text.rstrip("0").rstrip(".")
+        return text or "0"
+
+    def _margin_label(value: str | None) -> str:
+        normalized = (value or "").strip().lower()
+        mapping = {
+            "": "自动",
+            "cross": "全仓",
+            "isolated": "逐仓",
+            "cash": "现货",
+        }
+        return mapping.get(normalized, normalized or "自动")
+
+    normalized_account = account_id.strip()
+    normalized_instrument = instrument_id.strip().upper()
+    normalized_side = side.strip().lower()
+    normalized_type = order_type.strip().lower()
+    display_side = "买入" if normalized_side == "buy" else "卖出"
+    display_type = "限价" if normalized_type == "limit" else "市价"
+    size_text = _fmt_decimal(size)
+    price_text = "市价" if price is None else _fmt_decimal(price)
+    margin_label = _margin_label(margin_mode)
+    info_params = {
+        "order_account": normalized_account,
+        "order_instrument": normalized_instrument,
+        "order_side": display_side,
+        "order_type": display_type,
+        "order_size": size_text,
+        "order_price": price_text,
+        "order_margin_mode": margin_label,
+    }
+
+    def _build_redirect(status_value: str, detail_value: str) -> RedirectResponse:
+        params = {
+            "refresh": "1",
+            "order_status": status_value,
+            "detail": detail_value,
+            **info_params,
+        }
+        query = urllib.parse.urlencode(params)
+        return RedirectResponse(
+            url=f"/okx?{query}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
     try:
         result = routes.place_manual_okx_order(
-            account_id=account_id.strip(),
-            instrument_id=instrument_id.strip(),
+            account_id=normalized_account,
+            instrument_id=normalized_instrument,
             side=side.strip(),
             order_type=order_type.strip(),
             size=size,
@@ -110,15 +171,9 @@ def okx_manual_order(
             margin_mode=(margin_mode or "").strip() or None,
         )
         detail = result.get("message") or result.get("order_id") or ""
-        return RedirectResponse(
-            url=f"/okx?refresh=1&order_status=success&detail={urllib.parse.quote_plus(str(detail))}",
-            status_code=status.HTTP_303_SEE_OTHER,
-        )
+        return _build_redirect("success", str(detail))
     except Exception as exc:
-        return RedirectResponse(
-            url=f"/okx?refresh=1&order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
-            status_code=status.HTTP_303_SEE_OTHER,
-        )
+        return _build_redirect("error", str(exc))
 
 
 @app.post("/okx/close-position", include_in_schema=False)
@@ -630,7 +685,46 @@ def _render_model_manager(catalog: list[dict]) -> str:
 
 
 
-def _render_okx_dashboard(summary: dict, order_status: str | None = None, order_detail: str | None = None) -> str:
+def _render_order_info_card(info: dict[str, str | None] | None) -> str:
+    if not info:
+        return ""
+    esc = _escape
+    rows: list[str] = []
+    for label, key in (
+        ("账户", "account"),
+        ("合约", "instrument"),
+        ("方向", "side"),
+        ("类型", "order_type"),
+        ("数量", "size"),
+        ("价格", "price"),
+        ("保证金模式", "margin_mode"),
+    ):
+        value = info.get(key)
+        if value:
+            rows.append(
+                "<div class='order-info-row'>"
+                f"<span>{label}</span>"
+                f"<strong>{esc(value)}</strong>"
+                "</div>"
+            )
+    if not rows:
+        return ""
+    return (
+        "<section class='order-info-card'>"
+        "<h3>下单信息</h3>"
+        "<div class='order-info-grid'>"
+        f"{''.join(rows)}"
+        "</div>"
+        "</section>"
+    )
+
+
+def _render_okx_dashboard(
+    summary: dict,
+    order_status: str | None = None,
+    order_detail: str | None = None,
+    order_info: dict[str, str | None] | None = None,
+) -> str:
     """Render the OKX paper trading overview page."""
     esc = _escape
     as_of = esc(_format_asia_shanghai(summary.get("as_of")))
@@ -663,6 +757,7 @@ def _render_okx_dashboard(summary: dict, order_status: str | None = None, order_
             f"{message_text}"
             "</div>"
         )
+    order_info_card = _render_order_info_card(order_info)
 
     account_sections: list[str] = []
     for bundle in summary.get("accounts", []):
@@ -753,6 +848,7 @@ def _render_okx_dashboard(summary: dict, order_status: str | None = None, order_
         as_of=as_of,
         error_block=error_block,
         flash_block=flash_block,
+        order_info_card=order_info_card,
         manual_account_options=options_html,
         manual_instrument_options=manual_instrument_options,
         account_sections="\n".join(account_sections),
@@ -1189,7 +1285,6 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
         side_display = "多单" if raw_side.lower() in {"long", "buy"} else "空单" if raw_side.lower() in {"short", "sell"} else raw_side
         side_value = esc(raw_side)
         side_display_escaped = esc(side_display)
-        quantity_value = esc(str(pos.get("quantity") if pos.get("quantity") is not None else ""))
         leverage_display = _format_number(pos.get("leverage"))
         try:
             qty = float(pos.get("quantity") or 0.0)
@@ -1198,6 +1293,8 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             leverage = float(pos.get("leverage") or 0.0)
         except Exception:
             qty = mark_px = entry_px = leverage = 0.0
+        total_qty_text = _fmt_quantity(qty)
+        price_reference = mark_px if mark_px > 0 else entry_px if entry_px > 0 else None
         margin = None
         raw_margin = pos.get("initial_margin")
         if raw_margin not in (None, ""):
@@ -1235,7 +1332,16 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             pct_class = "pnl-positive" if pnl_pct >= 0 else "pnl-negative"
             pnl_pct_cell = f"<span class='{pct_class}'>{pct_value}%</span>"
 
-        def _close_form(label: str, qty_value: str) -> str:
+        def _calc_amount(value: float, price: float | None) -> float | None:
+            if price is None or value <= 0:
+                return None
+            return value * price
+
+        def _build_action_tooltip(action_label: str, qty_text: str, amount_value: float | None) -> str:
+            amount_text = _format_number(amount_value, digits=2) if amount_value is not None else "--"
+            return f"币对 {instrument_value} {action_label} 数量：{qty_text}，金额：{amount_text} USD"
+
+        def _close_form(label: str, qty_value: str, tooltip: str) -> str:
             btn_class = "btn-close"
             if label == "全部平仓":
                 btn_class += " btn-close-full"
@@ -1245,40 +1351,51 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
                 f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
                 f"<input type='hidden' name='position_side' value='{side_value}'>"
                 f"<input type='hidden' name='quantity' value='{qty_value}'>"
-                f"<button type='submit' class='{btn_class}'>{label}</button>"
+                f"<button type='submit' class='{btn_class}' title='{esc(tooltip)}'>{label}</button>"
                 "</form>"
             )
 
-        def _scale_form(label: str, qty_value: str) -> str:
+        def _scale_form(label: str, qty_value: str, tooltip: str) -> str:
             return (
                 "<form method='post' action='/okx/scale-position' class='inline-form'>"
                 f"<input type='hidden' name='account_id' value='{account_value}'>"
                 f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
                 f"<input type='hidden' name='position_side' value='{side_value}'>"
                 f"<input type='hidden' name='quantity' value='{qty_value}'>"
-                f"<button type='submit' class='btn-scale'>{label}</button>"
+                f"<button type='submit' class='btn-scale' title='{esc(tooltip)}'>{label}</button>"
                 "</form>"
             )
 
         action_pairs: list[str] = []
         if qty > 0:
-            for portion, close_label, scale_label in (
-                (0.1, "平仓10%", "补仓10%"),
-                (0.2, "平仓20%", "补仓20%"),
-                (0.5, "平仓50%", "补仓50%"),
-            ):
-                partial_qty = max(qty * portion, 0.0001)
-                qty_value = esc(_fmt_quantity(partial_qty))
+            close_options = [
+                (0.1, "平仓10%"),
+                (0.2, "平仓20%"),
+                (0.5, "平仓50%"),
+            ]
+            scale_options = [
+                (0.5, "补仓50%"),
+                (1.0, "补仓100%"),
+                (2.0, "补仓200%"),
+            ]
+            for idx, (close_portion, close_label) in enumerate(close_options):
+                scale_portion, scale_label = scale_options[idx]
+                close_qty = max(qty * close_portion, 0.0001)
+                scale_qty = max(qty * scale_portion, 0.0001)
+                close_qty_text = _fmt_quantity(close_qty)
+                scale_qty_text = _fmt_quantity(scale_qty)
+                close_tooltip = _build_action_tooltip("平仓", close_qty_text, _calc_amount(close_qty, price_reference))
+                scale_tooltip = _build_action_tooltip("补仓", scale_qty_text, _calc_amount(scale_qty, price_reference))
                 stack = (
                     "<div class='action-pair'>"
-                    f"{_scale_form(scale_label, qty_value)}"
-                    f"{_close_form(close_label, qty_value)}"
+                    f"{_scale_form(scale_label, esc(scale_qty_text), scale_tooltip)}"
+                    f"{_close_form(close_label, esc(close_qty_text), close_tooltip)}"
                     "</div>"
                 )
                 action_pairs.append(stack)
         action_pairs.append(
             "<div class='action-pair full'>"
-            f"{_close_form('全部平仓', quantity_value)}"
+            f"{_close_form('全部平仓', esc(total_qty_text), _build_action_tooltip('平仓', total_qty_text, _calc_amount(qty, price_reference)))}"
             "</div>"
         )
         action_html = (
@@ -1698,6 +1815,8 @@ HTML_TEMPLATE = r"""
     <footer>
         数据来源：<a href="/metrics/models">/metrics/models</a> ｜ 健康检查：<a href="/health">/health</a>
     </footer>
+
+    <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
 </html>
 """
@@ -1754,6 +1873,8 @@ MODEL_MANAGER_TEMPLATE = r"""
     <div class="models-grid">
         {models_html}
     </div>
+
+    <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
  </html>
 """
@@ -1864,6 +1985,8 @@ SETTINGS_TEMPLATE = r"""
             </form>
         </section>
     </div>
+
+    <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
 </html>
 """
@@ -1930,6 +2053,8 @@ ORDER_DEBUG_TEMPLATE = r"""
             {rows}
         </tbody>
     </table>
+
+    <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
 </html>
 """
@@ -2101,6 +2226,8 @@ RISK_TEMPLATE = r"""
         </section>
         
     </div>
+
+    <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
 </html>
 """
@@ -2191,6 +2318,12 @@ OKX_TEMPLATE = r"""
         .manual-form input, .manual-form select {{ border-radius: 8px; border: 1px solid #334155; background-color: #0f172a; color: #e2e8f0; padding: 10px; font-size: 0.95rem; }}
         .manual-form button {{ background-color: #38bdf8; color: #0f172a; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-weight: bold; }}
         .manual-form button:hover {{ background-color: #0ea5e9; }}
+        .order-info-card {{ background-color: #14233b; border-radius: 14px; padding: 16px 20px; margin-top: 16px; box-shadow: 0 8px 20px rgba(2, 6, 23, 0.6); }}
+        .order-info-card h3 {{ margin: 0 0 10px 0; font-size: 1rem; }}
+        .order-info-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }}
+        .order-info-row {{ background-color: rgba(15, 23, 42, 0.4); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }}
+        .order-info-row span {{ color: #94a3b8; font-size: 0.8rem; }}
+        .order-info-row strong {{ font-size: 0.95rem; }}
         .manual-action {{ display: flex; align-items: center; }}
         .manual-action button {{ margin: 0; white-space: nowrap; }}
         .panel-head {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 0.5rem; }}
@@ -2318,6 +2451,7 @@ OKX_TEMPLATE = r"""
         </div>
       </form>
     </section>
+    {order_info_card}
     {error_block}
     {account_sections}
     <script>
@@ -2379,6 +2513,8 @@ OKX_TEMPLATE = r"""
         }})();
       }})();
     </script>
+
+    <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
 </html>
 """
@@ -2555,6 +2691,8 @@ SCHEDULER_TEMPLATE = r"""
         }});
       }})();
     </script>
+
+    <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
 </html>
 """
@@ -2657,6 +2795,8 @@ PROMPT_EDITOR_TEMPLATE = r"""
             <p class="hint">缺失的占位符会被自动替换为空字符串，以避免影响模板渲染。</p>
         </section>
     </div>
+
+    <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
 </html>
 """
@@ -2738,6 +2878,19 @@ LIQUIDATION_TEMPLATE = r"""
         .timestamp {{ color: #38bdf8; }}
         .empty-state {{ text-align: center; color: #94a3b8; padding: 16px; }}
         .wave-section {{ background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 1rem; border: 1px solid #334155; }}
+        .wave-notification {{
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            border-radius: 12px;
+            border: 1px solid rgba(56, 189, 248, 0.4);
+            background: rgba(15, 23, 42, 0.65);
+            color: #e2e8f0;
+            font-size: 0.9rem;
+            display: none;
+        }}
+        .wave-notification.success {{ border-color: rgba(74, 222, 128, 0.8); color: #bbf7d0; }}
+        .wave-notification.error {{ border-color: rgba(248, 113, 113, 0.8); color: #fecaca; }}
+        .wave-notification.show {{ display: block; }}
         .wave-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }}
         .wave-header h2 {{ margin: 0; font-size: 1rem; color: #f1f5f9; }}
         .wave-status {{ font-size: 0.85rem; padding: 4px 12px; border-radius: 999px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; }}
@@ -2845,6 +2998,7 @@ LIQUIDATION_TEMPLATE = r"""
         <h3>OKX Payload</h3>
         <pre id="okx-payload-display">等待买卖操作后显示请求体。</pre>
     </div>
+    <div id="wave-notification" class="wave-notification" aria-live="polite"></div>
     <div class="wave-section">
         <div class="wave-header">
             <h2>Real-Time Liquidation Waves 实时爆仓波次监测</h2>
@@ -2895,6 +3049,26 @@ LIQUIDATION_TEMPLATE = r"""
         const minNotionalInput = document.getElementById('min-notional');
         const autoNotionalInput = document.getElementById('auto-order-notional');
         const payloadDisplay = document.getElementById('okx-payload-display');
+        const notificationBar = document.getElementById('wave-notification');
+        let notificationTimer = null;
+        const hideNotification = () => {{
+          if (!notificationBar) {{ return; }}
+          notificationBar.classList.remove('show', 'success', 'error');
+          notificationBar.textContent = '';
+        }};
+        const showNotification = (message, status = 'info') => {{
+          if (!notificationBar) {{ return; }}
+          notificationBar.textContent = message;
+          notificationBar.classList.remove('success', 'error');
+          if (status === 'success') {{
+            notificationBar.classList.add('success');
+          }} else if (status === 'error') {{
+            notificationBar.classList.add('error');
+          }}
+          notificationBar.classList.add('show');
+          if (notificationTimer) {{ clearTimeout(notificationTimer); }}
+          notificationTimer = setTimeout(() => {{ hideNotification(); }}, 6000);
+        }};
         const waveTableBody = document.getElementById('wave-body');
         const FETCH_LIMIT = 400;
         let latestItems = [];
@@ -3072,17 +3246,17 @@ LIQUIDATION_TEMPLATE = r"""
         }};
         const placeAutoOrder = (instrument, side, button) => {{
           if (!instrument || !side) {{
-            alert('ȱ�ٺ�Լ������Ϣ���޷��µ���');
+            showNotification('缺少合约信息，无法下单。', 'error');
             return;
           }}
           const notionalValue = Number(autoNotionalInput?.value);
           if (!Number.isFinite(notionalValue) || notionalValue <= 0) {{
-            alert('���� ��Auto Order Notional�� ��������� 0 �Ľ�');
+            showNotification('请在 Auto Order Notional 输入大于 0 的金额。', 'error');
             return;
           }}
           const originalText = button.textContent;
           button.disabled = true;
-          button.textContent = '�µ���...';
+          button.textContent = '下单中...';
           const requestBody = {{
             instrument_id: instrument,
             side,
@@ -3105,14 +3279,15 @@ LIQUIDATION_TEMPLATE = r"""
               if (ok) {{
                 const est = Number(data.notional_estimate);
                 const confirmation = Number.isFinite(est) ? est : notionalValue;
-                alert(`���ύ ${{side === 'buy' ? '����' : '����'}} ���� �� $${{confirmation.toFixed(2)}} USDT��`);
+                const actionText = side === 'buy' ? '做多' : '做空';
+                showNotification(`已提交${{actionText}}订单，预估 $${{confirmation.toFixed(2)}} USDT。`, 'success');
               }} else {{
-                alert(data.detail || '�µ�ʧ�ܣ����Ժ����ԡ�');
+                showNotification(data.detail || '下单失败，请稍后重试。', 'error');
               }}
             }})
             .catch((err) => {{
               console.error(err);
-              alert('�µ�ʧ�ܣ����Ժ����ԡ�');
+              showNotification('下单失败，请稍后重试。', 'error');
             }})
             .finally(() => {{
               button.disabled = false;
@@ -3230,6 +3405,8 @@ LIQUIDATION_TEMPLATE = r"""
         setInterval(refresh, 1000);
       }})();
     </script>
+
+    <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
 </html>
 """
@@ -3800,6 +3977,8 @@ ORDERBOOK_TEMPLATE = r"""
         setInterval(refresh, 2000);
       }})();
     </script>
+
+    <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
 </html>
 """
@@ -4568,6 +4747,8 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         }
       })();
     </script>
+
+    <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
 </html>
 """)

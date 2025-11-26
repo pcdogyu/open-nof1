@@ -47,8 +47,7 @@ TRADABLE_INSTRUMENTS = [   'XRP-USDT-SWAP',
     'LTC-USDT-SWAP',
     'BCH-USDT-SWAP',
     'SUI-USDT-SWAP',
-    'UNI-USDT-SWAP',
-    'PUMP-USDT-SWAP']
+    'UNI-USDT-SWAP']
 
 # Default polling interval (seconds) for the market data pipeline loop.
 PIPELINE_POLL_INTERVAL = 3600

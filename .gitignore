@@ -67,3 +67,14 @@ risk/__pycache__/notional_limits.cpython-313.pyc
 services/jobs/__pycache__/scheduler.cpython-313.pyc
 services/webapp/__pycache__/main.cpython-313.pyc
 services/webapp/__pycache__/routes.cpython-313.pyc
+__pycache__/config.cpython-313.pyc
+__pycache__/config.cpython-313.pyc
+data_pipeline/__pycache__/influx.cpython-310.pyc
+exchanges/okx/__pycache__/paper.cpython-310.pyc
+risk/__pycache__/__init__.cpython-310.pyc
+risk/__pycache__/engine.cpython-310.pyc
+risk/__pycache__/notional_limits.cpython-310.pyc
+services/jobs/__pycache__/scheduler.cpython-310.pyc
+services/webapp/__pycache__/main.cpython-310.pyc
+services/webapp/__pycache__/main.cpython-313.pyc
+services/webapp/__pycache__/routes.cpython-310.pyc
