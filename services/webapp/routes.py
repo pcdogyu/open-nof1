@@ -1150,6 +1150,10 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
     lot_size = _try_float(instrument_meta.get("lotSz")) or 0.0
     min_size = _try_float(instrument_meta.get("minSz")) or 0.0
     max_size = _try_float(instrument_meta.get("maxSz")) or 0.0
+    contract_value = _try_float(instrument_meta.get("ctVal")) or 0.0
+    inst_type = (instrument_meta.get("instType") or "").upper()
+    uses_contract_units = contract_value > 0 and inst_type in {"SWAP", "FUTURES"}
+    base_per_contract = contract_value if contract_value > 0 else 1.0
 
     try:
         ticker = _fetch_public_ticker(symbol)
@@ -1165,8 +1169,10 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
     if order_mode == "notional":
         notional_requested = adjusted_size
         if not price_hint or price_hint <= 0:
-            raise HTTPException(status_code=400, detail="无法获取有效的行情价格，无法按金额下单。")
+            raise HTTPException(status_code=400, detail="无法获取有效行情价格，无法根据金额下单")
         adjusted_size = notional_requested / price_hint
+        if uses_contract_units and base_per_contract > 0:
+            adjusted_size = adjusted_size / base_per_contract
 
     if lot_size > 0:
         steps = max(1, math.ceil(adjusted_size / lot_size))
@@ -1180,17 +1186,22 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
     max_notional = float(risk.get("max_order_notional_usd", 0.0))
     if price_hint and min_notional > 0:
         min_contracts = min_notional / price_hint
+        if uses_contract_units and base_per_contract > 0:
+            min_contracts = min_contracts / base_per_contract
         if min_contracts > adjusted_size:
             adjusted_size = min_contracts
     if price_hint and max_notional > 0:
         max_contracts = max_notional / price_hint
+        if uses_contract_units and base_per_contract > 0:
+            max_contracts = max_contracts / base_per_contract
         if max_contracts > 0 and adjusted_size > max_contracts:
             adjusted_size = max_contracts
 
     if adjusted_size <= 0:
-        raise HTTPException(status_code=400, detail="调整后下单数量无效。")
+        raise HTTPException(status_code=400, detail="调整后的下单数量无效")
 
     rounded_size = round(adjusted_size, 8)
+    executed_base_size = rounded_size * base_per_contract if uses_contract_units else rounded_size
     result = place_manual_okx_order(
         account_id=account_id,
         instrument_id=symbol,
@@ -1200,17 +1211,19 @@ def okx_wave_order_api(payload: WaveOrderRequest) -> dict:
         price=None,
         margin_mode=None,
     )
-    notional_estimate: Optional[float]
-    if order_mode == "notional" and notional_requested is not None:
+    if price_hint:
+        notional_estimate = executed_base_size * price_hint
+    elif order_mode == "notional" and notional_requested is not None:
         notional_estimate = notional_requested
     else:
-        notional_estimate = rounded_size * price_hint if price_hint else None
+        notional_estimate = None
     return {
         "status": result.get("status"),
         "order_id": result.get("order_id"),
         "instrument_id": symbol,
         "side": side,
         "size": rounded_size,
+        "base_size": executed_base_size,
         "reference_price": price_hint,
         "notional_estimate": notional_estimate,
         "order_mode": order_mode,
@@ -1836,6 +1849,11 @@ def close_okx_position(
         pos_side_payload: str | None = pos_side
         detected_side: str | None = None
         detected_margin_mode: str | None = None
+        requested_entry_side = "long" if close_side == "sell" else "short"
+        selected_entry: dict | None = None
+        fallback_entry: dict | None = None
+        fallback_side: str | None = None
+        fallback_mode: str | None = None
         try:
             live_positions = client.fetch_positions(symbols=[symbol])
         except Exception:
@@ -1854,14 +1872,30 @@ def close_okx_position(
             entry_side = (entry.get("posSide") or entry.get("side") or "").strip().lower()
             if not entry_side:
                 entry_side = "long" if pos_qty > 0 else "short"
-            detected_side = entry_side
             raw_mode = (entry.get("mgnMode") or entry.get("marginMode") or "").strip()
-            if raw_mode:
-                detected_margin_mode = raw_mode.lower()
-            break
+            normalized_mode = raw_mode.lower() if raw_mode else None
+            if entry_side == "net":
+                selected_entry = entry
+                detected_side = entry_side
+                detected_margin_mode = normalized_mode
+                break
+            if entry_side == requested_entry_side:
+                selected_entry = entry
+                detected_side = entry_side
+                detected_margin_mode = normalized_mode
+                break
+            if fallback_entry is None:
+                fallback_entry = entry
+                fallback_side = entry_side
+                fallback_mode = normalized_mode
+        if selected_entry is None and fallback_entry is not None:
+            selected_entry = fallback_entry
+            detected_side = fallback_side
+            detected_margin_mode = fallback_mode
+        entry = selected_entry
         if detected_margin_mode:
             margin_mode_value = detected_margin_mode
-        if detected_side:
+        if detected_side and entry:
             if detected_side == "net":
                 pos_side_payload = None
                 net_position = True
@@ -2086,13 +2120,25 @@ def get_liquidation_snapshot(limit: int = 50, instrument: Optional[str] = None) 
     ]
     if instrument_filter and instrument_filter not in tracked_instruments:
         tracked_instruments.append(instrument_filter)
-    wave_detector.bulk_update(grouped_records)
+    baseline_overrides = _compute_wave_baselines(grouped_records)
+    price_change_map = _compute_wave_price_changes(grouped_records)
+    wave_detector.bulk_update(grouped_records, baseline_overrides=baseline_overrides)
     wave_signals = wave_detector.snapshot_signals(tracked_instruments or grouped_records.keys())
+    for signal in wave_signals:
+        inst_upper = (signal.instrument or "").upper()
+        price_change = price_change_map.get(inst_upper)
+        if price_change is not None:
+            signal.metrics.price_change_pct = price_change
     wave_payloads: list[dict] = [signal.to_payload() for signal in wave_signals]
     wave_summary = _summarize_wave_status(wave_signals)
     if not wave_payloads:
         wave_payloads = _fallback_wave_signals(grouped_records)
         if wave_payloads:
+            for payload in wave_payloads:
+                inst_upper = (payload.get("instrument") or "").upper()
+                price_change = price_change_map.get(inst_upper)
+                if price_change is not None:
+                    payload.setdefault("metrics", {})["price_change_pct"] = price_change
             wave_summary = "Fallback: using last 30m liquidations"
     return {
         "instrument": instrument_filter,
@@ -2200,6 +2246,83 @@ def _fallback_wave_signals(grouped_records: dict[str, list[dict]]) -> list[dict]
         )
 
     return fallbacks
+
+
+def _parse_record_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        ts = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _extract_record_abs_qty(record: dict) -> float:
+    qty = _coerce_float(record.get("net_qty"))
+    if qty is not None:
+        return abs(qty)
+    long_qty = _coerce_float(record.get("long_qty"))
+    short_qty = _coerce_float(record.get("short_qty"))
+    candidates = [long_qty, short_qty]
+    for value in candidates:
+        if value:
+            return abs(value)
+    notional = _coerce_float(record.get("notional_value"))
+    price = _coerce_float(record.get("last_price"))
+    if notional and price and price > 0:
+        return abs(notional / price)
+    return 0.0
+
+
+def _compute_wave_baselines(grouped_records: dict[str, list[dict]]) -> dict[str, float]:
+    now = datetime.now(tz=timezone.utc)
+    cutoff = now - timedelta(hours=4)
+    baselines: dict[str, float] = {}
+    for instrument, records in grouped_records.items():
+        total = 0.0
+        count = 0
+        for record in records:
+            ts = _parse_record_timestamp(record.get("timestamp"))
+            if ts is None or ts < cutoff:
+                continue
+            total += _extract_record_abs_qty(record)
+            count += 1
+        baselines[instrument.upper()] = total / count if count else 0.0
+    return baselines
+
+
+def _compute_wave_price_changes(grouped_records: dict[str, list[dict]]) -> dict[str, float]:
+    now = datetime.now(tz=timezone.utc)
+    cutoff = now - timedelta(minutes=15)
+    price_map: dict[str, float] = {}
+    for instrument, records in grouped_records.items():
+        latest: tuple[datetime, float] | None = None
+        reference: tuple[datetime, float] | None = None
+        for record in records:
+            ts = _parse_record_timestamp(record.get("timestamp"))
+            price = _coerce_float(record.get("last_price"))
+            if ts is None or price is None or price <= 0:
+                continue
+            if latest is None or ts > latest[0]:
+                latest = (ts, price)
+            if ts <= cutoff:
+                if reference is None or ts > reference[0]:
+                    reference = (ts, price)
+        if latest is None:
+            continue
+        latest_price = latest[1]
+        base_price = reference[1] if reference else latest_price
+        if base_price <= 0:
+            continue
+        change_pct = ((latest_price - base_price) / base_price) * 100.0
+        price_map[instrument.upper()] = change_pct
+    return price_map
 
 
 def get_orderbook_snapshot(

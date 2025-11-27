@@ -132,10 +132,16 @@ class WaveDetector:
         self._events: Dict[tuple[str, str], WaveEvent] = {}
         self._lock = Lock()
 
-    def update(self, instrument: str, records: Sequence[dict]) -> WaveSignal:
+    def update(
+        self,
+        instrument: str,
+        records: Sequence[dict],
+        *,
+        baseline_override: float | None = None,
+    ) -> WaveSignal:
         name = instrument.upper().strip() or "UNKNOWN"
         with self._lock:
-            signal = self._update_locked(name, records)
+            signal = self._update_locked(name, records, baseline_override)
             self._signals[name] = signal
             return signal
 
@@ -167,14 +173,19 @@ class WaveDetector:
         with self._lock:
             return self._events.get(key)
 
-    def _update_locked(self, instrument: str, records: Sequence[dict]) -> WaveSignal:
+    def _update_locked(
+        self,
+        instrument: str,
+        records: Sequence[dict],
+        baseline_override: float | None = None,
+    ) -> WaveSignal:
         state = self._states.setdefault(instrument, _WaveState())
         window = self._prepare_window(records)
         if not window:
             signal = self._build_default_signal(instrument)
             state.last_signal = signal
             return signal
-        metrics = self._compute_metrics(window, state)
+        metrics = self._compute_metrics(window, state, baseline_override=baseline_override)
         signal = self._evaluate_signal(instrument, state, metrics, window[-1]["timestamp"])
         state.last_signal = signal
         return signal
@@ -199,7 +210,13 @@ class WaveDetector:
             normalized = normalized[-self.window_size :]
         return normalized
 
-    def _compute_metrics(self, window: Sequence[dict], state: _WaveState) -> WaveMetrics:
+    def _compute_metrics(
+        self,
+        window: Sequence[dict],
+        state: _WaveState,
+        *,
+        baseline_override: float | None = None,
+    ) -> WaveMetrics:
         flv = 0.0
         fls = 0.0
         total_long = 0.0
@@ -229,9 +246,12 @@ class WaveDetector:
         price_drop_pct = abs(price_change_pct) if price_change_pct < 0 else 0.0
         price_rise_pct = price_change_pct if price_change_pct > 0 else 0.0
         density = flv if duration_minutes <= 0 else flv / max(duration_minutes, 1 / 60)
-        target_baseline = state.baseline if state.baseline is not None else flv
-        smoothed = ((target_baseline or flv) * (1 - self.smoothing)) + (flv * self.smoothing)
-        state.baseline = max(smoothed, 1e-9)
+        if baseline_override is not None and baseline_override >= 0:
+            state.baseline = max(baseline_override, 1e-9)
+        else:
+            target_baseline = state.baseline if state.baseline is not None else flv
+            smoothed = ((target_baseline or flv) * (1 - self.smoothing)) + (flv * self.smoothing)
+            state.baseline = max(smoothed, 1e-9)
         le = (flv / price_drop_pct) if price_drop_pct > 0 else None
         pc = (fls / price_drop_pct) if price_drop_pct > 0 else None
         lpi = flv / state.baseline if state.baseline else 0.0
@@ -499,17 +519,33 @@ class WaveDetector:
 _DETECTOR = WaveDetector()
 
 
-def update_wave(instrument: str, records: Sequence[dict]) -> WaveSignal:
-    return _DETECTOR.update(instrument, records)
+def update_wave(
+    instrument: str,
+    records: Sequence[dict],
+    *,
+    baseline_override: float | None = None,
+) -> WaveSignal:
+    return _DETECTOR.update(instrument, records, baseline_override=baseline_override)
 
 
-def bulk_update(grouped_records: Dict[str, Sequence[dict]]) -> Dict[str, WaveSignal]:
+def bulk_update(
+    grouped_records: Dict[str, Sequence[dict]],
+    *,
+    baseline_overrides: Dict[str, float] | None = None,
+) -> Dict[str, WaveSignal]:
     results: Dict[str, WaveSignal] = {}
     for instrument, rows in grouped_records.items():
+        baseline = None
+        if baseline_overrides:
+            baseline = baseline_overrides.get(instrument.upper())
         try:
-            results[instrument.upper()] = _DETECTOR.update(instrument, rows)
+            results[instrument.upper()] = _DETECTOR.update(
+                instrument,
+                rows,
+                baseline_override=baseline,
+            )
         except Exception:
-            results[instrument.upper()] = _DETECTOR.update(instrument, [])
+            results[instrument.upper()] = _DETECTOR.update(instrument, [], baseline_override=baseline)
     return results
 
 

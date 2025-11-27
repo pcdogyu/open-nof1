@@ -3232,7 +3232,7 @@ LIQUIDATION_TEMPLATE = r"""
                     <th>FLV / 均值</th>
                     <th>最新价格</th>
                     <th>价格涨跌幅</th>
-                    <th>LE 爆仓弹性(单位跌幅触发强平数)</th>
+                    <th>爆仓弹性(涨跌1%触发强平数)</th>
                     <th>PC 价格压力(潜在剧烈波动)</th>
                     <th>密度</th>
                     <th>LPI 强平压力指数</th>
@@ -3414,6 +3414,26 @@ LIQUIDATION_TEMPLATE = r"""
               <button type="button" class="order-btn${{sellActive}}" data-instrument="${{instrument}}" data-side="sell">卖出</button>
             </div>`;
         }};
+        const normalizeInstrument = (value) => (value || '').trim().toUpperCase();
+        const sortWaveSignals = (signals) => {{
+          if (!Array.isArray(signals)) {{ return []; }}
+          const priority = {{
+            'ETH-USDT-SWAP': 0,
+            'ETHUSDT': 0,
+            'BTC-USDT-SWAP': 1,
+            'BTCUSDT': 1,
+          }};
+          return [...signals].sort((a, b) => {{
+            const instA = normalizeInstrument(a?.instrument);
+            const instB = normalizeInstrument(b?.instrument);
+            const rankA = Object.prototype.hasOwnProperty.call(priority, instA) ? priority[instA] : 2;
+            const rankB = Object.prototype.hasOwnProperty.call(priority, instB) ? priority[instB] : 2;
+            if (rankA !== rankB) {{
+              return rankA - rankB;
+            }}
+            return instA.localeCompare(instB);
+          }});
+        }};
         const renderWaveTable = (signals) => {{
           const body = waveTableBody;
           if (!body) {{ return; }}
@@ -3421,7 +3441,7 @@ LIQUIDATION_TEMPLATE = r"""
             body.innerHTML = '<tr><td colspan="11" class="empty-state">等待数据...</td></tr>';
             return;
           }}
-          const rows = signals.map((signal) => {{
+          const rows = sortWaveSignals(signals).map((signal) => {{
             const metrics = signal.metrics || {{}};
             const flvText = `${{fmtNumber(metrics.flv, 2)}} / ${{fmtNumber(metrics.baseline, 2)}}`;
             const priceChange = Number(metrics.price_change_pct);
@@ -3499,7 +3519,14 @@ LIQUIDATION_TEMPLATE = r"""
                 const est = Number(data.notional_estimate);
                 const confirmation = Number.isFinite(est) ? est : notionalValue;
                 const actionText = side === 'buy' ? '做多' : '做空';
-                showNotification(`已提交${{actionText}}订单，预估 $${{confirmation.toFixed(2)}} USDT。`, 'success');
+                const instrumentLabel = (data.instrument_id || instrument || '--').toUpperCase();
+                const baseSizeValue = Number(data.base_size);
+                const contractSizeValue = Number(data.size);
+                const qtyValue = Number.isFinite(baseSizeValue) ? baseSizeValue : contractSizeValue;
+                const qtyDigits = Number.isFinite(qtyValue) && Math.abs(qtyValue) < 1 ? 4 : 2;
+                const qtyText = Number.isFinite(qtyValue) ? fmtNumber(qtyValue, qtyDigits) : '--';
+                const amountText = fmtNumber(confirmation, 2);
+                showNotification(`已提交${{instrumentLabel}} ${{actionText}}订单，数量 ${{qtyText}}，预估 $${{amountText}} USDT。`, 'success');
               }} else {{
                 showNotification(data.detail || '下单失败，请稍后重试。', 'error');
               }}
@@ -4379,6 +4406,7 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
         let panOffset = 0;
         let lastRenderBins = [];
         let lastRenderPrice = null;
+        let lastRenderState = null;
 
         const syncLegendPrice = () => {
           if (!legendPriceEl || !lastPriceEl) { return; }
@@ -4536,7 +4564,16 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
 
         const updateAmountAxis = (maxValue) => {
           if (!amountAxisEl) { return; }
+          const safeMax = Math.max(Number(maxValue) || 0, 1);
           amountAxisEl.innerHTML = '';
+          const ticks = 3;
+          for (let i = 0; i < ticks; i += 1) {
+            const ratio = i / (ticks - 1);
+            const value = safeMax * (1 - ratio);
+            const span = document.createElement('span');
+            span.textContent = i === ticks - 1 ? '0' : formatCurrency(value);
+            amountAxisEl.appendChild(span);
+          }
         };
 
         const updatePriceAxis = (bins, latestPrice) => {
@@ -4588,17 +4625,30 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           const centerPrice = Number.isFinite(latestPrice) ? latestPrice : (minPrice + maxPrice) / 2;
           const visibleRange = priceRangeFull / Math.max(zoomLevel, 1);
           const halfRange = visibleRange / 2;
-          const clampedCenter = Math.min(
-            Math.max(centerPrice + panOffset * halfRange, minPrice + halfRange),
-            maxPrice - halfRange
-          );
-          const visibleMin = clampedCenter - halfRange;
-          const visibleMax = clampedCenter + halfRange;
+          const panShiftRange = priceRangeFull / 2;
+          let targetCenter = centerPrice + panOffset * panShiftRange;
+          if (!Number.isFinite(targetCenter)) {
+            targetCenter = (minPrice + maxPrice) / 2;
+          }
+          const minCenter = minPrice + halfRange;
+          const maxCenter = maxPrice - halfRange;
+          if (minCenter >= maxCenter) {
+            targetCenter = (minPrice + maxPrice) / 2;
+          } else {
+            targetCenter = Math.min(Math.max(targetCenter, minCenter), maxCenter);
+          }
+          const visibleMin = Math.max(minPrice, targetCenter - halfRange);
+          const visibleMax = Math.min(maxPrice, targetCenter + halfRange);
           const priceRange = Math.max(visibleMax - visibleMin, 1);
           const bids = bins.filter((bin) => (bin.side || '').toLowerCase() === 'bid');
           const asks = bins.filter((bin) => (bin.side || '').toLowerCase() === 'ask');
-          const maxNotional = Math.max(...bins.map((bin) => Number(bin.notional) || 0), 0);
-          const yMax = Math.max(maxNotional, 1);
+          const visibleBins = bins.filter((bin) => {
+            const price = Number(bin?.price);
+            return Number.isFinite(price) && price >= visibleMin && price <= visibleMax;
+          });
+          const candidateBins = visibleBins.length ? visibleBins : bins;
+          const maxNotional = Math.max(...candidateBins.map((bin) => Number(bin.notional) || 0), 0);
+          const yMax = Math.max(maxNotional * 1.05, 1);
           updateAmountAxis(yMax);
           updatePriceAxis(bins, latestPrice);
           let markerPrice = Number.isFinite(latestPrice) ? latestPrice : NaN;
@@ -4729,6 +4779,13 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
             textEl.textContent = formatPrice(price);
             chartSvg.appendChild(textEl);
           }
+          lastRenderState = {
+            minPrice,
+            maxPrice,
+            visibleRange,
+            priceRangeFull,
+            chartWidth,
+          };
         };
 
         const renderHistoryTables = (historyPayload) => {
@@ -4966,12 +5023,15 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
           window.addEventListener('mouseup', () => { isDragging = false; });
           window.addEventListener('mousemove', (event) => {
             if (!isDragging) { return; }
+            const state = lastRenderState;
+            if (!state) { return; }
             const rectMove = chartSvg.getBoundingClientRect();
-            const widthMove = rectMove.width || 1;
+            const widthMove = state.chartWidth || rectMove.width || 1;
             const deltaX = event.clientX - startX;
             startX = event.clientX;
             const normalizedShift = deltaX / Math.max(widthMove, 1);
-            panOffset = Math.max(-1, Math.min(1, panOffset - normalizedShift * 2));
+            const rangeRatio = state.priceRangeFull > 0 ? (state.visibleRange / state.priceRangeFull) : 0;
+            panOffset = Math.max(-1, Math.min(1, panOffset - normalizedShift * rangeRatio * 2));
             renderBars(lastRenderBins, lastRenderPrice);
           });
           let resizeTimer = null;
