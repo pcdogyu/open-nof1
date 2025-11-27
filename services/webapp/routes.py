@@ -54,6 +54,12 @@ except ImportError:  # pragma: no cover
         logger.debug("websocket instrumentation unavailable; skipping stream update.")
 
 CONFIG_PATH = Path("config.py")
+_DEFAULT_CONFIG_STUB = '''"""
+Generated configuration overrides for open-nof1.ai.
+
+This file is created automatically when settings are saved from the web UI.
+"""
+'''
 MARKET_DEPTH_ATTACHMENT_DIR = Path("data/attachments/market_depth")
 _DEFAULT_LIQUIDATION_INTERVAL = 120
 
@@ -3540,13 +3546,37 @@ def _persist_risk_settings(settings: Dict[str, object]) -> None:
 
 
 def _replace_config_assignment(var_name: str, value: object) -> None:
-    """Replace a top-level assignment in config.py with the provided value."""
+    """Replace or append a top-level assignment in config.py."""
     if not CONFIG_PATH.exists():
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(_DEFAULT_CONFIG_STUB, encoding="utf-8")
+
+    try:
+        source = CONFIG_PATH.read_text(encoding="utf-8")
+    except OSError:
+        logger.warning("Unable to read %s for persistence; skipping.", CONFIG_PATH)
         return
-    source = CONFIG_PATH.read_text(encoding="utf-8")
+
     try:
         tree = ast.parse(source)
     except SyntaxError:
+        logger.warning("Config file contains syntax errors; appending %s inline.", var_name)
+        tree = None
+
+    formatted_value = (
+        pprint.pformat(value, indent=4, sort_dicts=False, width=100)
+        if isinstance(value, (dict, list, tuple))
+        else repr(value)
+    )
+    formatted = f"{var_name} = {formatted_value}"
+    replacement_lines = formatted.splitlines()
+
+    if tree is None:
+        lines = source.splitlines()
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend(replacement_lines)
+        CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return
 
     assign_node: ast.Assign | None = None
@@ -3559,19 +3589,16 @@ def _replace_config_assignment(var_name: str, value: object) -> None:
         if assign_node is not None:
             break
 
-    if assign_node is None or not hasattr(assign_node, "lineno") or not hasattr(assign_node, "end_lineno"):
-        return
-
-    start = assign_node.lineno - 1
-    end = assign_node.end_lineno
     lines = source.splitlines()
-    if isinstance(value, (dict, list, tuple)):
-        formatted_value = pprint.pformat(value, indent=4, sort_dicts=False, width=100)
+    if assign_node is None or not hasattr(assign_node, "lineno") or not hasattr(assign_node, "end_lineno"):
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend(replacement_lines)
     else:
-        formatted_value = repr(value)
-    formatted = f"{var_name} = {formatted_value}"
-    replacement_lines = formatted.splitlines()
-    lines[start:end] = replacement_lines
+        start = max(assign_node.lineno - 1, 0)
+        end = assign_node.end_lineno
+        lines[start:end] = replacement_lines
+
     CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

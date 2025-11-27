@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
+import textwrap
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from string import Template
@@ -414,6 +416,31 @@ async def submit_pipeline_settings(
     form_data = await request.form()
     overrides = _collect_override_payload(form_data, instrument_list)
     routes.update_pipeline_settings(instrument_list, poll_interval, overrides)
+    risk_payload = _collect_inline_risk_payload(form_data)
+    if risk_payload:
+        current_risk = routes.get_risk_settings()
+        routes.update_risk_settings(
+            price_tolerance_pct=risk_payload["price_tolerance_pct_percent"] / 100.0,
+            max_drawdown_pct=current_risk["max_drawdown_pct"],
+            max_loss_absolute=current_risk["max_loss_absolute"],
+            cooldown_seconds=current_risk["cooldown_seconds"],
+            min_notional_usd=risk_payload["min_notional_usd"],
+            max_order_notional_usd=risk_payload["max_order_notional_usd"],
+            max_position=current_risk["max_position"],
+            take_profit_pct=current_risk["take_profit_pct"],
+            stop_loss_pct=current_risk["stop_loss_pct"],
+            position_take_profit_pct=current_risk["position_take_profit_pct"],
+            position_stop_loss_pct=current_risk["position_stop_loss_pct"],
+            default_leverage=risk_payload["default_leverage"],
+            max_leverage=risk_payload["max_leverage"],
+            pyramid_max_orders=risk_payload["pyramid_max_orders"],
+            pyramid_reentry_pct=risk_payload["pyramid_reentry_pct"],
+            liquidation_notional_threshold=risk_payload["liquidation_notional_threshold"],
+            liquidation_same_direction_count=risk_payload["liquidation_same_direction_count"],
+            liquidation_opposite_count=risk_payload["liquidation_opposite_count"],
+            liquidation_silence_seconds=risk_payload["liquidation_silence_seconds"],
+            max_capital_pct_per_instrument=risk_payload["max_capital_pct_percent"] / 100.0,
+        )
     return RedirectResponse(url="/settings", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -1296,6 +1323,18 @@ def _render_settings_page(settings: dict, catalog: Sequence[dict], risk_settings
         liquidation_notional_display=risk_summary_values["liquidation_notional_display"],
         default_leverage_display=risk_summary_values["default_leverage_display"],
         max_leverage_display=risk_summary_values["max_leverage_display"],
+        price_tolerance_value=risk_summary_values["price_tolerance_pct"],
+        min_notional_value=risk_summary_values["min_notional_usd"],
+        max_order_notional_value=risk_summary_values["max_order_notional_usd"],
+        max_capital_pct_value=risk_summary_values["max_capital_pct_per_instrument"],
+        pyramid_reentry_value=risk_summary_values["pyramid_reentry_pct"],
+        pyramid_max_value=risk_summary_values["pyramid_max_orders"],
+        liquidation_silence_value=risk_summary_values["liquidation_silence_seconds"],
+        liquidation_same_value=risk_summary_values["liquidation_same_direction_count"],
+        liquidation_opp_value=risk_summary_values["liquidation_opposite_count"],
+        liquidation_notional_value=risk_summary_values["liquidation_notional_threshold"],
+        default_leverage_value=risk_summary_values["default_leverage"],
+        max_leverage_value=risk_summary_values["max_leverage"],
     )
 
     return SETTINGS_TEMPLATE.format(
@@ -1761,20 +1800,114 @@ def _render_liquidation_rows(items: Sequence[dict]) -> str:
     return "\n".join(rows)
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 def _render_orderbook_cards(items: Sequence[dict], levels: int) -> str:
-    _ = items, levels
-    return "<p class='empty-state'>加载市场深度...</p>"
+    """Render static orderbook cards for the initial HTML payload."""
+    esc = _escape
+    depth_limit = max(1, int(levels) if isinstance(levels, int) else 1)
 
+    def _sum_depth(rows: Sequence[Sequence[object]]) -> float:
+        total = 0.0
+        for entry in rows[:depth_limit]:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            try:
+                qty = float(entry[1])
+            except (TypeError, ValueError):
+                continue
+            total += max(0.0, qty)
+        return total
+
+    def _fmt(value: object, digits: int = 2) -> str:
+        text_val = _format_number(value, digits)
+        return text_val if text_val != "-" else "--"
+
+    def _describe(imbalance: float) -> tuple[str, str]:
+        if imbalance >= 0.2:
+            return "positive", "??????????????"
+        if imbalance <= -0.2:
+            return "negative", "????????????"
+        return "neutral", "??????????????????"
+
+    if not items:
+        return "<p class='empty-state'>??????...</p>"
+
+    cards: list[str] = []
+    for entry in items:
+        symbol = esc(str(entry.get("instrument_id") or "--"))
+        timestamp = esc(_format_asia_shanghai(entry.get("timestamp")))
+        bids = entry.get("bids") or []
+        asks = entry.get("asks") or []
+        buy_depth = _sum_depth(bids)
+        sell_depth = _sum_depth(asks)
+        total_depth = buy_depth + sell_depth
+        bid_share = buy_depth / total_depth if total_depth > 0 else 0.5
+        imbalance = (buy_depth - sell_depth) / total_depth if total_depth > 0 else 0.0
+        tone, guidance = _describe(imbalance)
+        spread_text = _fmt(entry.get("spread"), 4)
+        best_bid_text = _fmt(entry.get("best_bid"), 4)
+        best_ask_text = _fmt(entry.get("best_ask"), 4)
+        total_depth_text = _fmt(total_depth, 2)
+        buy_depth_text = _fmt(buy_depth, 2)
+        sell_depth_text = _fmt(sell_depth, 2)
+        net_depth = buy_depth - sell_depth
+        net_depth_text = _fmt(net_depth, 2)
+        best_bid_val = entry.get("best_bid")
+        best_ask_val = entry.get("best_ask")
+        mid_text = "--"
+        try:
+            bid_val = float(best_bid_val)
+            ask_val = float(best_ask_val)
+            mid_text = _fmt((bid_val + ask_val) / 2, 4)
+        except (TypeError, ValueError):
+            pass
+        history_series = entry.get("history") or []
+        history_tail = history_series[-240:]
+        history_payload = esc(json.dumps(history_tail, ensure_ascii=False))
+        bid_share_pct = int(round(bid_share * 100))
+        analysis = f"Bid share {bid_share_pct}% | {guidance} | Spread {spread_text}"
+        analysis_text = esc(analysis)
+        card_markup = textwrap.dedent(
+            f"""
+            <section class="orderbook-chart tone-{tone}">
+              <div class="chart-header">
+                <div>
+                  <h2>{symbol}</h2>
+                  <small>Data Time: {timestamp}</small>
+                </div>
+              </div>
+              <div class="chart-prices">
+                <div class="chart-price-group primary">
+                  <span>Bid {best_bid_text}</span>
+                  <span>Ask {best_ask_text}</span>
+                  <span class="mid">Mid {mid_text}</span>
+                </div>
+              </div>
+              <div class="chart-stats">
+                <span class="stat-pill">Buy Depth {buy_depth_text}</span>
+                <span class="stat-pill">Sell Depth {sell_depth_text}</span>
+                <span class="stat-pill">Total Depth {total_depth_text}</span>
+                <span class="stat-pill stat-accent">Net Depth {net_depth_text}</span>
+                <span class="stat-pill stat-accent">Spread {spread_text}</span>
+              </div>
+              <canvas class="chart-canvas" data-history='{history_payload}'></canvas>
+              <p class="chart-insight {tone}">{analysis_text}</p>
+            </section>
+            """
+        ).strip()
+        cards.append(card_markup)
     return "\n".join(cards)
-
-    return "\n".join(cards)
-
-    return "\n".join(cards)
-
-    return "\n".join(cards)
-
-    return "\n".join(cards)
-
 
 
 def _format_order(order: dict | None, *, hold_action: bool = False) -> str:
@@ -1860,6 +1993,40 @@ def _collect_override_payload(form: Mapping[str, object], instruments: Sequence[
         if entry:
             overrides[symbol] = entry
     return overrides
+
+
+def _collect_inline_risk_payload(form: Mapping[str, object]) -> Optional[dict[str, float | int]]:
+    """Extract inline global risk thresholds from the settings form."""
+    if "risk_price_tolerance_pct" not in form:
+        return None
+
+    def _coerce_float(field: str) -> float:
+        value = form.get(field)
+        text = str(value).strip() if value is not None else ""
+        if not text:
+            raise ValueError(field)
+        return float(text)
+
+    def _coerce_int(field: str) -> int:
+        return int(float(_coerce_float(field)))
+
+    try:
+        return {
+            "price_tolerance_pct_percent": _coerce_float("risk_price_tolerance_pct"),
+            "min_notional_usd": _coerce_float("risk_min_notional"),
+            "max_order_notional_usd": _coerce_float("risk_max_order_notional"),
+            "max_capital_pct_percent": _coerce_float("risk_max_capital_pct"),
+            "pyramid_reentry_pct": _coerce_float("risk_pyramid_reentry_pct"),
+            "pyramid_max_orders": _coerce_int("risk_pyramid_max_orders"),
+            "liquidation_silence_seconds": _coerce_int("risk_liquidation_silence"),
+            "liquidation_same_direction_count": _coerce_int("risk_liquidation_same"),
+            "liquidation_opposite_count": _coerce_int("risk_liquidation_opp"),
+            "liquidation_notional_threshold": _coerce_float("risk_liquidation_notional"),
+            "default_leverage": _coerce_int("risk_default_leverage"),
+            "max_leverage": _coerce_int("risk_max_leverage"),
+        }
+    except (TypeError, ValueError):
+        return None
 
 
 def _format_asia_shanghai(value: Optional[str]) -> str:
@@ -2127,12 +2294,14 @@ SETTINGS_TEMPLATE = r"""
         .override-table th {{ background-color: rgba(15, 23, 42, 0.6); }}
         .override-table td input {{ width: 100%; box-sizing: border-box; }}
         .override-table .empty-state {{ text-align: center; padding: 12px 0; color: #94a3b8; }}
-        .risk-summary-card {{ background-color: #1e293b; border-radius: 12px; padding: 20px 24px; margin-top: 1.5rem; box-shadow: 0 8px 24px rgba(2, 6, 23, 0.55); display: flex; flex-direction: column; gap: 0.8rem; }}
+        .risk-summary-card {{ background-color: #0f1f37; border-radius: 12px; padding: 16px 18px; margin-top: 1rem; box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.25), 0 8px 24px rgba(2, 6, 23, 0.55); display: flex; flex-direction: column; gap: 0.8rem; }}
+        .risk-summary-head {{ display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }}
         .risk-summary-card h3 {{ margin: 0; font-size: 1rem; }}
-        .risk-summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }}
-        .risk-summary-item {{ background-color: rgba(15, 23, 42, 0.7); border: 1px solid rgba(148, 163, 184, 0.25); border-radius: 12px; padding: 10px 12px; }}
-        .risk-summary-item span {{ display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 4px; }}
-        .risk-summary-item strong {{ font-size: 1rem; color: #e2e8f0; }}
+        .risk-summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; width: 100%; }}
+        .risk-summary-item {{ border: 1px solid rgba(148, 163, 184, 0.25); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; background-color: rgba(15, 23, 42, 0.8); }}
+        .risk-summary-item span {{ font-size: 0.8rem; color: #94a3b8; }}
+        .risk-summary-item small {{ color: #64748b; font-size: 0.75rem; }}
+        .risk-summary-card-actions {{ display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.8rem; color: #94a3b8; }}
         @media (max-width: 768px) {{
             .inline-form {{ flex-direction: column; align-items: stretch; }}
             .inline-form label {{ width: 100%; }}
@@ -2169,6 +2338,7 @@ SETTINGS_TEMPLATE = r"""
                 <label for="instrument-list">当前合约列表（每行一个）</label>
                 <textarea id="instrument-list" name="instruments" spellcheck="false">{instruments_text}</textarea>
                 <div class="chip-row">{chips_html}</div>
+                {risk_summary}
                 <h3>爆仓阈值覆盖</h3>
                 <p class="hint">留空表示继承下方“风险参数”中的全局阈值；每个币对可以独立设置。</p>
                 <table class="override-table">
@@ -2208,7 +2378,6 @@ SETTINGS_TEMPLATE = r"""
             </form>
         </section>
     </div>
-    {risk_summary}
     <p style="margin-top: 1.5rem; font-size: 0.85rem; color: #94a3b8; text-align: center;">Code by Yuhao@jiansutech.com at 2025.11</p>
 </body>
 </html>
@@ -2216,20 +2385,74 @@ SETTINGS_TEMPLATE = r"""
 
 
 SETTINGS_RISK_SUMMARY_TEMPLATE = r"""
-    <section class="risk-summary-card">
-        <h3>全局阈值速览</h3>
-        <div class="risk-summary-grid">
-            <div class="risk-summary-item"><span>价格波动容忍度</span><strong>{price_tolerance_display}%</strong></div>
-            <div class="risk-summary-item"><span>最小下单金额</span><strong>{min_notional_display} USDT</strong></div>
-            <div class="risk-summary-item"><span>最大下单金额</span><strong>{max_order_notional_display} USDT</strong></div>
-            <div class="risk-summary-item"><span>单币对最大资金占比</span><strong>{max_capital_pct_display}%</strong></div>
-            <div class="risk-summary-item"><span>金字塔偏离 / 上限</span><strong>{pyramid_reentry_display}% · {pyramid_max_display} 次</strong></div>
-            <div class="risk-summary-item"><span>同向冷静期</span><strong>{liquidation_silence_minutes} 分钟</strong></div>
-            <div class="risk-summary-item"><span>同向 / 逆向爆仓笔数</span><strong>{liquidation_same_direction_count} / {liquidation_opposite_count}</strong></div>
-            <div class="risk-summary-item"><span>爆仓名义阈值</span><strong>{liquidation_notional_display} USDT</strong></div>
-            <div class="risk-summary-item"><span>默认 / 最大杠杆</span><strong>{default_leverage_display} / {max_leverage_display}</strong></div>
-        </div>
-    </section>
+                <div class="risk-summary-card">
+                    <div class="risk-summary-head">
+                        <h3>全局阈值速览</h3>
+                        <div class="risk-summary-card-actions">修改项将随“保存设置”一起提交 · <a href="/risk" class="nav-link" style="padding:0 6px;">前往完整风控</a></div>
+                    </div>
+                    <div class="risk-summary-grid">
+                        <label class="risk-summary-item">
+                            <span>价格波动容忍度（%）</span>
+                            <input type="number" name="risk_price_tolerance_pct" min="0.1" max="50" step="0.1" value="{price_tolerance_value}" required>
+                            <small>当前 {price_tolerance_display}%</small>
+                        </label>
+                        <label class="risk-summary-item">
+                            <span>最小下单金额（USDT）</span>
+                            <input type="number" name="risk_min_notional" min="0" step="0.01" value="{min_notional_value}" required>
+                            <small>当前 {min_notional_display} USDT</small>
+                        </label>
+                        <label class="risk-summary-item">
+                            <span>最大下单金额（USDT）</span>
+                            <input type="number" name="risk_max_order_notional" min="0" step="0.01" value="{max_order_notional_value}" required>
+                            <small>当前 {max_order_notional_display} USDT</small>
+                        </label>
+                        <label class="risk-summary-item">
+                            <span>单币对最大资金占比（%）</span>
+                            <input type="number" name="risk_max_capital_pct" min="0" max="100" step="0.1" value="{max_capital_pct_value}" required>
+                            <small>当前 {max_capital_pct_display}%</small>
+                        </label>
+                        <label class="risk-summary-item">
+                            <span>金字塔偏离（%）</span>
+                            <input type="number" name="risk_pyramid_reentry_pct" min="0" max="50" step="0.1" value="{pyramid_reentry_value}" required>
+                            <small>当前 {pyramid_reentry_display}%</small>
+                        </label>
+                        <label class="risk-summary-item">
+                            <span>金字塔订单上限</span>
+                            <input type="number" name="risk_pyramid_max_orders" min="0" max="100" step="1" value="{pyramid_max_value}" required>
+                            <small>当前 {pyramid_max_display} 次</small>
+                        </label>
+                        <label class="risk-summary-item">
+                            <span>同向冷静期（秒）</span>
+                            <input type="number" name="risk_liquidation_silence" min="0" max="3600" step="10" value="{liquidation_silence_value}" required>
+                            <small>约 {liquidation_silence_minutes} 分钟</small>
+                        </label>
+                        <label class="risk-summary-item">
+                            <span>同向爆仓笔数</span>
+                            <input type="number" name="risk_liquidation_same" min="1" max="50" step="1" value="{liquidation_same_value}" required>
+                            <small>当前 {liquidation_same_direction_count} 笔</small>
+                        </label>
+                        <label class="risk-summary-item">
+                            <span>逆向告警笔数</span>
+                            <input type="number" name="risk_liquidation_opp" min="0" max="50" step="1" value="{liquidation_opp_value}" required>
+                            <small>当前 {liquidation_opposite_count} 笔</small>
+                        </label>
+                        <label class="risk-summary-item">
+                            <span>爆仓名义阈值（USDT）</span>
+                            <input type="number" name="risk_liquidation_notional" min="0" step="1" value="{liquidation_notional_value}" required>
+                            <small>当前 {liquidation_notional_display} USDT</small>
+                        </label>
+                        <label class="risk-summary-item">
+                            <span>默认杠杆</span>
+                            <input type="number" name="risk_default_leverage" min="1" max="125" step="1" value="{default_leverage_value}" required>
+                            <small>当前 {default_leverage_display} x</small>
+                        </label>
+                        <label class="risk-summary-item">
+                            <span>最大杠杆</span>
+                            <input type="number" name="risk_max_leverage" min="1" max="125" step="1" value="{max_leverage_value}" required>
+                            <small>当前 {max_leverage_display} x</small>
+                        </label>
+                    </div>
+                </div>
 """
 
 ORDER_DEBUG_TEMPLATE = r"""
@@ -3332,6 +3555,7 @@ LIQUIDATION_TEMPLATE = r"""
         const orderQtyValue = document.getElementById('last-order-qty');
         const orderAmountValue = document.getElementById('last-order-amount');
         let notificationTimer = null;
+        const pendingOrderButtons = new Set();
         const hideNotification = () => {{
           if (!notificationBar) {{ return; }}
           notificationBar.classList.remove('show', 'success', 'error');
@@ -3360,13 +3584,40 @@ LIQUIDATION_TEMPLATE = r"""
           if (!isFinite(num)) {{ return '-'; }}
           return num.toFixed(digits);
         }};
-        const updateOrderSummary = ({ sideLabel, pairLabel, qtyLabel, amountLabel }) => {{
+        const getButtonFallbackText = (button, side) => {{
+          const derivedSide = side || button?.getAttribute?.('data-side');
+          return derivedSide === 'buy' ? '买入' : '卖出';
+        }};
+        const setOrderButtonPending = (button, side) => {{
+          if (!button) {{ return; }}
+          if (!button.getAttribute('data-original-text')) {{
+            button.setAttribute('data-original-text', button.textContent || getButtonFallbackText(button, side));
+          }}
+          button.disabled = true;
+          button.textContent = side === 'buy' ? '买入中' : '卖出中';
+          pendingOrderButtons.add(button);
+        }};
+        const restoreOrderButton = (button) => {{
+          if (!button) {{ return; }}
+          const fallback = button.getAttribute('data-original-text') || getButtonFallbackText(button);
+          button.textContent = fallback;
+          button.disabled = false;
+          button.removeAttribute('data-original-text');
+          pendingOrderButtons.delete(button);
+        }};
+        const releaseAllPendingOrderButtons = () => {{
+          if (!pendingOrderButtons.size) {{ return; }}
+          pendingOrderButtons.forEach((btn) => restoreOrderButton(btn));
+          pendingOrderButtons.clear();
+        }};
+        const updateOrderSummary = ({{ sideLabel, pairLabel, qtyLabel, amountLabel }}) => {{
           if (!orderSummaryPanel) {{ return; }}
           if (orderSideValue) {{ orderSideValue.textContent = sideLabel || '--'; }}
           if (orderPairValue) {{ orderPairValue.textContent = pairLabel || '--'; }}
           if (orderQtyValue) {{ orderQtyValue.textContent = qtyLabel || '--'; }}
           if (orderAmountValue) {{ orderAmountValue.textContent = amountLabel || '--'; }}
           orderSummaryPanel.hidden = false;
+          releaseAllPendingOrderButtons();
         }};
         const fmtTimestamp = (value) => {{
           if (!value) {{ return '--'; }}
@@ -3563,9 +3814,7 @@ LIQUIDATION_TEMPLATE = r"""
             showNotification('请在 Auto Order Notional 输入大于 0 的金额。', 'error');
             return;
           }}
-          const originalText = button.textContent;
-          button.disabled = true;
-          button.textContent = '下单中...';
+          setOrderButtonPending(button, side);
           const requestBody = {{
             instrument_id: instrument,
             side,
@@ -3588,7 +3837,7 @@ LIQUIDATION_TEMPLATE = r"""
               if (ok) {{
                 const est = Number(data.notional_estimate);
                 const confirmation = Number.isFinite(est) ? est : notionalValue;
-                const actionText = side === 'buy' ? '做多' : '做空';
+                const actionText = side === 'buy' ? '????' : '????';
                 const instrumentLabel = (data.instrument_id || instrument || '--').toUpperCase();
                 const baseSizeValue = Number(data.base_size);
                 const contractSizeValue = Number(data.size);
@@ -3604,18 +3853,21 @@ LIQUIDATION_TEMPLATE = r"""
                   qtyLabel: qtyText,
                   amountLabel,
                 }});
-                showNotification(`已提交${{instrumentLabel}} ${{actionText}}订单，数量 ${{qtyText}}，预估 $${{amountText}} USDT。`, 'success');
-              }} else {{
-                showNotification(data.detail || '下单失败，请稍后重试。', 'error');
+                showNotification(`????${{instrumentLabel}} ${{actionText}}?????????? ${{qtyText}}????? $${{amountText}} USDT??`, 'success');
+                return;
               }}
+              showNotification(data.detail || '?????????????????', 'error');
+              restoreOrderButton(button);
             }})
             .catch((err) => {{
               console.error(err);
-              showNotification('下单失败，请稍后重试。', 'error');
+              showNotification('?????????????????', 'error');
+              restoreOrderButton(button);
             }})
             .finally(() => {{
-              button.disabled = false;
-              button.textContent = originalText;
+              if (pendingOrderButtons.has(button)) {{
+                restoreOrderButton(button);
+              }}
             }});
         }};
         waveTableBody?.addEventListener('click', (event) => {{

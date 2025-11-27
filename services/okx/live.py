@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Dict
 
+import httpx
+
 from exchanges.base_client import ExchangeCredentials
 from exchanges.okx.paper import OkxPaperClient, OkxClientError
 from services.okx.transform import extract_balances, normalize_orders, normalize_positions, normalize_trades
@@ -33,7 +35,7 @@ def fetch_account_snapshot(account_meta: dict, *, limit: int = 50) -> dict:
         positions_raw = client.fetch_positions()
         orders_raw = client.fetch_open_orders(limit=limit)
         fills_raw = client.fetch_fills(inst_type="SWAP", limit=limit)
-    except OkxClientError as exc:
+    except (OkxClientError, httpx.HTTPError) as exc:
         raise RuntimeError(f"Failed to fetch OKX data for {account_id}: {exc}") from exc
     finally:
         client.close()

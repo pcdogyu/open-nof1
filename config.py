@@ -30,7 +30,7 @@ INFLUX_PROFILES = [
         "org": INFLUX_ORG,
         "bucket": INFLUX_BUCKET,
         "token": INFLUX_SECONDARY_TOKEN,
-        "enabled": True,  # 备用实例尚未启用，避免随机选择到无响应端口
+        "enabled": False,  # 备用实例尚未启用，避免随机选择到无响应端口
     },
 ]
 
@@ -47,7 +47,10 @@ TRADABLE_INSTRUMENTS = [   'XRP-USDT-SWAP',
     'LTC-USDT-SWAP',
     'BCH-USDT-SWAP',
     'SUI-USDT-SWAP',
-    'UNI-USDT-SWAP']
+    'UNI-USDT-SWAP',
+    '0G-USDT-SWAP',
+    'XLM-USDT-SWAP',
+    'WIF-USDT-SWAP']
 
 # Default polling interval (seconds) for the market data pipeline loop.
 PIPELINE_POLL_INTERVAL = 3600
