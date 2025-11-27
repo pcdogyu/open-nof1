@@ -53,6 +53,19 @@ def normalize_positions(
     """
     aggregated: dict[tuple[str, str], dict] = {}
 
+    def _estimate_quantity_from_notional(
+        raw_qty: float,
+        notional_usd: float | None,
+        price_for_qty: float | None,
+    ) -> float:
+        """Return base asset quantity using notional when available, otherwise raw units."""
+        if notional_usd is not None and price_for_qty:
+            try:
+                return abs(notional_usd) / price_for_qty
+            except ZeroDivisionError:
+                return abs(raw_qty)
+        return abs(raw_qty)
+
     for item in raw_positions:
         try:
             raw_qty = float(item.get("pos", 0.0))
@@ -70,6 +83,14 @@ def normalize_positions(
             side = "long" if raw_qty > 0 else "short"
 
         qty = abs(raw_qty)
+        notional_usd = _optional_float(item.get("notionalUsd"))
+        price_for_qty = (
+            _optional_float(item.get("markPx"))
+            or _optional_float(item.get("last"))
+            or _optional_float(item.get("px"))
+            or _optional_float(item.get("avgPx"))
+        )
+        qty = _estimate_quantity_from_notional(qty, notional_usd, price_for_qty)
         entry_px = _optional_float(item.get("avgPx")) or 0.0
         mark_px = _optional_float(item.get("markPx"))
         leverage = _optional_float(item.get("lever"))

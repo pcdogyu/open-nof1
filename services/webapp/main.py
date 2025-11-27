@@ -3137,12 +3137,48 @@ LIQUIDATION_TEMPLATE = r"""
             opacity: 0.5;
             cursor: not-allowed;
         }}
-    .order-btn.active {{
-        background: #38bdf8;
-        color: #0f172a;
-        border-color: #38bdf8;
-        font-weight: 700;
-    }}
+        .order-btn.active {{
+            background: #38bdf8;
+            color: #0f172a;
+            border-color: #38bdf8;
+            font-weight: 700;
+        }}
+        .order-summary {{
+            margin: 1rem 0;
+            padding: 14px 18px;
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.7);
+            border: 1px solid rgba(56, 189, 248, 0.4);
+            display: grid;
+            gap: 8px;
+            max-width: 680px;
+        }}
+        .order-summary .summary-header {{
+            font-weight: 700;
+            color: #38bdf8;
+            font-size: 0.95rem;
+        }}
+        .order-summary .summary-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+        }}
+        .order-summary .summary-row {{
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }}
+        .order-summary .summary-label {{
+            font-size: 0.75rem;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }}
+        .order-summary .summary-value {{
+            font-size: 1rem;
+            font-weight: 600;
+            color: #e2e8f0;
+        }}
     .payload-panel {{
         background: #0f172a;
         border: 1px solid #334155;
@@ -3218,6 +3254,27 @@ LIQUIDATION_TEMPLATE = r"""
         <pre id="okx-payload-display">等待买卖操作后显示请求体。</pre>
     </div>
     <div id="wave-notification" class="wave-notification" aria-live="polite"></div>
+    <div id="last-order-details" class="order-summary" hidden>
+        <div class="summary-header">最近下单</div>
+        <div class="summary-grid">
+            <div class="summary-row">
+                <span class="summary-label">类型</span>
+                <span class="summary-value" id="last-order-side">--</span>
+            </div>
+            <div class="summary-row">
+                <span class="summary-label">下单币对</span>
+                <span class="summary-value" id="last-order-pair">--</span>
+            </div>
+            <div class="summary-row">
+                <span class="summary-label">下单数量</span>
+                <span class="summary-value" id="last-order-qty">--</span>
+            </div>
+            <div class="summary-row">
+                <span class="summary-label">下单金额 (USDT)</span>
+                <span class="summary-value" id="last-order-amount">--</span>
+            </div>
+        </div>
+    </div>
     <div class="wave-section">
         <div class="wave-header">
             <h2>Real-Time Liquidation Waves 实时爆仓波次监测</h2>
@@ -3269,6 +3326,11 @@ LIQUIDATION_TEMPLATE = r"""
         const autoNotionalInput = document.getElementById('auto-order-notional');
         const payloadDisplay = document.getElementById('okx-payload-display');
         const notificationBar = document.getElementById('wave-notification');
+        const orderSummaryPanel = document.getElementById('last-order-details');
+        const orderSideValue = document.getElementById('last-order-side');
+        const orderPairValue = document.getElementById('last-order-pair');
+        const orderQtyValue = document.getElementById('last-order-qty');
+        const orderAmountValue = document.getElementById('last-order-amount');
         let notificationTimer = null;
         const hideNotification = () => {{
           if (!notificationBar) {{ return; }}
@@ -3297,6 +3359,14 @@ LIQUIDATION_TEMPLATE = r"""
           const num = Number(value);
           if (!isFinite(num)) {{ return '-'; }}
           return num.toFixed(digits);
+        }};
+        const updateOrderSummary = ({ sideLabel, pairLabel, qtyLabel, amountLabel }) => {{
+          if (!orderSummaryPanel) {{ return; }}
+          if (orderSideValue) {{ orderSideValue.textContent = sideLabel || '--'; }}
+          if (orderPairValue) {{ orderPairValue.textContent = pairLabel || '--'; }}
+          if (orderQtyValue) {{ orderQtyValue.textContent = qtyLabel || '--'; }}
+          if (orderAmountValue) {{ orderAmountValue.textContent = amountLabel || '--'; }}
+          orderSummaryPanel.hidden = false;
         }};
         const fmtTimestamp = (value) => {{
           if (!value) {{ return '--'; }}
@@ -3526,6 +3596,14 @@ LIQUIDATION_TEMPLATE = r"""
                 const qtyDigits = Number.isFinite(qtyValue) && Math.abs(qtyValue) < 1 ? 4 : 2;
                 const qtyText = Number.isFinite(qtyValue) ? fmtNumber(qtyValue, qtyDigits) : '--';
                 const amountText = fmtNumber(confirmation, 2);
+                const invalidAmount = amountText === '-' || amountText === '--';
+                const amountLabel = invalidAmount ? '--' : `${{amountText}} USDT`;
+                updateOrderSummary({{
+                  sideLabel: actionText,
+                  pairLabel: instrumentLabel,
+                  qtyLabel: qtyText,
+                  amountLabel,
+                }});
                 showNotification(`已提交${{instrumentLabel}} ${{actionText}}订单，数量 ${{qtyText}}，预估 $${{amountText}} USDT。`, 'success');
               }} else {{
                 showNotification(data.detail || '下单失败，请稍后重试。', 'error');
@@ -4170,8 +4248,8 @@ ORDERBOOK_TEMPLATE = r"""
                 </div>
               </div>
               <div class="chart-stats">
-                <span class="stat-pill">买盘深度（前${{levels}}档）${{buyDepthText}}</span>
-                <span class="stat-pill">卖盘深度（前${{levels}}档）${{sellDepthText}}</span>
+                <span class="stat-pill">买盘深度${{buyDepthText}}</span>
+                <span class="stat-pill">卖盘深度${{sellDepthText}}</span>
                 <span class="stat-pill">总深度 ${{totalDepthText}}</span>
                 <span class="stat-pill stat-accent">净深度 ${{netDepthText}}</span>
                 <span class="stat-pill stat-accent">点差 ${{spreadText}}</span>
