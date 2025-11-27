@@ -30,7 +30,7 @@ INFLUX_PROFILES = [
         "org": INFLUX_ORG,
         "bucket": INFLUX_BUCKET,
         "token": INFLUX_SECONDARY_TOKEN,
-        "enabled": False,  # 备用实例尚未启用，避免随机选择到无响应端口
+        "enabled": True,  # 备用实例尚未启用，避免随机选择到无响应端口
     },
 ]
 

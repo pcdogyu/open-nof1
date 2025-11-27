@@ -11,6 +11,8 @@ from typing import Any, Dict, Iterable, List
 import json
 import os
 import threading
+import logging
+import urllib.parse
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.exceptions import InfluxDBError
@@ -20,6 +22,7 @@ STATE_DIR = Path(__file__).resolve().parent.parent / "data" / "state"
 PROFILE_CACHE_FILE = STATE_DIR / "active_influx_profile.json"
 _PROFILE_CACHE_LOCK = threading.Lock()
 _PROFILE_MEMORY_CACHE: dict[str, str] | None = None
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -39,6 +42,7 @@ class InfluxConfig:
         base_org = os.getenv("INFLUX_ORG") or "nof"
         base_bucket = os.getenv("INFLUX_BUCKET") or "nof"
         raw_token = os.getenv("INFLUX_TOKEN")
+        secondary_token = os.getenv("INFLUX_SECONDARY_TOKEN")
 
         try:
             import config as config_module  # type: ignore
@@ -57,6 +61,7 @@ class InfluxConfig:
             *,
             token_value: str | None,
             profile_data: dict[str, Any] | None = None,
+            source_label: str | None = None,
         ) -> None:
             if not token_value:
                 return
@@ -69,6 +74,7 @@ class InfluxConfig:
                     "org": profile_dict.get("org") or base_org,
                     "bucket": profile_dict.get("bucket") or base_bucket,
                     "token": token_value,
+                    "label": profile_dict.get("label") or source_label or "unspecified",
                 }
             )
             key = (
@@ -89,7 +95,8 @@ class InfluxConfig:
                 if t.strip()
             ]:
                 add_candidate(token_value=token_candidate)
-        add_candidate(token_value=raw_token)
+        add_candidate(token_value=raw_token, source_label="primary_token")
+        add_candidate(token_value=secondary_token, source_label="secondary_token")
 
         if config_module is not None:
             if hasattr(config_module, "INFLUX_PROFILES"):
@@ -105,9 +112,14 @@ class InfluxConfig:
                 raw_tokens = getattr(config_module, "INFLUX_TOKENS")
                 if isinstance(raw_tokens, (list, tuple)):
                     for token_value in raw_tokens:
-                        add_candidate(token_value=token_value)
+                        add_candidate(token_value=token_value, source_label="config_token")
             if hasattr(config_module, "INFLUX_TOKEN"):
-                add_candidate(token_value=getattr(config_module, "INFLUX_TOKEN"))
+                add_candidate(token_value=getattr(config_module, "INFLUX_TOKEN"), source_label="config_primary_token")
+            if hasattr(config_module, "INFLUX_SECONDARY_TOKEN"):
+                add_candidate(
+                    token_value=getattr(config_module, "INFLUX_SECONDARY_TOKEN"),
+                    source_label="config_secondary_token",
+                )
 
         working_profile = _select_working_profile(candidate_profiles)
         if working_profile is None and candidate_profiles:
@@ -115,6 +127,19 @@ class InfluxConfig:
 
         if working_profile is None:
             raise ValueError("InfluxDB token is required. Set INFLUX_TOKEN environment variable.")
+
+        parsed_url = urllib.parse.urlparse(working_profile["url"])
+        host = parsed_url.hostname or working_profile["url"]
+        port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
+        label = working_profile.get("label", "unspecified")
+        logger.info(
+            "InfluxDB connection ready host=%s port=%s org=%s bucket=%s token_source=%s",
+            host,
+            port,
+            working_profile["org"],
+            working_profile["bucket"],
+            label,
+        )
 
         return InfluxConfig(
             url=working_profile["url"],
@@ -261,6 +286,7 @@ def _normalize_profile(profile: dict[str, Any]) -> dict[str, str]:
         "org": str(profile.get("org") or "nof"),
         "bucket": str(profile.get("bucket") or "nof"),
         "token": str(profile.get("token")),
+        "label": str(profile.get("label") or "unspecified"),
     }
 
 
@@ -295,6 +321,18 @@ def _prioritize_candidates(candidates: list[dict[str, str]]) -> list[dict[str, s
 
 def _test_influx_profile(profile: dict[str, str]) -> bool:
     client: InfluxDBClient | None = None
+    parsed_url = urllib.parse.urlparse(profile["url"])
+    host = parsed_url.hostname or profile["url"]
+    port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
+    label = profile.get("label", "unspecified")
+    logger.info(
+        "Testing Influx token_source=%s host=%s port=%s org=%s bucket=%s",
+        label,
+        host,
+        port,
+        profile.get("org"),
+        profile.get("bucket"),
+    )
     try:
         client = InfluxDBClient(
             url=profile["url"],
@@ -304,19 +342,36 @@ def _test_influx_profile(profile: dict[str, str]) -> bool:
         buckets_api = client.buckets_api()
         try:
             buckets_api.find_bucket_by_name(profile["bucket"])
+            logger.info(
+                "Influx token_source=%s verified successfully at host=%s port=%s",
+                label,
+                host,
+                port,
+            )
             return True
         except InfluxDBError as exc:
             status_code = getattr(exc, "status_code", None)
             if status_code is None and hasattr(exc, "response"):
                 status_code = getattr(exc.response, "status", None)  # type: ignore[attr-defined]
             if status_code in (401, 403):
+                logger.warning(
+                    "Influx token_source=%s rejected with status %s",
+                    label,
+                    status_code,
+                )
                 return False
             if status_code == 404:
+                logger.info(
+                    "Influx token_source=%s authenticated but bucket missing; continuing",
+                    label,
+                )
                 return True  # Bucket missing, but auth works.
             raise
-    except InfluxDBError:
+    except InfluxDBError as exc:
+        logger.warning("Influx token_source=%s error: %s", label, exc)
         return False
-    except Exception:
+    except Exception as exc:
+        logger.warning("Influx token_source=%s connection failed: %s", label, exc)
         return False
     finally:
         if client is not None:
@@ -344,6 +399,7 @@ def _load_cached_profile() -> dict[str, str] | None:
             "org": str(data.get("org") or "nof"),
             "bucket": str(data.get("bucket") or "nof"),
             "token": str(data["token"]),
+            "label": str(data.get("label") or "unspecified"),
         }
         return _PROFILE_MEMORY_CACHE
 

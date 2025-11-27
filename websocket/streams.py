@@ -106,6 +106,10 @@ class BaseOkxStream:
                 await asyncio.sleep(self._ping_interval_seconds)
                 if self._stop_event.is_set():
                     break
+                try:
+                    await ws.ping()
+                except Exception:
+                    break
                 idle = loop.time() - last_message_at
                 if idle >= self._idle_timeout_seconds:
                     logger.warning(
@@ -118,12 +122,6 @@ class BaseOkxStream:
                     except Exception:
                         pass
                     break
-                # Send a lightweight ping if no data has arrived recently.
-                if idle >= self._ping_interval_seconds:
-                    try:
-                        await ws.ping()
-                    except Exception:
-                        break
 
         keepalive_task = asyncio.create_task(_keepalive(), name=f"{self.__class__.__name__}-keepalive")
         try:
