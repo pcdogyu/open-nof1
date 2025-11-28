@@ -5,7 +5,7 @@ Keep this file out of version control (see .gitignore). Update the values as
 needed for your environment.
 """
 
-INFLUX_URL = "http://localhost:8086"
+INFLUX_URL = "http://ifdb.lmitis.com:8086"
 INFLUX_ORG = "HY"
 INFLUX_BUCKET = "orderflow"
 
@@ -122,4 +122,5 @@ RISK_SETTINGS = {   'price_tolerance_pct': 0.02,
     'liquidation_same_direction_count': 5,
     'liquidation_opposite_count': 1,
     'liquidation_silence_seconds': 60,
-    'max_capital_pct_per_instrument': 0.1}
+    'max_capital_pct_per_instrument': 0.1,
+    'auto_close_time_shanghai': '05:50'}

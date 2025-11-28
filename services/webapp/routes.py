@@ -263,6 +263,7 @@ _DEFAULT_RISK_SETTINGS = {
     "liquidation_opposite_count": 3,
     "liquidation_silence_seconds": 300,
     "max_capital_pct_per_instrument": 0.1,
+    "auto_close_time_shanghai": "05:50",
 }
 
 
@@ -290,7 +291,25 @@ def _try_float(value: object) -> float | None:
         return None
 
 
-def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float | int]:
+def _normalize_auto_close_time(value: object) -> str:
+    """Return HH:MM string for Asia/Shanghai auto-close window or empty string."""
+    if value in (None, ""):
+        return ""
+    text = str(value).strip()
+    parts = text.split(":", 1)
+    if len(parts) != 2:
+        return ""
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except (TypeError, ValueError):
+        return ""
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return ""
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float | int | str]:
     """Normalize risk configuration values and enforce bounds."""
     config = dict(_DEFAULT_RISK_SETTINGS)
     if isinstance(raw, dict):
@@ -313,6 +332,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
             "liquidation_opposite_count",
             "liquidation_silence_seconds",
             "max_capital_pct_per_instrument",
+            "auto_close_time_shanghai",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -331,6 +351,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     opposite_count = int(config.get("liquidation_opposite_count", 3))
     silence_seconds = float(config.get("liquidation_silence_seconds", 300.0))
     max_capital_pct = float(config.get("max_capital_pct_per_instrument", 0.0))
+    auto_close_time = _normalize_auto_close_time(config.get("auto_close_time_shanghai"))
     price = max(0.001, min(0.5, price))
     drawdown = max(0.1, min(95.0, drawdown))
     max_loss = max(1.0, max_loss)
@@ -373,6 +394,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
         "liquidation_opposite_count": opposite_count,
         "liquidation_silence_seconds": silence_seconds,
         "max_capital_pct_per_instrument": max_capital_pct,
+        "auto_close_time_shanghai": auto_close_time,
     }
 
 
@@ -607,11 +629,11 @@ def get_risk_settings() -> dict:
             "max_drawdown_pct": float(_RISK_SETTINGS["max_drawdown_pct"]),
             "max_loss_absolute": float(_RISK_SETTINGS["max_loss_absolute"]),
             "cooldown_seconds": int(_RISK_SETTINGS["cooldown_seconds"]),
-        "min_notional_usd": float(_RISK_SETTINGS.get("min_notional_usd", 0.0)),
-        "max_order_notional_usd": float(_RISK_SETTINGS.get("max_order_notional_usd", 0.0)),
-        "max_position": float(_RISK_SETTINGS.get("max_position", 0.0)),
-        "max_capital_pct_per_instrument": float(_RISK_SETTINGS.get("max_capital_pct_per_instrument", 0.0)),
-        "take_profit_pct": float(_RISK_SETTINGS.get("take_profit_pct", 0.0)),
+            "min_notional_usd": float(_RISK_SETTINGS.get("min_notional_usd", 0.0)),
+            "max_order_notional_usd": float(_RISK_SETTINGS.get("max_order_notional_usd", 0.0)),
+            "max_position": float(_RISK_SETTINGS.get("max_position", 0.0)),
+            "max_capital_pct_per_instrument": float(_RISK_SETTINGS.get("max_capital_pct_per_instrument", 0.0)),
+            "take_profit_pct": float(_RISK_SETTINGS.get("take_profit_pct", 0.0)),
             "stop_loss_pct": float(_RISK_SETTINGS.get("stop_loss_pct", 0.0)),
             "position_take_profit_pct": float(_RISK_SETTINGS.get("position_take_profit_pct", 5.0)),
             "position_stop_loss_pct": float(_RISK_SETTINGS.get("position_stop_loss_pct", 3.0)),
@@ -623,6 +645,7 @@ def get_risk_settings() -> dict:
             "liquidation_same_direction_count": int(_RISK_SETTINGS.get("liquidation_same_direction_count", 4)),
             "liquidation_opposite_count": int(_RISK_SETTINGS.get("liquidation_opposite_count", 3)),
             "liquidation_silence_seconds": int(_RISK_SETTINGS.get("liquidation_silence_seconds", 300)),
+            "auto_close_time_shanghai": str(_RISK_SETTINGS.get("auto_close_time_shanghai") or ""),
             "updated_at": _RISK_SETTINGS["updated_at"],
         }
 
@@ -649,6 +672,7 @@ def update_risk_settings(
     liquidation_opposite_count: int,
     liquidation_silence_seconds: int,
     max_capital_pct_per_instrument: float,
+    auto_close_time_shanghai: str = "",
 ) -> dict:
     """Update risk parameters and persist them to config.py."""
     try:
@@ -671,6 +695,7 @@ def update_risk_settings(
         opposite_count_val = int(liquidation_opposite_count)
         silence_seconds_val = int(liquidation_silence_seconds)
         max_capital_pct_percent = float(max_capital_pct_per_instrument)
+        auto_close_label = _normalize_auto_close_time(auto_close_time_shanghai)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="数值需要为数字。")
     try:
@@ -743,6 +768,7 @@ def update_risk_settings(
         "liquidation_opposite_count": opposite_count_val,
         "liquidation_silence_seconds": silence_seconds_val,
         "max_capital_pct_per_instrument": max_capital_pct,
+        "auto_close_time_shanghai": auto_close_label,
     }
     with _RISK_SETTINGS_LOCK:
         for key, value in normalized.items():

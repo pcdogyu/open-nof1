@@ -8,10 +8,11 @@ import asyncio
 import logging
 import math
 from collections import deque
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date, time
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo
 
 try:
     from apscheduler.jobstores.base import JobLookupError
@@ -75,6 +76,10 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_LIQUIDATION_INTERVAL = 120
 _MIN_LIQUIDATION_NOTIONAL_USD = 10_000.0
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+_AUTO_CLOSE_WINDOW_SECONDS = 45 * 60  # allow a 45-minute window to trigger daily flattening
+_AUTO_CLOSE_LOCK = Lock()
+_LAST_AUTO_CLOSE_SIGNATURE: Optional[tuple[date, str]] = None
 
 try:  # pragma: no cover - config is optional for tests
     from config import (
@@ -157,6 +162,24 @@ def _sanitize_interval(value: int, minimum: int, maximum: int = 3600) -> int:
     return int(max(minimum, min(maximum, value)))
 
 
+def _normalize_auto_close_time(value: object) -> str:
+    """Normalize HH:MM formatted strings for the Asia/Shanghai auto-close trigger."""
+    if value in (None, ""):
+        return ""
+    text = str(value).strip()
+    parts = text.split(":", 1)
+    if len(parts) != 2:
+        return ""
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except (TypeError, ValueError):
+        return ""
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return ""
+    return f"{hour:02d}:{minute:02d}"
+
+
 _DEFAULT_RISK_CONFIG = {
     "price_tolerance_pct": 0.02,
     "max_drawdown_pct": 8.0,
@@ -178,10 +201,11 @@ _DEFAULT_RISK_CONFIG = {
     "liquidation_opposite_count": 3,
     "liquidation_silence_seconds": 300,
     "max_capital_pct_per_instrument": 0.1,
+    "auto_close_time_shanghai": "05:50",
 }
 
 
-def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | int]:
+def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | int | str]:
     config = dict(_DEFAULT_RISK_CONFIG)
     if isinstance(raw, dict):
         for key in (
@@ -205,6 +229,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
             "liquidation_opposite_count",
             "liquidation_silence_seconds",
             "max_capital_pct_per_instrument",
+            "auto_close_time_shanghai",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -249,6 +274,7 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
     same_direction_count = max(1, min(20, same_direction_count))
     opposite_direction_count = max(0, min(20, opposite_direction_count))
     silence_seconds = max(0.0, min(300.0, silence_seconds))
+    auto_close_label = _normalize_auto_close_time(config.get("auto_close_time_shanghai"))
     return {
         "price_tolerance_pct": price,
         "max_drawdown_pct": drawdown,
@@ -269,7 +295,159 @@ def _sanitize_risk_config(raw: Optional[Dict[str, Any]]) -> Dict[str, float | in
         "liquidation_same_direction_count": same_direction_count,
         "liquidation_opposite_count": opposite_direction_count,
         "liquidation_silence_seconds": silence_seconds,
+        "auto_close_time_shanghai": auto_close_label,
     }
+
+
+def _parse_auto_close_label(label: str) -> Optional[time]:
+    normalized = _normalize_auto_close_time(label)
+    if not normalized:
+        return None
+    hour_str, minute_str = normalized.split(":")
+    try:
+        return time(hour=int(hour_str), minute=int(minute_str))
+    except (TypeError, ValueError):
+        return None
+
+
+def _should_trigger_auto_close(now_utc: datetime) -> Optional[tuple[date, str]]:
+    with _RISK_CONFIG_LOCK:
+        label = _normalize_auto_close_time(_RISK_CONFIG.get("auto_close_time_shanghai"))
+    if not label:
+        return None
+    schedule_time = _parse_auto_close_label(label)
+    if schedule_time is None:
+        return None
+    local_now = now_utc.astimezone(SHANGHAI_TZ)
+    local_date = local_now.date()
+    target_dt = datetime.combine(local_date, schedule_time, tzinfo=SHANGHAI_TZ)
+    if local_now < target_dt:
+        return None
+    if (local_now - target_dt).total_seconds() > _AUTO_CLOSE_WINDOW_SECONDS:
+        return None
+    with _AUTO_CLOSE_LOCK:
+        if _LAST_AUTO_CLOSE_SIGNATURE == (local_date, label):
+            return None
+    return local_date, label
+
+
+def _auto_close_all_accounts() -> dict:
+    summary = {
+        "accounts_considered": 0,
+        "accounts_with_positions": 0,
+        "positions_closed": 0,
+        "errors": [],
+    }
+    if not OKX_ACCOUNTS:
+        return summary
+    for key, meta in OKX_ACCOUNTS.items():
+        if not meta.get("enabled", True):
+            continue
+        summary["accounts_considered"] += 1
+        closed, had_positions, errors = _auto_close_account_positions(key, meta)
+        if had_positions:
+            summary["accounts_with_positions"] += 1
+        summary["positions_closed"] += closed
+        summary["errors"].extend(errors)
+    return summary
+
+
+def _auto_close_account_positions(account_key: str, meta: dict) -> tuple[int, bool, list[str]]:
+    account_id = meta.get("account_id") or account_key
+    missing = [field for field in ("api_key", "api_secret") if not meta.get(field)]
+    if missing:
+        return 0, False, [f"{account_id}:缺少 {'/'.join(missing)}"]
+    credentials = ExchangeCredentials(
+        api_key=meta["api_key"],
+        api_secret=meta["api_secret"],
+        passphrase=meta.get("passphrase"),
+    )
+    client = OkxPaperClient()
+    closed = 0
+    had_positions = False
+    errors: list[str] = []
+    try:
+        client.authenticate(credentials)
+        try:
+            positions = client.fetch_positions()
+        except Exception as exc:
+            errors.append(f"{account_id}:获取持仓失败 {exc}")
+            return 0, False, errors
+        for entry in positions or []:
+            inst_id = (entry.get("instId") or entry.get("instrument_id") or "").upper()
+            if not inst_id:
+                continue
+            qty = _try_float(entry.get("pos") or entry.get("availPos") or entry.get("posCcy"))
+            if qty is None or abs(qty) <= 0:
+                continue
+            had_positions = True
+            pos_side_payload = _resolve_auto_close_pos_side(entry, qty)
+            margin_mode = _resolve_auto_close_margin_mode(inst_id, entry, meta)
+            currency = _resolve_auto_close_currency(entry, inst_id)
+            try:
+                client.close_position(
+                    instrument_id=inst_id,
+                    margin_mode=margin_mode,
+                    pos_side=pos_side_payload,
+                    ccy=currency if margin_mode == "cross" else None,
+                )
+                closed += 1
+            except OkxClientError as exc:
+                errors.append(f"{account_id}:{inst_id}:{exc}")
+    except OkxClientError as exc:
+        errors.append(f"{account_id}:认证失败 {exc}")
+    except Exception as exc:
+        errors.append(f"{account_id}:自动平仓异常 {exc}")
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return closed, had_positions, errors
+
+
+def _resolve_auto_close_margin_mode(inst_id: str, position_entry: dict, meta: dict) -> str:
+    raw_mode = (
+        (position_entry.get("mgnMode") or position_entry.get("marginMode") or meta.get("margin_mode") or "")
+        .strip()
+        .lower()
+    )
+    if raw_mode in {"cash", "cross", "isolated"}:
+        return raw_mode
+    symbol = (inst_id or "").upper()
+    if symbol.endswith("-SWAP") or "FUTURE" in symbol:
+        return "cross"
+    return "cash"
+
+
+def _resolve_auto_close_currency(entry: dict, inst_id: str) -> Optional[str]:
+    currency = entry.get("ccy") or entry.get("marginCurrency") or entry.get("posCcy")
+    if currency:
+        return str(currency).upper()
+    meta = _get_okx_instrument_meta(inst_id) or {}
+    for key in ("settleCurrency", "ctValCcy", "quoteCcy"):
+        currency = meta.get(key)
+        if currency:
+            return str(currency).upper()
+    parts = (inst_id or "").split("-")
+    if len(parts) >= 2:
+        return parts[1].upper()
+    return None
+
+
+def _resolve_auto_close_pos_side(entry: dict, qty: float) -> Optional[str]:
+    side = (entry.get("posSide") or entry.get("side") or "").strip().lower()
+    if side in {"long", "short"}:
+        return side
+    if side == "net":
+        return None
+    if qty > 0:
+        return "long"
+    if qty < 0:
+        return "short"
+    return None
+
+
 
 
 _MARKET_INTERVAL = _sanitize_interval(int(MARKET_SYNC_INTERVAL), 30)
@@ -430,7 +608,7 @@ def _append_execution_log(
             pass
 
 
-def get_risk_configuration() -> Dict[str, float | int]:
+def get_risk_configuration() -> Dict[str, float | int | str]:
     """Return a snapshot of the current risk configuration."""
     with _RISK_CONFIG_LOCK:
         return dict(_RISK_CONFIG)
@@ -456,7 +634,9 @@ def update_risk_configuration(
     liquidation_opposite_count: int = 3,
     liquidation_silence_seconds: float = 300.0,
     max_capital_pct_per_instrument: float = 0.1,
+    auto_close_time_shanghai: str = "",
 ) -> None:
+    global _LAST_AUTO_CLOSE_SIGNATURE
     """Refresh the in-memory risk configuration."""
     normalized = _sanitize_risk_config(
         {
@@ -473,15 +653,20 @@ def update_risk_configuration(
             "position_stop_loss_pct": position_stop_loss_pct,
             "pyramid_max_orders": pyramid_max_orders,
             "pyramid_reentry_pct": pyramid_reentry_pct,
-        "liquidation_notional_threshold": liquidation_notional_threshold,
-        "liquidation_same_direction_count": liquidation_same_direction_count,
-        "liquidation_opposite_count": liquidation_opposite_count,
-        "liquidation_silence_seconds": liquidation_silence_seconds,
-        "max_capital_pct_per_instrument": max_capital_pct_per_instrument,
+            "liquidation_notional_threshold": liquidation_notional_threshold,
+            "liquidation_same_direction_count": liquidation_same_direction_count,
+            "liquidation_opposite_count": liquidation_opposite_count,
+            "liquidation_silence_seconds": liquidation_silence_seconds,
+            "max_capital_pct_per_instrument": max_capital_pct_per_instrument,
+            "auto_close_time_shanghai": auto_close_time_shanghai,
         }
     )
     with _RISK_CONFIG_LOCK:
+        previous_label = _normalize_auto_close_time(_RISK_CONFIG.get("auto_close_time_shanghai"))
         _RISK_CONFIG.update(normalized)
+    if normalized.get("auto_close_time_shanghai") != previous_label:
+        with _AUTO_CLOSE_LOCK:
+            _LAST_AUTO_CLOSE_SIGNATURE = None
 
 
 def _build_risk_engine() -> RiskEngine:
@@ -1173,10 +1358,64 @@ async def _maybe_execute_wave_strategy(
     return None
 
 
+async def _maybe_run_auto_close(now_utc: datetime) -> None:
+    global _LAST_AUTO_CLOSE_SIGNATURE
+    trigger = _should_trigger_auto_close(now_utc)
+    if not trigger:
+        return
+    local_date, label = trigger
+    if not OKX_ACCOUNTS:
+        detail = f"{label} 自动平仓：未配置 OKX 账户"
+        _append_execution_log("auto_close", "skipped", detail)
+        with _AUTO_CLOSE_LOCK:
+            _LAST_AUTO_CLOSE_SIGNATURE = (local_date, label)
+        return
+    started = datetime.now(tz=timezone.utc)
+    try:
+        summary = await asyncio.to_thread(_auto_close_all_accounts)
+    except Exception as exc:
+        detail = f"{label} 自动平仓失败: {exc}"
+        _append_execution_log("auto_close", "error", detail)
+        with _AUTO_CLOSE_LOCK:
+            _LAST_AUTO_CLOSE_SIGNATURE = (local_date, label)
+        return
+    duration = (datetime.now(tz=timezone.utc) - started).total_seconds()
+    accounts_considered = int(summary.get("accounts_considered", 0))
+    positions_closed = int(summary.get("positions_closed", 0))
+    accounts_with_positions = int(summary.get("accounts_with_positions", 0))
+    errors = summary.get("errors") or []
+    status = "success"
+    if accounts_considered == 0:
+        status = "skipped"
+        detail = f"{label} 自动平仓：未配置可用 OKX 账户"
+    else:
+        detail = (
+            f"{label} 自动平仓：检测 {accounts_considered} 个账户，"
+            f"{accounts_with_positions} 个账户存在持仓"
+        )
+        if positions_closed:
+            detail += f"，触发 {positions_closed} 次 close-position"
+        else:
+            detail += "，无可平仓仓位"
+        if errors:
+            status = "warning"
+            preview = " | ".join(str(err) for err in errors[:3])
+            if len(errors) > 3:
+                preview += " | ..."
+            detail += f"；异常：{preview}"
+        elif accounts_with_positions == 0:
+            status = "skipped"
+    _append_execution_log("auto_close", status, detail, duration_seconds=duration)
+    with _AUTO_CLOSE_LOCK:
+        _LAST_AUTO_CLOSE_SIGNATURE = (local_date, label)
+
+
 async def _execute_model_workflow_job() -> Dict[str, str]:
     """
     Drive the signal �� routing �� risk �� execution loop for configured accounts.
     """
+    now_utc = datetime.now(tz=timezone.utc)
+    await _maybe_run_auto_close(now_utc)
     if not OKX_ACCOUNTS:
         logger.debug("No OKX accounts configured; skipping execution job.")
         detail = "未配置 OKX 账户"

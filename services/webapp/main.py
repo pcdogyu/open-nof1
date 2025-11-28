@@ -472,6 +472,7 @@ def submit_risk_settings(
     min_notional_usd: float = Form(0),
     max_order_notional_usd: float = Form(0),
     max_position: float = Form(0),
+    max_capital_pct_per_instrument: float = Form(10),
     take_profit_pct: float = Form(0),
     stop_loss_pct: float = Form(0),
     position_take_profit_pct: float = Form(5),
@@ -484,6 +485,7 @@ def submit_risk_settings(
     liquidation_same_direction_count: int = Form(4),
     liquidation_opposite_count: int = Form(3),
     liquidation_silence_seconds: int = Form(300),
+    auto_close_time_shanghai: str = Form("05:50"),
 ) -> RedirectResponse:
     routes.update_risk_settings(
         price_tolerance_pct=price_tolerance_pct / 100.0,
@@ -493,6 +495,7 @@ def submit_risk_settings(
         min_notional_usd=min_notional_usd,
         max_order_notional_usd=max_order_notional_usd,
         max_position=max_position,
+        max_capital_pct_per_instrument=max_capital_pct_per_instrument / 100.0,
         take_profit_pct=take_profit_pct,
         stop_loss_pct=stop_loss_pct,
         position_take_profit_pct=position_take_profit_pct,
@@ -505,6 +508,7 @@ def submit_risk_settings(
         liquidation_same_direction_count=liquidation_same_direction_count,
         liquidation_opposite_count=liquidation_opposite_count,
         liquidation_silence_seconds=liquidation_silence_seconds,
+        auto_close_time_shanghai=auto_close_time_shanghai,
     )
     return RedirectResponse(url="/risk", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -1150,6 +1154,8 @@ def _build_risk_form_context(settings: dict) -> dict:
     liquidation_threshold_text = _compact(liquidation_threshold, 2)
     silence_minutes_text = _compact(liquidation_silence_seconds / 60.0, 1)
     updated_at = esc(_format_asia_shanghai(settings.get("updated_at")))
+    auto_close_label = str(settings.get("auto_close_time_shanghai") or "").strip()
+    auto_close_display = auto_close_label if auto_close_label else "未启用"
 
     return {
         "price_tolerance_pct": esc(f"{price_pct:.2f}"),
@@ -1190,6 +1196,8 @@ def _build_risk_form_context(settings: dict) -> dict:
         "liquidation_opposite_count": esc(str(liquidation_opposite_count)),
         "liquidation_silence_seconds": esc(str(liquidation_silence_seconds)),
         "liquidation_silence_minutes": esc(silence_minutes_text),
+        "auto_close_time_shanghai": esc(auto_close_label),
+        "auto_close_time_display": esc(auto_close_display),
         "max_position_val": max_position_val,
         "max_order_notional_val": max_order_notional,
         "max_capital_pct_percent": esc(f"{max_capital_pct_percent:.2f}"),
@@ -2349,6 +2357,32 @@ RISK_TEMPLATE = r"""
         .summary-item input {{ width: 100%; box-sizing: border-box; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.4); background-color: rgba(15, 23, 42, 0.9); padding: 10px 12px; color: #e2e8f0; font-size: 0.95rem; margin-top: 4px; }}
         .summary-item input:focus {{ outline: none; border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2); }}
         .summary-item small {{ display: block; color: #94a3b8; margin-top: 4px; font-size: 0.75rem; }}
+        .risk-save-btn {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 12px 32px;
+            border-radius: 999px;
+            border: none;
+            background-image: linear-gradient(135deg, #60a5fa, #38bdf8);
+            color: #0f172a;
+            font-weight: 700;
+            font-size: 1rem;
+            letter-spacing: 0.04em;
+            cursor: pointer;
+            margin-top: 24px;
+            box-shadow: 0 14px 28px rgba(14, 165, 233, 0.35);
+            transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.15s ease;
+        }}
+        .risk-save-btn:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 18px 36px rgba(14, 165, 233, 0.45);
+        }}
+        .risk-save-btn:active {{
+            transform: translateY(1px);
+            box-shadow: 0 10px 20px rgba(14, 165, 233, 0.3);
+        }}
         .redirect-btn {{ display: inline-flex; padding: 10px 18px; border-radius: 10px; background-color: #38bdf8; color: #0f172a; text-decoration: none; font-weight: 600; margin-top: 0.5rem; }}
     </style>
 </head>
@@ -2467,8 +2501,13 @@ RISK_TEMPLATE = r"""
                     <input type="number" name="liquidation_silence_seconds" min="0" max="300" step="1" value="{liquidation_silence_seconds}" required>
                     <small class="hint">约 {liquidation_silence_minutes} 分钟</small>
                 </label>
+                <label class="summary-item">
+                    <span>每日自动平仓（上海）</span>
+                    <input type="time" name="auto_close_time_shanghai" value="{auto_close_time_shanghai}" step="60" placeholder="05:50">
+                    <small class="hint">当前 {auto_close_time_display}，留空关闭</small>
+                </label>
             </div>
-            <button type="submit">保存风险参数</button>
+            <button type="submit" class="risk-save-btn">保存风险参数</button>
         </form>
     </section>
 
