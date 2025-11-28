@@ -1598,7 +1598,6 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             f"<td>{_format_number(pos.get('entry_price'))}</td>"
             f"<td>{_format_number(pos.get('last_price') or pos.get('last') or pos.get('mark_price'))}</td>"
             f"<td>{_format_number(margin)}</td>"
-            f"<td>{_format_number(frozen_amount)}</td>"
             f"<td>{_format_number(pos.get('unrealized_pnl'))}</td>"
             f"<td>{pnl_pct_cell}</td>"
             f"<td>{esc(_format_asia_shanghai(pos.get('created_at') or pos.get('updated_at')))}</td>"
@@ -1606,11 +1605,11 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='13'>当前无持仓</td></tr>")
+        rows.append("<tr><td colspan='12'>当前无持仓</td></tr>")
 
     table_html = (
         "<table class='dense'>"
-        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>最新价格</th><th>保证金</th><th>资金冻结</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th class='action-col'>操作</th></tr></thead>"
+        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>最新价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th class='action-col'>操作</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
