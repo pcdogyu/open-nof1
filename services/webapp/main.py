@@ -2524,7 +2524,7 @@ OKX_TEMPLATE = r"""
     <title>OKX 模拟交易</title>
     <style>
         body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 16px; }}
-        .page-shell {{ max-width: 1320px; margin: 0 auto; }}
+        .page-shell {{ width: 100%; max-width: none; margin: 0 auto; }}
         h1 {{ margin: 0; font-size: 1.6rem; }}
         h2 {{ margin-top: 0; margin-bottom: 0.5rem; }}
         .top-nav {{ display: flex; gap: 12px; margin-bottom: 1rem; font-size: 0.95rem; flex-wrap: wrap; }}
@@ -2544,13 +2544,13 @@ OKX_TEMPLATE = r"""
         .okx-card {{ background-color: #1e293b; border-radius: 12px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); }}
         .okx-card header {{ margin-bottom: 16px; }}
         .okx-card .meta {{ color: #94a3b8; font-size: 0.9rem; margin-top: 4px; }}
-        .summary-table {{ margin-top: 12px; }}
+        .summary-table {{ width: 100%; margin-top: 12px; border-collapse: collapse; }}
         .split {{ display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }}
         .panel {{ flex: 1 1 320px; min-width: 260px; margin-top: 14px; }}
         .split .panel {{ margin-top: 0; }}
         .split .panel:first-child {{ flex: 0.9 1 320px; }}
         .split .panel:last-child {{ flex: 1.5 1 520px; min-width: 360px; }}
-        .account-stack {{ display: grid; gap: 18px; margin-top: 6px; }}
+        .account-stack {{ display: grid; gap: 18px; margin-top: 6px; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); }}
         .recent-trades-panel table {{ table-layout: auto; }}
         .trade-side {{ font-weight: 600; }}
         .trade-buy {{ color: #4ade80; }}
