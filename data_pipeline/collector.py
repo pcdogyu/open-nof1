@@ -35,6 +35,7 @@ class MarketCollectorConfig:
     candle_limit: int = 120  # number of points per timeframe
     orderbook_depth: int = 50
     trades_limit: int = 200
+    request_delay_seconds: float = 0.0  # throttle between OKX REST hits
 
 
 class MarketCollector:
@@ -118,6 +119,10 @@ class MarketCollector:
             raise RuntimeError(
                 f"OKX API error {payload.get('code')}: {payload.get('msg')}"
             )
+        delay = max(0.0, float(self.config.request_delay_seconds))
+        if delay:
+            # OKX REST 接口有严格的速率限制，主动延迟可以减少 429。
+            await asyncio.sleep(delay)
         return payload
 
     @staticmethod
