@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Dict, List, Optional, Sequence
+from collections import deque
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Form, status
@@ -63,6 +64,8 @@ _DEFAULT_LIQUIDATION_INTERVAL = 120
 ORDERBOOK_HISTORY_LOOKBACK_HOURS = 4
 MAX_HISTORY_POINTS_PER_INSTRUMENT = ORDERBOOK_HISTORY_LOOKBACK_HOURS * 1800  # 4h @ 8 samples/min
 _ORDERBOOK_PERSIST_TRACK: dict[str, str] = {}
+_ORDERBOOK_HISTORY_CACHE: dict[str, deque[dict]] = {}
+_ORDERBOOK_HISTORY_PRIMED: set[str] = set()
 
 try:
     from config import (
@@ -2472,6 +2475,7 @@ def get_orderbook_snapshot(
             {"timestamp": entry["timestamp"], "cvd": entry.get("cvd")}
             for entry in reversed(cvd_history_raw)
         ]
+        _seed_memory_history(inst_id, history)
         return history, cvd_history, cvd_map.get(inst_id)
 
     for row in history_records:
@@ -2530,6 +2534,19 @@ def get_orderbook_snapshot(
         except (TypeError, json.JSONDecodeError):
             asks = []
         history, cvd_history, cvd_value = _build_history_payload(inst_id)
+        if not history:
+            fallback_history = _get_memory_history(inst_id)
+            if fallback_history:
+                history = fallback_history
+            else:
+                derived_net = _compute_net_depth_from_levels(bids, asks)
+                if derived_net is not None:
+                    history = [
+                        {
+                            "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
+                            "net_depth": derived_net,
+                        }
+                    ]
         items.append(
             {
                 "instrument_id": inst_id,
@@ -2564,6 +2581,19 @@ def get_orderbook_snapshot(
                 if not inst_id:
                     continue
                 history, cvd_history, cvd_value = _build_history_payload(inst_id)
+                if not history:
+                    fallback_history = _get_memory_history(inst_id)
+                    if fallback_history:
+                        history = fallback_history
+                    else:
+                        derived_net = _compute_net_depth_from_levels(entry.get("bids"), entry.get("asks"))
+                        if derived_net is not None:
+                            history = [
+                                {
+                                    "timestamp": entry.get("timestamp"),
+                                    "net_depth": derived_net,
+                                }
+                            ]
                 items.append(
                     {
                         "instrument_id": inst_id,
@@ -3483,14 +3513,76 @@ def _coerce_datetime(value: object, *, default: datetime) -> datetime:
         return default
 
 
+def _seed_memory_history(inst_id: str, history: Sequence[dict]) -> None:
+    if not inst_id or not history or inst_id in _ORDERBOOK_HISTORY_PRIMED:
+        return
+    cache = _ORDERBOOK_HISTORY_CACHE.setdefault(
+        inst_id,
+        deque(maxlen=MAX_HISTORY_POINTS_PER_INSTRUMENT),
+    )
+    for entry in history[-MAX_HISTORY_POINTS_PER_INSTRUMENT :]:
+        cache.append({"timestamp": entry.get("timestamp"), "net_depth": entry.get("net_depth")})
+    _ORDERBOOK_HISTORY_PRIMED.add(inst_id)
+
+
+def _compute_net_depth_from_levels(
+    bids: Sequence[Sequence[object]] | None,
+    asks: Sequence[Sequence[object]] | None,
+) -> float | None:
+    def _sum(levels: Sequence[Sequence[object]] | None) -> float:
+        if not levels:
+            return 0.0
+        total = 0.0
+        for level in levels:
+            try:
+                size = float(level[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            total += size
+        return total
+
+    total_bid = _sum(bids)
+    total_ask = _sum(asks)
+    if total_bid == 0.0 and total_ask == 0.0:
+        return None
+    return total_bid - total_ask
+
+
+def _remember_history_point(
+    inst_id: str,
+    *,
+    timestamp: datetime | str | None,
+    bids: Sequence[Sequence[object]] | None = None,
+    asks: Sequence[Sequence[object]] | None = None,
+    net_depth: float | None = None,
+) -> None:
+    if not inst_id:
+        return
+    if net_depth is None:
+        net_depth = _compute_net_depth_from_levels(bids, asks)
+    if net_depth is None:
+        return
+    ts = _coerce_datetime(timestamp, default=datetime.now(tz=timezone.utc))
+    cache = _ORDERBOOK_HISTORY_CACHE.setdefault(
+        inst_id,
+        deque(maxlen=MAX_HISTORY_POINTS_PER_INSTRUMENT),
+    )
+    cache.append({"timestamp": ts.isoformat(), "net_depth": net_depth})
+
+
+def _get_memory_history(inst_id: str) -> list[dict]:
+    cache = _ORDERBOOK_HISTORY_CACHE.get(inst_id)
+    if not cache:
+        return []
+    return list(cache)
+
+
 def _persist_orderbook_items(items: Sequence[dict]) -> None:
     """
     Persist served orderbook data into the local InfluxDB cache so newly opened
     dashboards can render historic charts immediately.
     """
     writer = _get_orderbook_writer()
-    if writer is None:
-        return
     default_ts = datetime.now(tz=timezone.utc)
     for entry in items:
         inst_id = (entry.get("instrument_id") or "").upper()
@@ -3501,6 +3593,9 @@ def _persist_orderbook_items(items: Sequence[dict]) -> None:
         if not bids and not asks:
             continue
         timestamp = _coerce_datetime(entry.get("timestamp"), default=default_ts)
+        _remember_history_point(inst_id, timestamp=timestamp, bids=bids, asks=asks)
+        if writer is None:
+            continue
         ts_key = timestamp.isoformat()
         if _ORDERBOOK_PERSIST_TRACK.get(inst_id) == ts_key:
             continue

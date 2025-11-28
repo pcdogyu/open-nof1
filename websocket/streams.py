@@ -37,6 +37,7 @@ class BaseOkxStream:
         # Keepalive tuning to reduce noisy restarts when the upstream is quiet.
         self._ping_interval_seconds = 20
         self._idle_timeout_seconds = 20
+        self._connect_timeout_seconds = 20
 
     def set_instruments(self, instruments: Iterable[str]) -> None:
         updated = {inst.strip().upper() for inst in instruments if inst and inst.strip()}
@@ -70,6 +71,7 @@ class BaseOkxStream:
 
     async def _run_forever(self) -> None:
         reconnect_delay = 5
+        max_reconnect_delay = 45
         while not self._stop_event.is_set():
             try:
                 async with websockets.connect(
@@ -78,12 +80,22 @@ class BaseOkxStream:
                     ping_interval=None,
                     ping_timeout=None,
                     close_timeout=5,
+                    open_timeout=self._connect_timeout_seconds,
                     max_queue=8,
                 ) as ws:
+                    reconnect_delay = 5  # reset after successful connect
                     await self._subscribe(ws)
                     await self._listen(ws)
             except asyncio.CancelledError:
                 break
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "%s websocket handshake timed out after %ss; retrying",
+                    self.__class__.__name__,
+                    self._connect_timeout_seconds,
+                )
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(max_reconnect_delay, reconnect_delay * 1.5)
             except (ConnectionClosedError, ConnectionClosedOK) as exc:
                 logger.warning(
                     "%s websocket closed (%s); reconnecting in %ss",
@@ -92,9 +104,11 @@ class BaseOkxStream:
                     reconnect_delay,
                 )
                 await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(max_reconnect_delay, reconnect_delay * 1.5)
             except Exception as exc:
                 logger.warning("%s encountered an error: %s", self.__class__.__name__, exc)
                 await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(max_reconnect_delay, reconnect_delay * 1.5)
 
     async def _listen(self, ws: WebSocketClientProtocol) -> None:
         loop = asyncio.get_running_loop()
