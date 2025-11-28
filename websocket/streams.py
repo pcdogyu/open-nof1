@@ -127,16 +127,11 @@ class BaseOkxStream:
                 except Exception:
                     break
                 if idle >= self._idle_timeout_seconds:
-                    logger.warning(
-                        "%s idle for %.0fs; closing websocket to trigger reconnect",
+                    logger.debug(
+                        "%s idle for %.0fs; ping sent to keep connection alive",
                         self.__class__.__name__,
                         idle,
                     )
-                    try:
-                        await ws.close(code=4004, reason="idle timeout")
-                    except Exception:
-                        pass
-                    break
 
         keepalive_task = asyncio.create_task(_keepalive(), name=f"{self.__class__.__name__}-keepalive")
         try:
