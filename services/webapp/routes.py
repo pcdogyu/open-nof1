@@ -1983,68 +1983,16 @@ def close_okx_position(
             except Exception:
                 position_size = None
 
-        effective_qty = normalized_qty
-        if position_size is not None:
-            effective_qty = min(effective_qty, position_size)
-        lot_size = _try_float(instrument_meta.get("lotSz")) if instrument_meta else None
-        min_size = _try_float(instrument_meta.get("minSz")) if instrument_meta else None
-        if lot_size:
-            tolerance = max(lot_size * 0.5, 1e-8)
-        else:
-            tolerance = 1e-8
-        if position_size is not None and abs(normalized_qty - position_size) <= tolerance:
-            normalized_qty = position_size
-            effective_qty = position_size
-        if lot_size and lot_size > 0:
-            multiples = math.ceil(max(effective_qty, lot_size) / lot_size)
-            if multiples <= 0:
-                multiples = 1
-            effective_qty = multiples * lot_size
-            if position_size is not None and effective_qty > position_size:
-                effective_qty = position_size
-        if min_size and min_size > 0 and effective_qty < min_size:
-            effective_qty = min_size
-        if position_size is not None and effective_qty > position_size:
-            effective_qty = position_size
-        effective_qty = max(effective_qty, 0.0)
-        if effective_qty <= 0:
-            raise HTTPException(status_code=400, detail="无法计算有效的平仓数量。")
-        decimal_places = 4
-        if lot_size and lot_size > 0:
-            lot_str = f"{lot_size:.10f}".rstrip("0").rstrip(".")
-            if "." in lot_str:
-                decimal_places = max(decimal_places, len(lot_str.split(".")[1]))
-            else:
-                decimal_places = 0
-        normalized_size_str = f"{effective_qty:.{decimal_places}f}".rstrip("0").rstrip(".")
-        if not normalized_size_str:
-            normalized_size_str = "0"
-        use_market_reduce = (
-            net_position
-            or pos_side_payload is None
-            or position_size is None
-            or normalized_qty < position_size
+        if position_size is None or position_size <= 0:
+            raise HTTPException(status_code=400, detail=f"{symbol} 当前无可平仓位")
+
+        response = client.close_position(
+            instrument_id=symbol,
+            margin_mode=margin_mode_value,
+            pos_side=pos_side_payload,
+            ccy=quote_currency if margin_mode_value == "cross" else None,
         )
-        if use_market_reduce:
-            reduce_pos_side = (pos_side_payload or "").lower() or None
-            response = client.place_order(
-                {
-                    "instrument_id": symbol,
-                    "side": close_side,
-                    "order_type": "market",
-                    "size": normalized_size_str,
-                    "margin_mode": margin_mode_value,
-                    "pos_side": reduce_pos_side,
-                    "reduce_only": True,
-                }
-            )
-        else:
-            response = client.close_position(
-                instrument_id=symbol,
-                margin_mode=margin_mode_value,
-                pos_side=pos_side_payload,
-                ccy=quote_currency if margin_mode_value == "cross" else None,
-            )
+
         try:
             get_okx_summary(force_refresh=True, ttl_seconds=0)
         except Exception as refresh_exc:  # pragma: no cover - cache refresh best-effort
@@ -2528,6 +2476,27 @@ def get_orderbook_snapshot(
 
     for row in history_records:
         _append_history_entry(row)
+    # When querying without a specific instrument filter, Influx may return fewer rows
+    # than expected due to per-table limits. Backfill missing instruments with direct queries.
+    if instrument_filter:
+        target_instruments = {instrument_filter}
+    else:
+        target_instruments = {
+            inst.strip().upper()
+            for inst in TRADABLE_INSTRUMENTS
+            if isinstance(inst, str) and inst.strip()
+        }
+    for inst_id in target_instruments:
+        if not inst_id or history_map.get(inst_id):
+            continue
+        extra_rows = _query_influx_measurement(
+            measurement="okx_orderbook_depth",
+            limit=max_history_points,
+            instrument=inst_id,
+            lookback=f"{ORDERBOOK_HISTORY_LOOKBACK_HOURS}h",
+        )
+        for row in extra_rows:
+            _append_history_entry(row)
 
     for row in snapshot_records:
         inst_id = (row.get("instrument_id") or "").upper()

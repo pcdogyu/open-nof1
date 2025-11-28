@@ -235,10 +235,10 @@ def okx_close_position(
 
     def _build_detail(order_id: object | None, note: str | None = None) -> str:
         core = (
-            f"{instrument_display} {side_label} {action_text} 数量 {qty_text} 张 名义 {amount_text}"
+            f"{instrument_display} · {side_label} · {action_text} · 数量 {qty_text} 张 · 名义 {amount_text}"
         )
         if reference_value is not None:
-            core += f" 参考价 {price_text}"
+            core += f" · 参考价 {price_text}"
         if note:
             core += f" · {note}"
         if order_id:
@@ -253,7 +253,17 @@ def okx_close_position(
             quantity=quantity,
             margin_mode=(margin_mode or "").strip() or None,
         )
-        note_text = result.get("message") or (result.get("raw") or {}).get("msg")
+        note_parts: list[str] = []
+        status_text = (result.get("status") or "").strip()
+        if status_text:
+            note_parts.append(f"state={status_text}")
+        if result.get("code"):
+            note_parts.append(f"code={result.get('code')}")
+        raw_message = result.get("message") or (result.get("raw") or {}).get("msg")
+        if raw_message:
+            note_parts.append(str(raw_message))
+        note_text = " ".join(note_parts) if note_parts else None
+        detail = _build_detail(result.get("order_id"), note_text)
         detail = _build_detail(result.get("order_id"), note_text)
         return RedirectResponse(
             url=f"/okx?refresh=1&order_status=success&detail={urllib.parse.quote_plus(detail)}",

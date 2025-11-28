@@ -244,6 +244,9 @@ class OkxPaperClient(ExchangeClient):
             "status": data.get("state") or "submitted",
             "instrument_id": instrument_id,
             "pos_side": pos_side,
+            "order_id": data.get("ordId"),
+            "code": data.get("sCode") or data.get("code"),
+            "message": data.get("sMsg") or data.get("msg"),
             "raw": response,
         }
 
