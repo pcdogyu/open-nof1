@@ -3366,7 +3366,7 @@ LIQUIDATION_TEMPLATE = r"""
           if (!isFinite(num)) {{ return '-'; }}
           return num.toFixed(digits);
         }};
-        const updateOrderSummary = ({ sideLabel, pairLabel, qtyLabel, amountLabel }) => {{
+        const updateOrderSummary = ({{ sideLabel, pairLabel, qtyLabel, amountLabel }}) => {{
           if (!orderSummaryPanel) {{ return; }}
           if (orderSideValue) {{ orderSideValue.textContent = sideLabel || '--'; }}
           if (orderPairValue) {{ orderPairValue.textContent = pairLabel || '--'; }}
