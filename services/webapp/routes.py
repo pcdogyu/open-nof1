@@ -60,6 +60,9 @@ except ImportError:  # pragma: no cover
 CONFIG_PATH = Path("config.py")
 MARKET_DEPTH_ATTACHMENT_DIR = Path("data/attachments/market_depth")
 _DEFAULT_LIQUIDATION_INTERVAL = 120
+ORDERBOOK_HISTORY_LOOKBACK_HOURS = 4
+MAX_HISTORY_POINTS_PER_INSTRUMENT = ORDERBOOK_HISTORY_LOOKBACK_HOURS * 1800  # 4h @ 8 samples/min
+_ORDERBOOK_PERSIST_TRACK: dict[str, str] = {}
 
 try:
     from config import (
@@ -1993,7 +1996,7 @@ def close_okx_position(
             normalized_qty = position_size
             effective_qty = position_size
         if lot_size and lot_size > 0:
-            multiples = math.floor(effective_qty / lot_size)
+            multiples = math.ceil(max(effective_qty, lot_size) / lot_size - 1e-12)
             if multiples <= 0:
                 multiples = 1
             effective_qty = multiples * lot_size
@@ -2410,16 +2413,17 @@ def get_orderbook_snapshot(
     """Return latest order book snapshots for configured instruments."""
     instrument_filter = (instrument or "").strip().upper()
     fetch_limit = max(1, max(levels, len(TRADABLE_INSTRUMENTS)))
-    history_cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=1)
-    # Keep client payloads small enough for fast initial page loads.
-    max_history_points = 300
+    history_cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=ORDERBOOK_HISTORY_LOOKBACK_HOURS)
+    # Keep client payloads small enough for fast initial page loads while covering 4h charts.
+    max_history_points = max(300, MAX_HISTORY_POINTS_PER_INSTRUMENT)
     instrument_count = max(1, len(TRADABLE_INSTRUMENTS))
     history_fetch_limit = min(max_history_points * instrument_count, max_history_points * 8)
+    micro_lookback_hours = max(1, min(ORDERBOOK_HISTORY_LOOKBACK_HOURS, 2))
     micro_records = _query_influx_measurement(
         measurement="market_microstructure",
         limit=max(history_fetch_limit, 500),
         instrument=instrument_filter or None,
-        lookback="1h",
+        lookback=f"{micro_lookback_hours}h",
     )
     cvd_map: dict[str, float | None] = {}
     cvd_history_map: dict[str, list[dict]] = {}
@@ -2459,13 +2463,13 @@ def get_orderbook_snapshot(
         measurement="okx_orderbook_depth",
         limit=history_fetch_limit,
         instrument=instrument_filter or None,
-        lookback="1h",
+        lookback=f"{ORDERBOOK_HISTORY_LOOKBACK_HOURS}h",
     )
     snapshot_records = _query_influx_measurement(
         measurement="okx_orderbook_depth",
         limit=fetch_limit * 2,
         instrument=instrument_filter or None,
-        lookback="2h",
+        lookback=f"{max(2, ORDERBOOK_HISTORY_LOOKBACK_HOURS)}h",
     )
     seen: set[str] = set()
     items: list[dict] = []
@@ -2618,6 +2622,8 @@ def get_orderbook_snapshot(
         items = _fetch_live_orderbooks(levels=levels, instrument_filter=instrument_filter)
     if not items and not allow_live_fallback:
         items = []
+    if items:
+        _persist_orderbook_items(items)
     items.sort(key=lambda entry: entry["instrument_id"])
     return {
         "instrument": instrument_filter,
@@ -3504,6 +3510,40 @@ def _coerce_datetime(value: object, *, default: datetime) -> datetime:
         return parsed
     except ValueError:
         return default
+
+
+def _persist_orderbook_items(items: Sequence[dict]) -> None:
+    """
+    Persist served orderbook data into the local InfluxDB cache so newly opened
+    dashboards can render historic charts immediately.
+    """
+    writer = _get_orderbook_writer()
+    if writer is None:
+        return
+    default_ts = datetime.now(tz=timezone.utc)
+    for entry in items:
+        inst_id = (entry.get("instrument_id") or "").upper()
+        if not inst_id:
+            continue
+        bids = entry.get("bids") or []
+        asks = entry.get("asks") or []
+        if not bids and not asks:
+            continue
+        timestamp = _coerce_datetime(entry.get("timestamp"), default=default_ts)
+        ts_key = timestamp.isoformat()
+        if _ORDERBOOK_PERSIST_TRACK.get(inst_id) == ts_key:
+            continue
+        try:
+            writer.write_orderbook(
+                instrument_id=inst_id,
+                timestamp=timestamp,
+                bids=bids,
+                asks=asks,
+            )
+        except Exception as exc:  # pragma: no cover - best effort cache
+            logger.debug("Failed to persist orderbook payload for %s: %s", inst_id, exc)
+            continue
+        _ORDERBOOK_PERSIST_TRACK[inst_id] = ts_key
 
 
 def _get_orderbook_writer() -> InfluxWriter | None:

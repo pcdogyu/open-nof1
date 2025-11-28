@@ -205,7 +205,9 @@ def okx_close_position(
         return text or "0"
 
     instrument_display = instrument_id.strip().upper()
-    action_text = (action_label or "").strip() or "平仓"
+    action_text = (action_label or "").strip()
+    if not action_text:
+        action_text = "平仓"
     side_label = (side_display or "").strip()
     if not side_label:
         normalized = position_side.strip().lower()
@@ -233,14 +235,14 @@ def okx_close_position(
 
     def _build_detail(order_id: object | None, note: str | None = None) -> str:
         core = (
-            f"{instrument_display} �� {side_label} �� {action_text} ���� {qty_text} �� �� ��� {amount_text}"
+            f"{instrument_display} {side_label} {action_text} 数量 {qty_text} 张 名义 {amount_text}"
         )
         if reference_value is not None:
-            core += f" �� �ο��� {price_text}"
+            core += f" 参考价 {price_text}"
         if note:
-            core += f" �� {note}"
+            core += f" · {note}"
         if order_id:
-            return f"����ID {order_id} �� {core}"
+            return f"订单ID {order_id} · {core}"
         return core
 
     try:
@@ -258,7 +260,7 @@ def okx_close_position(
             status_code=status.HTTP_303_SEE_OTHER,
         )
     except Exception as exc:
-        error_detail = _build_detail(None, f"���� {exc}")
+        error_detail = _build_detail(None, f"错误 {exc}")
         return RedirectResponse(
             url=f"/okx?refresh=1&order_status=error&detail={urllib.parse.quote_plus(error_detail)}",
             status_code=status.HTTP_303_SEE_OTHER,
