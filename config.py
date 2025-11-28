@@ -6,7 +6,7 @@ needed for your environment.
 """
 
 INFLUX_URL = "http://localhost:8086"
-INFLUX_ORG = "hy"
+INFLUX_ORG = "HY"
 INFLUX_BUCKET = "orderflow"
 
 # Auto-generated InfluxDB token (scope manually configure in Influx UI).
