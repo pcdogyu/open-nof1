@@ -107,6 +107,11 @@ class BaseOkxStream:
                 if self._stop_event.is_set():
                     break
                 idle = loop.time() - last_message_at
+                # Proactively send ping frames at a fixed cadence to keep OKX connection alive.
+                try:
+                    await ws.ping()
+                except Exception:
+                    break
                 if idle >= self._idle_timeout_seconds:
                     logger.warning(
                         "%s idle for %.0fs; closing websocket to trigger reconnect",
@@ -118,12 +123,6 @@ class BaseOkxStream:
                     except Exception:
                         pass
                     break
-                # Send a lightweight ping if no data has arrived recently.
-                if idle >= self._ping_interval_seconds:
-                    try:
-                        await ws.ping()
-                    except Exception:
-                        break
 
         keepalive_task = asyncio.create_task(_keepalive(), name=f"{self.__class__.__name__}-keepalive")
         try:
