@@ -38,6 +38,10 @@ from services.okx.catalog import (
 )
 from services.okx.live import fetch_account_snapshot
 from services.okx.brackets import apply_bracket_targets
+from services.storage.settings_store import (
+    load_namespace as load_settings_namespace,
+    save_namespace as save_settings_namespace,
+)
 from services.webapp import prompt_templates
 from services.webapp.dependencies import get_account_repository, get_portfolio_registry
 from services.liquidations import waves as wave_detector
@@ -178,6 +182,31 @@ _PIPELINE_SETTINGS: dict[str, object] = {
     "updated_at": datetime.now(tz=timezone.utc).isoformat(),
     "liquidation_overrides": {},
 }
+_pipeline_store = load_settings_namespace("pipeline")
+if _pipeline_store:
+    instruments_override_raw = _pipeline_store.get("tradable_instruments") or []
+    instruments_override = [
+        str(inst).upper()
+        for inst in instruments_override_raw
+        if str(inst).strip()
+    ]
+    if instruments_override:
+        _PIPELINE_SETTINGS["tradable_instruments"] = instruments_override
+        TRADABLE_INSTRUMENTS = instruments_override  # type: ignore[assignment]
+    poll_override = _pipeline_store.get("poll_interval")
+    try:
+        poll_value = int(poll_override)
+    except (TypeError, ValueError):
+        poll_value = None
+    if poll_value and poll_value > 0:
+        _PIPELINE_SETTINGS["poll_interval"] = poll_value
+        PIPELINE_POLL_INTERVAL = poll_value  # type: ignore[assignment]
+    overrides_payload = _pipeline_store.get("liquidation_overrides")
+    if isinstance(overrides_payload, dict):
+        _PIPELINE_SETTINGS["liquidation_overrides"] = overrides_payload
+    updated_at_override = _pipeline_store.get("updated_at")
+    if isinstance(updated_at_override, str) and updated_at_override.strip():
+        _PIPELINE_SETTINGS["updated_at"] = updated_at_override
 
 _SCHEDULER_SETTINGS_LOCK = Lock()
 _SCHEDULER_SETTINGS: dict[str, object] = {
@@ -186,6 +215,24 @@ _SCHEDULER_SETTINGS: dict[str, object] = {
     "liquidation_interval": int(LIQUIDATION_CHECK_INTERVAL),
     "updated_at": datetime.now(tz=timezone.utc).isoformat(),
 }
+_scheduler_store = load_settings_namespace("scheduler")
+if _scheduler_store:
+    for key in ("market_interval", "ai_interval", "liquidation_interval"):
+        try:
+            value = int(_scheduler_store.get(key))
+        except (TypeError, ValueError):
+            value = None
+        if value and value > 0:
+            _SCHEDULER_SETTINGS[key] = value
+            if key == "market_interval":
+                MARKET_SYNC_INTERVAL = value  # type: ignore[assignment]
+            elif key == "ai_interval":
+                AI_INTERACTION_INTERVAL = value  # type: ignore[assignment]
+            elif key == "liquidation_interval":
+                LIQUIDATION_CHECK_INTERVAL = value  # type: ignore[assignment]
+    updated_at_override = _scheduler_store.get("updated_at")
+    if isinstance(updated_at_override, str) and updated_at_override.strip():
+        _SCHEDULER_SETTINGS["updated_at"] = updated_at_override
 
 # Cache for boot-time orderbook priming so first requests can avoid hitting upstreams.
 _ORDERBOOK_WARM_CACHE: dict | None = None
@@ -328,6 +375,13 @@ _RISK_SETTINGS: dict[str, object] = {
     **_sanitize_risk_config(_RISK_DEFAULTS),
     "updated_at": datetime.now(tz=timezone.utc).isoformat(),
 }
+_risk_store = load_settings_namespace("risk")
+if _risk_store:
+    sanitized = _sanitize_risk_config(_risk_store)
+    _RISK_SETTINGS.update(sanitized)
+    updated_at_override = _risk_store.get("updated_at")
+    if isinstance(updated_at_override, str) and updated_at_override.strip():
+        _RISK_SETTINGS["updated_at"] = updated_at_override
 
 _ORDERBOOK_WRITER: InfluxWriter | None = None
 OKX_REST_BASE = "https://www.okx.com"
@@ -3495,18 +3549,14 @@ def _persist_model_defaults() -> None:
 
 
 def _persist_scheduler_settings(market_interval: int, ai_interval: int, liquidation_interval: int) -> None:
-    """Persist scheduler intervals to config.py."""
-    _replace_config_assignment("MARKET_SYNC_INTERVAL", market_interval)
-    _replace_config_assignment("AI_INTERACTION_INTERVAL", ai_interval)
-    _replace_config_assignment("LIQUIDATION_CHECK_INTERVAL", liquidation_interval)
-    try:
-        import config as config_module  # type: ignore
-
-        config_module.MARKET_SYNC_INTERVAL = market_interval  # type: ignore[attr-defined]
-        config_module.AI_INTERACTION_INTERVAL = ai_interval  # type: ignore[attr-defined]
-        config_module.LIQUIDATION_CHECK_INTERVAL = liquidation_interval  # type: ignore[attr-defined]
-    except ImportError:
-        pass
+    """Persist scheduler intervals to the JSON settings store."""
+    payload = {
+        "market_interval": int(market_interval),
+        "ai_interval": int(ai_interval),
+        "liquidation_interval": int(liquidation_interval),
+        "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    save_settings_namespace("scheduler", payload)
 
 
 def _persist_pipeline_settings(
@@ -3514,29 +3564,21 @@ def _persist_pipeline_settings(
     poll_interval: int,
     overrides: Dict[str, Dict[str, object]],
 ) -> None:
-    """Persist pipeline tradable instruments and poll interval to config.py."""
-    _replace_config_assignment("TRADABLE_INSTRUMENTS", tradable_instruments)
-    _replace_config_assignment("PIPELINE_POLL_INTERVAL", poll_interval)
-    _replace_config_assignment("LIQUIDATION_INSTRUMENT_OVERRIDES", overrides)
-    try:
-        import config as config_module  # type: ignore
-
-        config_module.TRADABLE_INSTRUMENTS = tradable_instruments  # type: ignore[attr-defined]
-        config_module.PIPELINE_POLL_INTERVAL = poll_interval  # type: ignore[attr-defined]
-        config_module.LIQUIDATION_INSTRUMENT_OVERRIDES = overrides  # type: ignore[attr-defined]
-    except ImportError:
-        pass
+    """Persist pipeline tradable instruments and poll interval to the JSON settings store."""
+    payload = {
+        "tradable_instruments": list(tradable_instruments),
+        "poll_interval": int(poll_interval),
+        "liquidation_overrides": overrides,
+        "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    save_settings_namespace("pipeline", payload)
 
 
 def _persist_risk_settings(settings: Dict[str, object]) -> None:
-    """Persist risk configuration settings to config.py."""
-    _replace_config_assignment("RISK_SETTINGS", settings)
-    try:
-        import config as config_module  # type: ignore
-
-        config_module.RISK_SETTINGS = settings  # type: ignore[attr-defined]
-    except ImportError:
-        pass
+    """Persist risk configuration settings to the JSON settings store."""
+    payload = dict(settings)
+    payload["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
+    save_settings_namespace("risk", payload)
 
 
 def _replace_config_assignment(var_name: str, value: object) -> None:

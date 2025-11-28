@@ -48,6 +48,7 @@ from services.okx.transform import (
     normalize_trades,
 )
 from services.okx.brackets import apply_bracket_targets
+from services.storage.settings_store import load_namespace as load_settings_namespace
 from services.webapp.dependencies import (
     get_account_repository,
     get_portfolio_registry,
@@ -105,6 +106,41 @@ except ImportError:  # pragma: no cover
     LIQUIDATION_CHECK_INTERVAL = _DEFAULT_LIQUIDATION_INTERVAL
     _RISK_DEFAULTS = {}
     _LIQUIDATION_OVERRIDE_DEFAULTS = {}
+
+_pipeline_store = load_settings_namespace("pipeline")
+if _pipeline_store:
+    instruments_override_raw = _pipeline_store.get("tradable_instruments") or []
+    instruments_override = [
+        str(inst).upper()
+        for inst in instruments_override_raw
+        if str(inst).strip()
+    ]
+    if instruments_override:
+        TRADABLE_INSTRUMENTS = tuple(instruments_override)  # type: ignore[assignment]
+
+_scheduler_store = load_settings_namespace("scheduler")
+if _scheduler_store:
+    try:
+        MARKET_SYNC_INTERVAL = int(_scheduler_store.get("market_interval") or MARKET_SYNC_INTERVAL)
+    except (TypeError, ValueError):
+        pass
+    try:
+        AI_INTERACTION_INTERVAL = int(_scheduler_store.get("ai_interval") or AI_INTERACTION_INTERVAL)
+    except (TypeError, ValueError):
+        pass
+    try:
+        LIQUIDATION_CHECK_INTERVAL = int(
+            _scheduler_store.get("liquidation_interval") or LIQUIDATION_CHECK_INTERVAL
+        )
+    except (TypeError, ValueError):
+        pass
+
+_risk_store = load_settings_namespace("risk")
+if _risk_store:
+    try:
+        _RISK_DEFAULTS = dict(_risk_store)
+    except Exception:
+        pass
 
 _SCHEDULER: Optional["AsyncIOScheduler"] = None
 _FEATURE_CLIENT: Optional["InfluxDBClient"] = None

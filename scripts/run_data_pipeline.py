@@ -18,6 +18,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from services.storage.settings_store import load_namespace as load_settings_namespace
+
 try:
     from config import PIPELINE_POLL_INTERVAL, TRADABLE_INSTRUMENTS
 except ImportError:
@@ -30,6 +32,23 @@ except ImportError:
         "DOGE-USDT-SWAP",
     ]
     PIPELINE_POLL_INTERVAL = 120
+
+_pipeline_store = load_settings_namespace("pipeline")
+if _pipeline_store:
+    instruments_override_raw = _pipeline_store.get("tradable_instruments") or []
+    instruments_override = [
+        str(inst).upper()
+        for inst in instruments_override_raw
+        if str(inst).strip()
+    ]
+    if instruments_override:
+        TRADABLE_INSTRUMENTS = instruments_override  # type: ignore[assignment]
+    try:
+        poll_override = int(_pipeline_store.get("poll_interval") or PIPELINE_POLL_INTERVAL)
+    except (TypeError, ValueError):
+        poll_override = None
+    if poll_override and poll_override > 0:
+        PIPELINE_POLL_INTERVAL = poll_override  # type: ignore[assignment]
 
 DEFAULT_INSTRUMENTS = tuple(TRADABLE_INSTRUMENTS)
 DEFAULT_POLL_INTERVAL = int(PIPELINE_POLL_INTERVAL)
