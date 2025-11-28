@@ -2523,26 +2523,34 @@ OKX_TEMPLATE = r"""
     <meta charset="UTF-8">
     <title>OKX 模拟交易</title>
     <style>
-        body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
-        h1 {{ margin-bottom: 0.5rem; }}
-        h2 {{ margin-top: 2rem; margin-bottom: 0.5rem; }}
-        .top-nav {{ display: flex; gap: 16px; margin-bottom: 1.5rem; font-size: 0.95rem; }}
+        body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 16px; }}
+        .page-shell {{ max-width: 1320px; margin: 0 auto; }}
+        h1 {{ margin: 0; font-size: 1.6rem; }}
+        h2 {{ margin-top: 0; margin-bottom: 0.5rem; }}
+        .top-nav {{ display: flex; gap: 12px; margin-bottom: 1rem; font-size: 0.95rem; flex-wrap: wrap; }}
         .nav-link {{ padding: 6px 12px; border-radius: 6px; background-color: rgba(51, 65, 85, 0.6); color: #e2e8f0; text-decoration: none; }}
         .nav-link.active {{ background-color: #38bdf8; color: #0f172a; }}
-        .ai-signals-card {{ margin-bottom: 2rem; }}
-        .ai-signals-card table {{ margin-top: 0.5rem; }}
-        .error-card {{ background-color: #3f1d45; border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.45); }}
+        .page-header {{ display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 0.75rem; }}
+        .page-meta {{ display: flex; flex-wrap: wrap; gap: 10px; align-items: center; color: #94a3b8; font-size: 0.9rem; margin-top: 6px; }}
+        .page-refresh {{ white-space: nowrap; }}
+        .error-card {{ background-color: #3f1d45; border-radius: 12px; padding: 16px 20px; margin-bottom: 18px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.45); }}
         .error-card h2 {{ margin: 0 0 10px 0; color: #f87171; }}
         .error-card ul {{ margin: 0; padding-left: 20px; }}
         .error-card li {{ margin: 6px 0; font-size: 0.9rem; }}
-        .okx-card {{ background-color: #1e293b; border-radius: 12px; padding: 20px; margin-top: 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); }}
-        .okx-card header {{ margin-bottom: 12px; }}
+        .manual-layout {{ display: grid; grid-template-columns: minmax(360px, 1.15fr) minmax(280px, 0.85fr); gap: 18px; align-items: stretch; margin-bottom: 18px; }}
+        .manual-card {{ background-color: #1e293b; border-radius: 12px; padding: 18px 20px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.35); margin-top: 0; }}
+        .manual-form {{ display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; }}
+        .order-info-card {{ margin-top: 0; height: 100%; }}
+        .okx-card {{ background-color: #1e293b; border-radius: 12px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); }}
+        .okx-card header {{ margin-bottom: 16px; }}
         .okx-card .meta {{ color: #94a3b8; font-size: 0.9rem; margin-top: 4px; }}
         .summary-table {{ margin-top: 12px; }}
-        .split {{ display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }}
-        .panel {{ flex: 1 1 320px; min-width: 260px; }}
+        .split {{ display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }}
+        .panel {{ flex: 1 1 320px; min-width: 260px; margin-top: 14px; }}
+        .split .panel {{ margin-top: 0; }}
         .split .panel:first-child {{ flex: 0.9 1 320px; }}
         .split .panel:last-child {{ flex: 1.5 1 520px; min-width: 360px; }}
+        .account-stack {{ display: grid; gap: 18px; margin-top: 6px; }}
         .recent-trades-panel table {{ table-layout: auto; }}
         .trade-side {{ font-weight: 600; }}
         .trade-buy {{ color: #4ade80; }}
@@ -2555,7 +2563,6 @@ OKX_TEMPLATE = r"""
         table.dense th.action-col, table.dense td.action-col {{ text-align: center; }}
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
         ul.curve-list li {{ padding: 6px 0; border-bottom: 1px dashed #334155; font-size: 0.9rem; }}
-        .inline-row {{ display: inline-flex; align-items: center; gap: 10px; margin: 0; }}
         .inline-form {{ display: inline-flex; align-items: center; margin: 0; }}
         .btn-refresh {{ font-size: 12px; padding: 4px 8px; border-radius: 6px; border: 1px solid #38bdf8; color: #38bdf8; text-decoration: none; background: transparent; }}
         .btn-refresh:hover {{ background-color: rgba(56, 189, 248, 0.15); }}
@@ -2592,11 +2599,9 @@ OKX_TEMPLATE = r"""
             box-shadow: 0 10px 24px rgba(251, 146, 60, 0.45);
         }}
         .local-time {{ color: #94a3b8; font-size: 0.9rem; }}
-        .flash {{ margin: 12px 0; padding: 12px 16px; border-radius: 10px; font-size: 0.95rem; }}
+        .flash {{ margin: 10px 0 16px; padding: 12px 16px; border-radius: 10px; font-size: 0.95rem; }}
         .flash.success {{ background-color: rgba(74, 222, 128, 0.12); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.3); }}
         .flash.error {{ background-color: rgba(248, 113, 113, 0.12); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.3); }}
-        .manual-card {{ background-color: #1e293b; border-radius: 12px; padding: 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); margin-top: 1.5rem; }}
-        .manual-form {{ display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; }}
         .manual-field {{ display: flex; flex-direction: column; gap: 6px; color: #94a3b8; font-size: 0.9rem; min-width: 160px; flex: 0 0 auto; }}
         .manual-field.flex {{ flex: 1 1 220px; }}
         .manual-form input, .manual-form select {{ border-radius: 8px; border: 1px solid #334155; background-color: #0f172a; color: #e2e8f0; padding: 10px; font-size: 0.95rem; }}
@@ -2671,10 +2676,15 @@ OKX_TEMPLATE = r"""
             justify-content: space-between;
             min-height: 96px;
         }}
+        @media (max-width: 1100px) {{
+            .page-header {{ flex-direction: column; align-items: flex-start; gap: 8px; }}
+            .manual-layout {{ grid-template-columns: 1fr; }}
+        }}
     </style>
 </head>
 <body>
-    <nav class="top-nav">
+    <div class="page-shell">
+        <nav class="top-nav">
         <a href="/" class="nav-link">首页</a>
         <a href="/models" class="nav-link">模型管理</a>
         <a href="/okx" class="nav-link active">OKX 模拟</a>
@@ -2688,56 +2698,69 @@ OKX_TEMPLATE = r"""
         <a href="/orders/debug" class="nav-link">下单调试</a>
     </nav>
 
-    <h1>OKX 模拟交易概览</h1>
-    <p class="inline-row">数据时间：<span class="timestamp">{as_of}</span><span class="local-time">（本地时间：<span id="local-time">--:--:--</span>）</span><a href="/okx?refresh=1" class="btn-refresh" title="从交易所拉取最新并写入缓存">强制刷新</a></p>
-    {flash_block}
-    <section class="manual-card">
-      <h2>手动下单</h2>
-      <form class="manual-form" method="post" action="/okx/manual-order">
-        <label class="manual-field">账户
-          <select name="account_id" required>
-            {manual_account_options}
-          </select>
-        </label>
-        <label class="manual-field">合约
-          <select name="instrument_id" required>
-            {manual_instrument_options}
-          </select>
-        </label>
-        <label class="manual-field">方向
-          <select name="side" required>
-            <option value="buy">买入</option>
-            <option value="sell">卖出</option>
-          </select>
-        </label>
-        <label class="manual-field">类型
-          <select name="order_type" id="order-type" required>
-            <option value="limit">限价</option>
-            <option value="market">市价</option>
-          </select>
-        </label>
-        <label class="manual-field">数量
-          <input type="number" step="any" min="0" name="size" required>
-        </label>
-        <label class="manual-field flex">价格（限价必填）
-          <input type="number" step="any" min="0" name="price" id="price-input" placeholder="市价单可留空">
-        </label>
-        <label class="manual-field">保证金模式
-          <select name="margin_mode">
-            <option value="">自动</option>
-            <option value="cross">全仓</option>
-            <option value="isolated">逐仓</option>
-            <option value="cash">现货</option>
-          </select>
-        </label>
-        <div class="manual-action">
-          <button type="submit">提交订单</button>
+        <header class="page-header">
+            <div>
+                <h1>OKX 模拟交易概览</h1>
+                <p class="page-meta">
+                    数据时间：<span class="timestamp">{as_of}</span>
+                    <span class="local-time">（本地时间：<span id="local-time">--:--:--</span>）</span>
+                </p>
+            </div>
+            <a href="/okx?refresh=1" class="btn-refresh page-refresh" title="从交易所拉取最新并写入缓存">强制刷新</a>
+        </header>
+        {flash_block}
+        <div class="manual-layout">
+            <section class="manual-card">
+              <h2>手动下单</h2>
+              <form class="manual-form" method="post" action="/okx/manual-order">
+                <label class="manual-field">账户
+                  <select name="account_id" required>
+                    {manual_account_options}
+                  </select>
+                </label>
+                <label class="manual-field">合约
+                  <select name="instrument_id" required>
+                    {manual_instrument_options}
+                  </select>
+                </label>
+                <label class="manual-field">方向
+                  <select name="side" required>
+                    <option value="buy">买入</option>
+                    <option value="sell">卖出</option>
+                  </select>
+                </label>
+                <label class="manual-field">类型
+                  <select name="order_type" id="order-type" required>
+                    <option value="limit">限价</option>
+                    <option value="market">市价</option>
+                  </select>
+                </label>
+                <label class="manual-field">数量
+                  <input type="number" step="any" min="0" name="size" required>
+                </label>
+                <label class="manual-field flex">价格（限价必填）
+                  <input type="number" step="any" min="0" name="price" id="price-input" placeholder="市价单可留空">
+                </label>
+                <label class="manual-field">保证金模式
+                  <select name="margin_mode">
+                    <option value="">自动</option>
+                    <option value="cross">全仓</option>
+                    <option value="isolated">逐仓</option>
+                    <option value="cash">现货</option>
+                  </select>
+                </label>
+                <div class="manual-action">
+                  <button type="submit">提交订单</button>
+                </div>
+              </form>
+            </section>
+            {order_info_card}
         </div>
-      </form>
-    </section>
-    {order_info_card}
-    {error_block}
-    {account_sections}
+        {error_block}
+        <div class="account-stack">
+            {account_sections}
+        </div>
+    </div>
     <script>
         (function() {{
         function pad(n) {{ return n < 10 ? '0' + n : '' + n; }}
