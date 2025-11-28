@@ -36,7 +36,7 @@ class BaseOkxStream:
         self._writer: InfluxWriter | None = None
         # Keepalive tuning to reduce noisy restarts when the upstream is quiet.
         self._ping_interval_seconds = 20
-        self._idle_timeout_seconds = 60
+        self._idle_timeout_seconds = 20
 
     def set_instruments(self, instruments: Iterable[str]) -> None:
         updated = {inst.strip().upper() for inst in instruments if inst and inst.strip()}

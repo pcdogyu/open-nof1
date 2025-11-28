@@ -3295,7 +3295,7 @@ LIQUIDATION_TEMPLATE = r"""
                     <th>FLV / 均值</th>
                     <th>最新价格</th>
                     <th>价格涨跌幅</th>
-                    <th>爆仓弹性(涨跌1%触发强平数)</th>
+                    <th>爆仓弹性(涨跌1%触发)</th>
                     <th>PC 价格压力(潜在剧烈波动)</th>
                     <th>密度</th>
                     <th>LPI 强平压力指数</th>
