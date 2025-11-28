@@ -38,6 +38,16 @@ logger = logging.getLogger(__name__)
 app.include_router(routes.router)
 
 
+@app.exception_handler(asyncio.CancelledError)
+async def _handle_cancelled_request(request: Request, exc: asyncio.CancelledError) -> JSONResponse:
+    """Return a clean response when client/server cancellation interrupts a request."""
+    logger.debug("Request cancelled before completion: %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=499,
+        content={"detail": "Request was cancelled"},
+    )
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     start_scheduler()
