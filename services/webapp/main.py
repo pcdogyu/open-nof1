@@ -423,7 +423,13 @@ def add_pipeline_instrument(
     poll_interval: int = Form(...),
     current_instruments: str = Form(""),
 ) -> RedirectResponse:
-    instrument_list = _parse_instrument_input(current_instruments)
+    if current_instruments.strip():
+        instrument_list = _parse_instrument_input(current_instruments)
+    else:
+        # Fallback to server-side settings so add operations never rely on stale form data.
+        snapshot = routes.get_pipeline_settings()
+        existing = snapshot.get("tradable_instruments") or []
+        instrument_list = [str(item) for item in existing]
     normalized_new = (new_instrument or "").strip()
     if normalized_new:
         instrument_list.append(normalized_new)
