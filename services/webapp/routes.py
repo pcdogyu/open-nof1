@@ -2460,7 +2460,7 @@ def get_orderbook_snapshot(
                 if not isinstance(item.get("_ts"), datetime) or item["_ts"] >= history_cutoff
             ]
         if len(history_list) > max_history_points:
-            del history_list[: len(history_list) - max_history_points]
+            del history_list[max_history_points:]
     history_records = _query_influx_measurement(
         measurement="okx_orderbook_depth",
         limit=history_fetch_limit,
@@ -2511,7 +2511,7 @@ def get_orderbook_snapshot(
                 if not isinstance(entry.get("_ts"), datetime) or entry["_ts"] >= history_cutoff
             ]
         if len(history_list) > max_history_points:
-            del history_list[: len(history_list) - max_history_points]
+            del history_list[max_history_points:]
 
     def _build_history_payload(inst_id: str) -> tuple[list[dict], list[dict], float | None]:
         raw_history = history_map.get(inst_id, [])
