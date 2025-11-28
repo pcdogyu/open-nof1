@@ -231,14 +231,16 @@ def okx_close_position(
         price_text = "市价"
         amount_text = "市价撮合"
 
-    def _build_detail(order_id: object | None) -> str:
+    def _build_detail(order_id: object | None, note: str | None = None) -> str:
         core = (
-            f"{instrument_display} · {side_label} · {action_text} 数量 {qty_text} 张 · 金额 {amount_text}"
+            f"{instrument_display} �� {side_label} �� {action_text} ���� {qty_text} �� �� ��� {amount_text}"
         )
         if reference_value is not None:
-            core += f" · 参考价 {price_text}"
+            core += f" �� �ο��� {price_text}"
+        if note:
+            core += f" �� {note}"
         if order_id:
-            return f"订单ID {order_id} · {core}"
+            return f"����ID {order_id} �� {core}"
         return core
 
     try:
@@ -249,18 +251,18 @@ def okx_close_position(
             quantity=quantity,
             margin_mode=(margin_mode or "").strip() or None,
         )
-        detail = _build_detail(result.get("order_id"))
+        note_text = result.get("message") or (result.get("raw") or {}).get("msg")
+        detail = _build_detail(result.get("order_id"), note_text)
         return RedirectResponse(
             url=f"/okx?refresh=1&order_status=success&detail={urllib.parse.quote_plus(detail)}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
     except Exception as exc:
-        error_detail = _build_detail(None) + f" · 错误：{exc}"
+        error_detail = _build_detail(None, f"���� {exc}")
         return RedirectResponse(
             url=f"/okx?refresh=1&order_status=error&detail={urllib.parse.quote_plus(error_detail)}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
-
 
 @app.post("/okx/scale-position", include_in_schema=False)
 def okx_scale_position(
@@ -940,7 +942,13 @@ def _render_orderbook_page(snapshot: dict, instruments: Sequence[str], levels: i
     level_options = _build_depth_options(levels)
     items = snapshot.get("items") or []
     cards = _render_orderbook_cards(items, levels)
-    grid_class = "book-grid two-cols" if items and len(items) <= 2 else "book-grid"
+    item_count = len(items)
+    if item_count == 1:
+        grid_class = "book-grid single-card"
+    elif 0 < item_count <= 2:
+        grid_class = "book-grid two-cols"
+    else:
+        grid_class = "book-grid"
     return ORDERBOOK_TEMPLATE.format(
         instrument_options=instrument_options,
         level_options=level_options,
@@ -3764,8 +3772,10 @@ ORDERBOOK_TEMPLATE = r"""
         .timeframe-buttons button:hover {{ border-color: rgba(148, 163, 184, 0.8); }}
         .book-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(410px, 1fr)); gap: 12px; column-gap: 20px; align-items: stretch; width: 100%; margin: 0; justify-items: start; justify-content: start; }}
         .book-grid.two-cols {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; column-gap: 16px; width: 100%; margin: 0; justify-items: start; justify-content: start; }}
+        .book-grid.single-card {{ grid-template-columns: minmax(0, 1fr); justify-items: stretch; }}
+        .book-grid.single-card .orderbook-chart {{ width: 100%; max-width: 100%; }}
         @media (max-width: 1200px) {{ .book-grid.two-cols {{ grid-template-columns: 1fr; column-gap: 12px; }} }}
-        .orderbook-chart {{ background: #0f1b2d; border-radius: 16px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.15); display: flex; flex-direction: column; gap: 14px; width: calc(100% - 40px); }}
+        .orderbook-chart {{ background: #0f1b2d; border-radius: 16px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); border: 1px solid rgba(148, 163, 184, 0.15); display: flex; flex-direction: column; gap: 14px; width: calc(100% - 40px); box-sizing: border-box; }}
         .orderbook-chart.tone-positive {{ border-color: rgba(74, 222, 128, 0.4); }}
         .orderbook-chart.tone-negative {{ border-color: rgba(248, 113, 113, 0.35); }}
         .orderbook-chart.tone-neutral {{ border-color: rgba(59, 130, 246, 0.25); }}
@@ -4178,7 +4188,9 @@ ORDERBOOK_TEMPLATE = r"""
           container.innerHTML = '';
           flushNetDepthQueue();
           const applyGridClass = (count) => {{
-            if (count > 0 && count <= 2) {{
+            if (count === 1) {{
+              container.className = `${{BASE_GRID_CLASS}} single-card`;
+            }} else if (count > 1 && count <= 2) {{
               container.className = `${{BASE_GRID_CLASS}} two-cols`;
             }} else {{
               container.className = BASE_GRID_CLASS;
@@ -4187,7 +4199,13 @@ ORDERBOOK_TEMPLATE = r"""
           const levels = parseInt(levelSelect.value || '{levels}', 10) || {levels};
           const filterValue = (instrumentSelect.value || '').trim();
           let items = Array.isArray(data.items) ? data.items.slice() : [];
-          if (!filterValue) {{
+          if (filterValue) {{
+            const matchSymbol = filterValue.toUpperCase();
+            const match = items.find(
+              (entry) => (entry.instrument_id || '').toUpperCase() === matchSymbol,
+            );
+            items = match ? [match] : [];
+          }} else {{
             const prioritized = [];
             DEFAULT_PAIRS.forEach((pair) => {{
               const found = items.find(
