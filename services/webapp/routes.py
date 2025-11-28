@@ -1806,6 +1806,16 @@ def scale_okx_position(
         passphrase=meta.get("passphrase"),
     )
     client = OkxPaperClient()
+    instrument_meta = _get_okx_instrument_meta(symbol) or {}
+    quote_currency = (
+        instrument_meta.get("settleCurrency")
+        or instrument_meta.get("ctValCcy")
+        or instrument_meta.get("quoteCcy")
+    )
+    if not quote_currency:
+        parts = symbol.split("-")
+        if len(parts) >= 2:
+            quote_currency = parts[1]
     try:
         client.authenticate(credentials)
         margin_mode_value = _choose_margin_mode(symbol, meta, margin_mode)
@@ -1896,6 +1906,16 @@ def close_okx_position(
     )
     client = OkxPaperClient()
     symbol = instrument_id.upper()
+    instrument_meta = _get_okx_instrument_meta(symbol) or {}
+    quote_currency = (
+        instrument_meta.get("settleCurrency")
+        or instrument_meta.get("ctValCcy")
+        or instrument_meta.get("quoteCcy")
+    )
+    if not quote_currency:
+        parts = symbol.split("-")
+        if len(parts) >= 2:
+            quote_currency = parts[1]
     position_size: float | None = None
     try:
         client.authenticate(credentials)
@@ -1963,7 +1983,6 @@ def close_okx_position(
         effective_qty = normalized_qty
         if position_size is not None:
             effective_qty = min(effective_qty, position_size)
-        instrument_meta = _get_okx_instrument_meta(symbol)
         lot_size = _try_float(instrument_meta.get("lotSz")) if instrument_meta else None
         min_size = _try_float(instrument_meta.get("minSz")) if instrument_meta else None
         if lot_size:
@@ -2019,6 +2038,7 @@ def close_okx_position(
                 instrument_id=symbol,
                 margin_mode=margin_mode_value,
                 pos_side=pos_side_payload,
+                ccy=quote_currency if margin_mode_value == "cross" else None,
             )
         try:
             get_okx_summary(force_refresh=True, ttl_seconds=0)

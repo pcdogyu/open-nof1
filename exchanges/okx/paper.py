@@ -224,6 +224,7 @@ class OkxPaperClient(ExchangeClient):
         instrument_id: str,
         margin_mode: Literal["cash", "cross", "isolated"] = "cross",
         pos_side: Optional[str] = None,
+        ccy: Optional[str] = None,
     ) -> dict:
         """
         Force-close an open position using OKX's close-position endpoint.
@@ -235,6 +236,8 @@ class OkxPaperClient(ExchangeClient):
         if pos_side:
             # OKX expects lowercase long/short identifiers for posSide.
             body["posSide"] = pos_side.strip().lower()
+        if ccy:
+            body["ccy"] = ccy.strip().upper()
         response = self._request("POST", "/api/v5/trade/close-position", json_body=body)
         data = _single_item(response)
         return {
