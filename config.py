@@ -10,7 +10,7 @@ INFLUX_ORG = "hy"
 INFLUX_BUCKET = "orderflow"
 
 # Auto-generated InfluxDB token (scope manually configure in Influx UI).
-INFLUX_TOKEN = "GCFl77EGbk4vlpAWyxRqXqGi_J_OR7wz6wm8l8Wh5tzY7LUIvC1-kHXKS7RIWeK7_Dnw4UlT--2sXF7_wCW4uA=="
+INFLUX_TOKEN = "vsT7wjTEKgORPin_xlWI4V7COJJcsyIbLYr7aVTM_hkivAPwPZMKg9PdZE9HEq7ZVa4KrFRMwjBctftPG3fEvQ=="
 INFLUX_SECONDARY_TOKEN = "INLTcxomqhQy5xHEbBYcs_mbc6kZ3SuhbqTHfmgH09TiGPfdRjyZH-Z9Boxuy2vnSEN_mw7I8jqgU2VbzCzEWw=="
 INFLUX_TOKENS = [
     INFLUX_TOKEN,

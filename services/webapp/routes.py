@@ -2155,26 +2155,26 @@ def get_liquidation_snapshot(limit: int = 50, instrument: Optional[str] = None) 
     }
 
 
+
 def _summarize_wave_status(signals: Sequence[wave_detector.WaveSignal]) -> str:
     if not signals:
-        return "等待数据"
-    active = [sig.instrument for sig in signals if sig.status == "波次进行"]
-    absorbs = [sig.instrument for sig in signals if sig.signal_code == "bottom_absorb"]
+        return "????"
+    active = [sig.instrument for sig in signals if sig.status == "????"]
+    absorbs = [sig.instrument for sig in signals if sig.signal_code in {"bottom_absorb", "bottom_signal"}]
     tops = [sig.instrument for sig in signals if sig.signal_code == "top_signal"]
-    reversals = [sig.instrument for sig in signals if sig.signal_code == "short_reversal"]
-    warns = [sig.instrument for sig in signals if sig.status in {"警戒", "顶部预警"}]
+    reversals = [sig.instrument for sig in signals if sig.signal_code in {"short_reversal", "long_reversal"}]
+    warns = [sig.instrument for sig in signals if sig.status in {"??", "????", "????"}]
     if active:
-        return f"波次进行中：{', '.join(active)}"
+        return f"??????{', '.join(active)}"
     if reversals:
-        return f"空单反转：{', '.join(reversals)}"
+        return f"????{', '.join(reversals)}"
     if tops:
-        return f"顶部：{', '.join(tops)}"
+        return f"???{', '.join(tops)}"
     if warns:
-        return f"警戒：{', '.join(warns)}"
+        return f"???{', '.join(warns)}"
     if absorbs:
-        return f"吸收：{', '.join(absorbs)}"
-    return f"监控 {len(signals)} 个合约"
-
+        return f"???{', '.join(absorbs)}"
+    return f"?? {len(signals)} ???"
 
 
 def _fallback_wave_signals(grouped_records: dict[str, list[dict]]) -> list[dict]:

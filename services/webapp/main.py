@@ -3712,11 +3712,11 @@ LIQUIDATION_TEMPLATE = r"""
         }};
         const signalOrderConfig = (signal) => {{
           const code = (signal.signal_code || '').toLowerCase();
-          if (code === 'bottom_absorb') {{
-            return {{ side: 'buy', label: '买入' }};
+          if (code === 'bottom_absorb' || code === 'bottom_signal' || code === 'long_reversal') {{
+            return {{ side: 'buy', label: '??' }};
           }}
           if (code === 'top_signal' || code === 'short_reversal') {{
-            return {{ side: 'sell', label: '卖出' }};
+            return {{ side: 'sell', label: '??' }};
           }}
           return null;
         }};
