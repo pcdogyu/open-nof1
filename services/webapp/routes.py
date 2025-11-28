@@ -1996,10 +1996,12 @@ def close_okx_position(
             normalized_qty = position_size
             effective_qty = position_size
         if lot_size and lot_size > 0:
-            multiples = math.ceil(max(effective_qty, lot_size) / lot_size - 1e-12)
+            multiples = math.ceil(max(effective_qty, lot_size) / lot_size)
             if multiples <= 0:
                 multiples = 1
             effective_qty = multiples * lot_size
+            if position_size is not None and effective_qty > position_size:
+                effective_qty = position_size
         if min_size and min_size > 0 and effective_qty < min_size:
             effective_qty = min_size
         if position_size is not None and effective_qty > position_size:
