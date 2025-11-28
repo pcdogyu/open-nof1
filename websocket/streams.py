@@ -121,9 +121,10 @@ class BaseOkxStream:
                 if self._stop_event.is_set():
                     break
                 idle = loop.time() - last_message_at
-                # Proactively send ping frames at a fixed cadence to keep OKX connection alive.
                 try:
-                    await ws.ping()
+                    # OKX closes connections that do not send data for 30s.
+                    # Send explicit JSON ping so upstream sees activity and respond with pong.
+                    await ws.send(json.dumps({"op": "ping"}))
                 except Exception:
                     break
                 if idle >= self._idle_timeout_seconds:
