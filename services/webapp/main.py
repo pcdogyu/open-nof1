@@ -2523,8 +2523,9 @@ OKX_TEMPLATE = r"""
     <meta charset="UTF-8">
     <title>OKX 模拟交易</title>
     <style>
-        body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 16px; }}
-        .page-shell {{ width: 100%; max-width: none; margin: 0 auto; }}
+        body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 16px; overflow-x: hidden; }}
+        * {{ box-sizing: border-box; }}
+        .page-shell {{ width: 100%; max-width: 100%; margin: 0 auto; }}
         h1 {{ margin: 0; font-size: 1.6rem; }}
         h2 {{ margin-top: 0; margin-bottom: 0.5rem; }}
         .top-nav {{ display: flex; gap: 12px; margin-bottom: 1rem; font-size: 0.95rem; flex-wrap: wrap; }}
@@ -2537,20 +2538,20 @@ OKX_TEMPLATE = r"""
         .error-card h2 {{ margin: 0 0 10px 0; color: #f87171; }}
         .error-card ul {{ margin: 0; padding-left: 20px; }}
         .error-card li {{ margin: 6px 0; font-size: 0.9rem; }}
-        .manual-layout {{ display: grid; grid-template-columns: minmax(360px, 1.15fr) minmax(280px, 0.85fr); gap: 18px; align-items: stretch; margin-bottom: 18px; }}
-        .manual-card {{ background-color: #1e293b; border-radius: 12px; padding: 18px 20px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.35); margin-top: 0; }}
+        .manual-layout {{ display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: stretch; margin-bottom: 18px; width: 100%; }}
+        .manual-card {{ background-color: #1e293b; border-radius: 12px; padding: 18px 20px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.35); margin-top: 0; width: 100%; }}
         .manual-form {{ display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; }}
-        .order-info-card {{ margin-top: 0; height: 100%; }}
-        .okx-card {{ background-color: #1e293b; border-radius: 12px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); }}
+        .order-info-card {{ margin-top: 0; height: 100%; width: 100%; }}
+        .okx-card {{ background-color: #1e293b; border-radius: 12px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45); width: 100%; }}
         .okx-card header {{ margin-bottom: 16px; }}
         .okx-card .meta {{ color: #94a3b8; font-size: 0.9rem; margin-top: 4px; }}
         .summary-table {{ width: 100%; margin-top: 12px; border-collapse: collapse; }}
-        .split {{ display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }}
-        .panel {{ flex: 1 1 320px; min-width: 260px; margin-top: 14px; }}
+        .split {{ display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; width: 100%; }}
+        .panel {{ flex: 1 1 320px; min-width: 240px; margin-top: 14px; }}
         .split .panel {{ margin-top: 0; }}
         .split .panel:first-child {{ flex: 0.9 1 320px; }}
         .split .panel:last-child {{ flex: 1.5 1 520px; min-width: 360px; }}
-        .account-stack {{ display: grid; gap: 18px; margin-top: 6px; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); }}
+        .account-stack {{ display: grid; gap: 18px; margin-top: 6px; grid-template-columns: minmax(0, 1fr); width: 100%; }}
         .recent-trades-panel table {{ table-layout: auto; }}
         .trade-side {{ font-weight: 600; }}
         .trade-buy {{ color: #4ade80; }}
@@ -2558,8 +2559,8 @@ OKX_TEMPLATE = r"""
         .trade-pagination {{ display: flex; gap: 6px; flex-wrap: wrap; margin-top: 0.35rem; }}
         .trade-page-btn {{ padding: 4px 10px; border-radius: 6px; border: 1px solid rgba(148, 163, 184, 0.4); background: transparent; color: #cbd5f5; cursor: pointer; }}
         .trade-page-btn.active {{ background: #38bdf8; color: #0f172a; border-color: #38bdf8; }}
-        table.dense {{ width: 100%; border-collapse: collapse; margin-top: 0.5rem; background-color: rgba(15, 23, 42, 0.6); border-radius: 6px; overflow: hidden; }}
-        table.dense th, table.dense td {{ padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 0.9rem; }}
+        table.dense {{ width: 100%; border-collapse: collapse; margin-top: 0.5rem; background-color: rgba(15, 23, 42, 0.6); border-radius: 6px; overflow: hidden; table-layout: fixed; }}
+        table.dense th, table.dense td {{ padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 0.9rem; word-break: break-word; }}
         table.dense th.action-col, table.dense td.action-col {{ text-align: center; }}
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
         ul.curve-list li {{ padding: 6px 0; border-bottom: 1px dashed #334155; font-size: 0.9rem; }}
