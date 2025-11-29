@@ -1501,11 +1501,18 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             if raw_side.lower() in {"short", "sell"}:
                 delta = -delta
             pnl_pct = (delta / entry_px) * 100
-        pnl_pct_cell = ""
+        pct_text = ""
+        pct_class = ""
         if pnl_pct is not None:
-            pct_value = _format_number(pnl_pct)
-            pct_class = "pnl-positive" if pnl_pct >= 0 else "pnl-negative"
-            pnl_pct_cell = f"<span class='{pct_class}'>{pct_value}%</span>"
+            pct_text = f"{_format_number(pnl_pct)}%"
+            if pnl_pct >= 0:
+                pct_class = "pnl-positive"
+            else:
+                pct_class = "pnl-negative"
+        if pct_class:
+            pnl_pct_cell = f"<td class='{pct_class}'>{pct_text}</td>"
+        else:
+            pnl_pct_cell = f"<td>{pct_text}</td>"
 
         def _calc_amount(value: float, price: float | None) -> float | None:
             if price is None or value <= 0:
@@ -1581,11 +1588,7 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             f"{_close_form('全部平仓', esc(total_qty_text), _build_action_tooltip('平仓', total_qty_text, _calc_amount(qty, price_reference)), price_reference_text)}"
             "</div>"
         )
-        action_html = (
-            "<div class='close-actions' style='display:flex; flex-wrap:wrap; gap:10px; justify-content:flex-end;'>"
-            f"{''.join(action_pairs)}"
-            "</div>"
-        )
+        action_html = "<div class='close-actions'>{pairs}</div>".format(pairs="".join(action_pairs))
         pnl_value = pos.get("unrealized_pnl")
         pnl_value_text = _format_number(pnl_value)
         pnl_value_class = ""
@@ -1614,7 +1617,7 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             f"<td>{_format_number(pos.get('last_price') or pos.get('last') or pos.get('mark_price'))}</td>"
             f"<td>{_format_number(margin)}</td>"
             f"{pnl_value_cell}"
-            f"<td>{pnl_pct_cell}</td>"
+            f"{pnl_pct_cell}"
             f"<td>{esc(_format_asia_shanghai(pos.get('created_at') or pos.get('updated_at')))}</td>"
             f"<td class='action-col'>{action_html}</td>"
             "</tr>"
@@ -2587,7 +2590,12 @@ OKX_TEMPLATE = r"""
         table.dense th, table.dense td {{ padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 0.9rem; word-break: break-word; }}
         table.dense th.action-col, table.dense td.action-col {{ text-align: center; }}
         table.positions-table th,
-        table.positions-table td {{ width: calc(100% / 11); }}
+        table.positions-table td {{ width: calc((100% - 18%) / 10); }}
+        table.positions-table th.action-col,
+        table.positions-table td.action-col {{ width: 18%; }}
+        .positions-table .close-actions {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; justify-items: end; }}
+        .positions-table .action-pair {{ display: flex; gap: 8px; justify-content: flex-end; }}
+        .positions-table .action-pair.full {{ grid-column: 1 / -1; }}
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
         ul.curve-list li {{ padding: 6px 0; border-bottom: 1px dashed #334155; font-size: 0.9rem; }}
         .inline-form {{ display: inline-flex; align-items: center; margin: 0; }}
