@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
+import math
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from string import Template
@@ -1886,17 +1888,110 @@ def _render_liquidation_rows(items: Sequence[dict]) -> str:
 
 
 def _render_orderbook_cards(items: Sequence[dict], levels: int) -> str:
-    _ = items, levels
-    return "<p class='empty-state'>加载市场深度...</p>"
+    """Render server-side market depth cards for the orderbook dashboard."""
 
-    return "\n".join(cards)
+    def _to_float(value: object) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number):
+            return None
+        return number
 
-    return "\n".join(cards)
+    def _fmt(value: object, digits: int = 2) -> str:
+        number = _to_float(value)
+        if number is None:
+            return "--"
+        return f"{number:.{digits}f}"
 
-    return "\n".join(cards)
+    def _sum_depth(entries: Sequence[Sequence[object]]) -> float:
+        total = 0.0
+        if not entries:
+            return total
+        limit = max(1, levels)
+        for entry in entries[:limit]:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                size = _to_float(entry[1])
+                if size is not None:
+                    total += size
+        return total
 
-    return "\n".join(cards)
+    def _describe_imbalance(value: float) -> tuple[str, str]:
+        if value >= 0.2:
+            return "positive", "买盘力量领先，短线多头更有底气。"
+        if value <= -0.2:
+            return "negative", "卖盘压力增强，需留意价格走弱。"
+        return "neutral", "买卖力量接近平衡，关注成交放量信号。"
 
+    if not items:
+        return "<p class='empty-state'>暂无市场深度数据</p>"
+
+    cards: list[str] = []
+    for entry in items:
+        instrument = _escape(entry.get("instrument_id") or "--")
+        timestamp = _escape(_format_asia_shanghai(entry.get("timestamp")))
+        bids = entry.get("bids") or []
+        asks = entry.get("asks") or []
+        buy_depth = _sum_depth(bids)
+        sell_depth = _sum_depth(asks)
+        total_depth = buy_depth + sell_depth
+        if total_depth > 0:
+            bid_share = buy_depth / total_depth
+            imbalance = (buy_depth - sell_depth) / total_depth
+        else:
+            bid_share = 0.5
+            imbalance = 0.0
+        tone, guidance = _describe_imbalance(imbalance)
+        best_bid_val = _to_float(entry.get("best_bid"))
+        best_ask_val = _to_float(entry.get("best_ask"))
+        mid_price = "--"
+        if best_bid_val is not None and best_ask_val is not None:
+            mid_price = _fmt((best_bid_val + best_ask_val) / 2.0, 4)
+        history_payload: list[dict[str, object]] = []
+        for point in entry.get("history") or []:
+            value = _to_float(point.get("net_depth") or point.get("value"))
+            if value is None:
+                continue
+            history_payload.append(
+                {
+                    "value": value,
+                    "time": point.get("timestamp") or point.get("time"),
+                }
+            )
+        history_json = html.escape(json.dumps(history_payload), quote=True)
+        analysis = (
+            f"多头占比 {int(round(bid_share * 100))}%：{guidance}价差 {_fmt(entry.get('spread'), 4)} "
+            f"| 净深度 {_fmt(buy_depth - sell_depth, 2)}"
+        )
+        cards.append(
+            f"""
+<section class="orderbook-chart tone-{tone}">
+  <div class="chart-header">
+    <div>
+      <h2>{instrument}</h2>
+      <small>最后更新时间：{timestamp}</small>
+    </div>
+  </div>
+  <div class="chart-prices">
+    <div class="chart-price-group primary">
+      <span>买一 {_fmt(best_bid_val, 4)}</span>
+      <span>卖一 {_fmt(best_ask_val, 4)}</span>
+      <span class="mid">中间价 {mid_price}</span>
+    </div>
+  </div>
+  <div class="chart-stats">
+    <span class="stat-pill">买方深度 {_fmt(buy_depth, 2)}</span>
+    <span class="stat-pill">卖方深度 {_fmt(sell_depth, 2)}</span>
+    <span class="stat-pill">总深度 {_fmt(total_depth, 2)}</span>
+    <span class="stat-pill stat-accent">净深度 {_fmt(buy_depth - sell_depth, 2)}</span>
+    <span class="stat-pill stat-accent">价差 {_fmt(entry.get("spread"), 4)}</span>
+  </div>
+  <canvas class="chart-canvas" data-history="{history_json}"></canvas>
+  <p class="chart-insight {tone}">{_escape(analysis)}</p>
+</section>
+""".strip()
+        )
     return "\n".join(cards)
 
 
