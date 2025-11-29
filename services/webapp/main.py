@@ -2657,8 +2657,8 @@ OKX_TEMPLATE = r"""
         table.positions-table th.action-col,
         table.positions-table td.action-col {{ width: 35%; }}
         .positions-table .close-actions {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }}
-        .positions-table .action-slot {{ display: flex; }}
-        .positions-table .action-slot form {{ width: 100%; }}
+        .positions-table .action-slot {{ display: flex; justify-content: center; }}
+        .positions-table .action-slot form {{ width: 70%; }}
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
         ul.curve-list li {{ padding: 6px 0; border-bottom: 1px dashed #334155; font-size: 0.9rem; }}
         .inline-form {{ display: inline-flex; align-items: center; margin: 0; }}
@@ -2692,7 +2692,7 @@ OKX_TEMPLATE = r"""
         .btn-close,
         .btn-scale,
         .btn-close-full,
-        .btn-reverse {{ width: 100%; justify-content: center; }}
+        .btn-reverse {{ width: 70%; justify-content: center; margin: 0 auto; }}
         .btn-close-full {{
             padding: 6px 16px;
             background-image: linear-gradient(135deg, #fb923c, #f97316);
