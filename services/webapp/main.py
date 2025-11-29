@@ -1451,9 +1451,7 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
     rows: list[str] = []
 
     def _fmt_quantity(value: float) -> str:
-        text = f"{value:.8f}"
-        text = text.rstrip("0").rstrip(".")
-        return text or "0"
+        return f"{value:.6f}"
 
     for pos in positions or []:
         account_value = esc(account_id or pos.get("account_id") or "")
@@ -1588,28 +1586,45 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
             f"{''.join(action_pairs)}"
             "</div>"
         )
+        pnl_value = pos.get("unrealized_pnl")
+        pnl_value_text = _format_number(pnl_value)
+        pnl_value_class = ""
+        if pnl_value not in (None, ""):
+            try:
+                pnl_numeric = float(pnl_value)
+                if pnl_numeric > 0:
+                    pnl_value_class = "pnl-positive"
+                elif pnl_numeric < 0:
+                    pnl_value_class = "pnl-negative"
+            except (TypeError, ValueError):
+                pnl_value_class = ""
+        pnl_value_cell = (
+            f"<td class='{pnl_value_class}'>{pnl_value_text}</td>"
+            if pnl_value_class
+            else f"<td>{pnl_value_text}</td>"
+        )
+
         rows.append(
             "<tr>"
-            f"<td>{esc(pos.get('position_id'))}</td>"
             f"<td>{instrument_value}</td>"
             f"<td>{side_display_escaped}</td>"
             f"<td>{leverage_display}</td>"
-            f"<td>{_format_number(pos.get('quantity'))}</td>"
+            f"<td>{_fmt_quantity(qty)}</td>"
             f"<td>{_format_number(pos.get('entry_price'))}</td>"
             f"<td>{_format_number(pos.get('last_price') or pos.get('last') or pos.get('mark_price'))}</td>"
             f"<td>{_format_number(margin)}</td>"
-            f"<td>{_format_number(pos.get('unrealized_pnl'))}</td>"
+            f"{pnl_value_cell}"
             f"<td>{pnl_pct_cell}</td>"
             f"<td>{esc(_format_asia_shanghai(pos.get('created_at') or pos.get('updated_at')))}</td>"
             f"<td class='action-col'>{action_html}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='12'>当前无持仓</td></tr>")
+        rows.append("<tr><td colspan='11'>当前无持仓</td></tr>")
 
     table_html = (
         "<table class='dense'>"
-        "<thead><tr><th>持仓ID</th><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>最新价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th class='action-col'>操作</th></tr></thead>"
+        "<thead><tr><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>最新价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th class='action-col'>操作</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
@@ -2570,7 +2585,7 @@ OKX_TEMPLATE = r"""
         .trade-page-btn.active {{ background: #38bdf8; color: #0f172a; border-color: #38bdf8; }}
         table.dense {{ width: 100%; border-collapse: collapse; margin-top: 0.5rem; background-color: rgba(15, 23, 42, 0.6); border-radius: 6px; overflow: hidden; table-layout: fixed; }}
         table.dense th, table.dense td {{ padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 0.9rem; word-break: break-word; }}
-        table.dense th.action-col, table.dense td.action-col {{ text-align: center; }}
+        table.dense th.action-col, table.dense td.action-col {{ text-align: center; width: 250%; }}
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
         ul.curve-list li {{ padding: 6px 0; border-bottom: 1px dashed #334155; font-size: 0.9rem; }}
         .inline-form {{ display: inline-flex; align-items: center; margin: 0; }}
