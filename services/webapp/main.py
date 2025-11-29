@@ -2656,9 +2656,9 @@ OKX_TEMPLATE = r"""
         table.positions-table td {{ width: calc((100% - 35%) / 10); }}
         table.positions-table th.action-col,
         table.positions-table td.action-col {{ width: 35%; }}
-        .positions-table .close-actions {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }}
+        .positions-table .close-actions {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }}
         .positions-table .action-slot {{ display: flex; justify-content: flex-end; }}
-        .positions-table .action-slot form {{ width: 80%; }}
+        .positions-table .action-slot form {{ width: 75%; }}
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
         ul.curve-list li {{ padding: 6px 0; border-bottom: 1px dashed #334155; font-size: 0.9rem; }}
         .inline-form {{ display: inline-flex; align-items: center; margin: 0; }}
