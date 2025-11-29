@@ -266,6 +266,10 @@ _DEFAULT_RISK_SETTINGS = {
     "auto_close_time_shanghai": "05:50",
     "long_settle_threshold": 0.2,
     "short_settle_threshold": 0.2,
+    "window_size": 50,
+    "multiplier": 2.0,
+    "price_drop_threshold": 0.7,
+    "smoothing": 0.2,
 }
 
 
@@ -658,6 +662,10 @@ def get_risk_settings() -> dict:
             "liquidation_silence_seconds": int(_RISK_SETTINGS.get("liquidation_silence_seconds", 300)),
             "long_settle_threshold": float(_RISK_SETTINGS.get("long_settle_threshold", 0.2)),
             "short_settle_threshold": float(_RISK_SETTINGS.get("short_settle_threshold", 0.2)),
+            "window_size": int(_RISK_SETTINGS.get("window_size", 50)),
+            "multiplier": float(_RISK_SETTINGS.get("multiplier", 2.0)),
+            "price_drop_threshold": float(_RISK_SETTINGS.get("price_drop_threshold", 0.7)),
+            "smoothing": float(_RISK_SETTINGS.get("smoothing", 0.2)),
             "auto_close_time_shanghai": str(_RISK_SETTINGS.get("auto_close_time_shanghai") or ""),
             "updated_at": _RISK_SETTINGS["updated_at"],
         }
@@ -688,6 +696,10 @@ def update_risk_settings(
     auto_close_time_shanghai: str = "",
     long_settle_threshold: float = 0.2,
     short_settle_threshold: float = 0.2,
+    window_size: int = 50,
+    multiplier: float = 2.0,
+    price_drop_threshold: float = 0.7,
+    smoothing: float = 0.2,
 ) -> dict:
     """Update risk parameters and persist them to config.py."""
     try:
@@ -713,6 +725,10 @@ def update_risk_settings(
         auto_close_label = _normalize_auto_close_time(auto_close_time_shanghai)
         long_settle_threshold_val = float(long_settle_threshold)
         short_settle_threshold_val = float(short_settle_threshold)
+        window_size_val = int(window_size)
+        multiplier_val = float(multiplier)
+        price_drop_threshold_val = float(price_drop_threshold)
+        smoothing_val = float(smoothing)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="数值需要为数字。")
     try:
@@ -767,6 +783,14 @@ def update_risk_settings(
         raise HTTPException(status_code=400, detail="多头settle_threshold需在 0-50% 之间")
     if short_settle_threshold_val < 0 or short_settle_threshold_val > 50:
         raise HTTPException(status_code=400, detail="空头settle_threshold需在 0-50% 之间")
+    if window_size_val < 5 or window_size_val > 500:
+        raise HTTPException(status_code=400, detail="window_size需在 5-500 之间")
+    if multiplier_val < 1.0 or multiplier_val > 10.0:
+        raise HTTPException(status_code=400, detail="multiplier需在 1.0-10.0 之间")
+    if price_drop_threshold_val < 0.0 or price_drop_threshold_val > 10.0:
+        raise HTTPException(status_code=400, detail="price_drop_threshold需在 0.0-10.0% 之间")
+    if smoothing_val < 0.0 or smoothing_val > 1.0:
+        raise HTTPException(status_code=400, detail="smoothing需在 0.0-1.0 之间")
     max_capital_pct = max(0.0, min(1.0, max_capital_pct_percent / 100.0))
     normalized = {
         "price_tolerance_pct": price,
@@ -791,6 +815,10 @@ def update_risk_settings(
         "max_capital_pct_per_instrument": max_capital_pct,
         "long_settle_threshold": long_settle_threshold_val,
         "short_settle_threshold": short_settle_threshold_val,
+        "window_size": window_size_val,
+        "multiplier": multiplier_val,
+        "price_drop_threshold": price_drop_threshold_val,
+        "smoothing": smoothing_val,
         "auto_close_time_shanghai": auto_close_label,
     }
     with _RISK_SETTINGS_LOCK:

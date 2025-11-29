@@ -72,6 +72,9 @@ class BaseOkxStream:
     async def _run_forever(self) -> None:
         reconnect_delay = 5
         max_reconnect_delay = 45
+        consecutive_failures = 0
+        max_consecutive_failures = 10
+        
         while not self._stop_event.is_set():
             try:
                 async with websockets.connect(
@@ -79,80 +82,189 @@ class BaseOkxStream:
                     # Handle ping/idle manually to tolerate quiet periods.
                     ping_interval=None,
                     ping_timeout=None,
-                    close_timeout=5,
+                    close_timeout=10,  # Increased from 5 to allow more time for cleanup
                     open_timeout=self._connect_timeout_seconds,
-                    max_queue=8,
+                    max_queue=16,  # Increased from 8 to handle more backpressure
                 ) as ws:
                     reconnect_delay = 5  # reset after successful connect
+                    consecutive_failures = 0  # reset failure counter
+                    logger.info("%s websocket connection established successfully", self.__class__.__name__)
                     await self._subscribe(ws)
                     await self._listen(ws)
             except asyncio.CancelledError:
+                logger.info("%s websocket task cancelled gracefully", self.__class__.__name__)
                 break
             except asyncio.TimeoutError:
+                consecutive_failures += 1
                 logger.warning(
-                    "%s websocket handshake timed out after %ss; retrying",
+                    "%s websocket handshake timed out after %ss; retrying (%d/%d)",
                     self.__class__.__name__,
                     self._connect_timeout_seconds,
+                    consecutive_failures,
+                    max_consecutive_failures,
                 )
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(max_reconnect_delay, reconnect_delay * 1.5)
             except (ConnectionClosedError, ConnectionClosedOK) as exc:
-                logger.warning(
-                    "%s websocket closed (%s); reconnecting in %ss",
-                    self.__class__.__name__,
-                    exc,
-                    reconnect_delay,
-                )
+                consecutive_failures += 1
+                # Special handling for connection reset errors
+                if "10054" in str(exc) or "connection reset" in str(exc).lower():
+                    logger.warning(
+                        "%s websocket connection reset by peer (WinError 10054); reconnecting in %ss (%d/%d)",
+                        self.__class__.__name__,
+                        reconnect_delay,
+                        consecutive_failures,
+                        max_consecutive_failures,
+                    )
+                else:
+                    logger.warning(
+                        "%s websocket closed (%s); reconnecting in %ss (%d/%d)",
+                        self.__class__.__name__,
+                        exc,
+                        reconnect_delay,
+                        consecutive_failures,
+                        max_consecutive_failures,
+                    )
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(max_reconnect_delay, reconnect_delay * 1.5)
+            except OSError as exc:
+                consecutive_failures += 1
+                # Special handling for WinError 10054 and similar connection errors
+                if "10054" in str(exc) or "connection reset" in str(exc).lower():
+                    logger.warning(
+                        "%s encountered connection error: %s; reconnecting in %ss (%d/%d)",
+                        self.__class__.__name__,
+                        exc,
+                        reconnect_delay,
+                        consecutive_failures,
+                        max_consecutive_failures,
+                    )
+                else:
+                    logger.error(
+                        "%s encountered OS error: %s; reconnecting in %ss (%d/%d)",
+                        self.__class__.__name__,
+                        exc,
+                        reconnect_delay,
+                        consecutive_failures,
+                        max_consecutive_failures,
+                    )
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(max_reconnect_delay, reconnect_delay * 1.5)
             except Exception as exc:
-                logger.warning("%s encountered an error: %s", self.__class__.__name__, exc)
+                consecutive_failures += 1
+                logger.error(
+                    "%s encountered unexpected error: %s; reconnecting in %ss (%d/%d)",
+                    self.__class__.__name__,
+                    exc,
+                    reconnect_delay,
+                    consecutive_failures,
+                    max_consecutive_failures,
+                )
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(max_reconnect_delay, reconnect_delay * 1.5)
+                
+            # Implement backoff with jitter to avoid thundering herd problem
+            if consecutive_failures >= max_consecutive_failures:
+                logger.warning(
+                    "%s reached maximum consecutive failures (%d); pausing for extended time",
+                    self.__class__.__name__,
+                    max_consecutive_failures,
+                )
+                await asyncio.sleep(60)  # Longer pause after too many failures
+                consecutive_failures = 0  # Reset counter after extended pause
 
     async def _listen(self, ws: WebSocketClientProtocol) -> None:
         loop = asyncio.get_running_loop()
         last_message_at = loop.time()
-
+        last_ping_at = loop.time()
+        ping_response_received = True
+        ping_interval_adjusted = self._ping_interval_seconds
+        
         async def _keepalive() -> None:
-            nonlocal last_message_at
+            nonlocal last_message_at, last_ping_at, ping_response_received, ping_interval_adjusted
+            
             while not self._stop_event.is_set():
-                await asyncio.sleep(self._ping_interval_seconds)
+                await asyncio.sleep(min(ping_interval_adjusted, 20))  # Cap at 20s for safety
+                
                 if self._stop_event.is_set():
                     break
-                idle = loop.time() - last_message_at
+                
+                current_time = loop.time()
+                idle = current_time - last_message_at
+                time_since_last_ping = current_time - last_ping_at
+                
                 try:
+                    # Dynamic ping interval adjustment based on connection stability
+                    if not ping_response_received and time_since_last_ping > ping_interval_adjusted:
+                        # If we didn't receive a response to previous ping, reduce interval
+                        ping_interval_adjusted = max(10, ping_interval_adjusted - 2)
+                        logger.debug(
+                            "%s adjusting ping interval to %ss due to missed pong",
+                            self.__class__.__name__,
+                            ping_interval_adjusted,
+                        )
+                    
                     # OKX closes connections that do not send data for 30s.
                     # Send explicit JSON ping so upstream sees activity and respond with pong.
-                    await ws.send(json.dumps({"op": "ping"}))
-                except Exception:
+                    ping_data = {"op": "ping", "ts": int(current_time * 1000)}  # Add timestamp for tracking
+                    await ws.send(json.dumps(ping_data))
+                    last_ping_at = current_time
+                    ping_response_received = False  # Reset flag, will be set when pong is received
+                    
+                    if idle >= self._idle_timeout_seconds:
+                        logger.debug(
+                            "%s idle for %.0fs; ping sent to keep connection alive",
+                            self.__class__.__name__,
+                            idle,
+                        )
+                except Exception as exc:
+                    logger.warning("%s keepalive ping failed: %s", self.__class__.__name__, exc)
                     break
-                if idle >= self._idle_timeout_seconds:
-                    logger.debug(
-                        "%s idle for %.0fs; ping sent to keep connection alive",
-                        self.__class__.__name__,
-                        idle,
-                    )
-
+        
         keepalive_task = asyncio.create_task(_keepalive(), name=f"{self.__class__.__name__}-keepalive")
+        
         try:
             async for message in ws:
                 if self._stop_event.is_set():
                     break
+                
                 last_message_at = loop.time()
+                
                 try:
                     payload = json.loads(message)
-                except json.JSONDecodeError:
+                    
+                    # Handle pong responses specifically
+                    if isinstance(payload, dict) and payload.get("event") == "pong":
+                        ping_response_received = True
+                        # If we got a pong, we can slightly increase ping interval if needed
+                        if ping_interval_adjusted < self._ping_interval_seconds:
+                            ping_interval_adjusted = min(self._ping_interval_seconds, ping_interval_adjusted + 1)
+                        continue
+                    
+                    if "event" in payload:
+                        # Log subscription events or errors
+                        event_type = payload.get("event")
+                        if event_type == "error":
+                            logger.error("%s received error event: %s", self.__class__.__name__, payload)
+                        elif event_type != "subscribe":
+                            logger.debug("%s received event: %s", self.__class__.__name__, event_type)
+                        continue
+                    
+                    await self._handle_payload(payload)
+                except json.JSONDecodeError as exc:
+                    logger.warning("%s failed to decode message: %s", self.__class__.__name__, exc)
                     continue
-                if "event" in payload:
-                    continue  # subscription acknowledgement or error
-                await self._handle_payload(payload)
+                except Exception as exc:
+                    logger.error("%s error handling message: %s", self.__class__.__name__, exc)
+                    # Continue processing other messages even if one fails
+                    continue
         finally:
             keepalive_task.cancel()
             try:
                 await keepalive_task
             except asyncio.CancelledError:
                 pass
+            logger.debug("%s listener task completed", self.__class__.__name__)
 
     async def _handle_payload(self, payload: dict) -> None:
         raise NotImplementedError
