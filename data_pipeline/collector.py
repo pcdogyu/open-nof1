@@ -36,6 +36,7 @@ class MarketCollectorConfig:
     orderbook_depth: int = 50
     trades_limit: int = 200
     request_delay_seconds: float = 0.0  # throttle between OKX REST hits
+    one_minute_lookback_minutes: int = 15  # only fetch recent 1m candles
 
 
 class MarketCollector:
@@ -51,7 +52,8 @@ class MarketCollector:
     async def fetch_all(self) -> Dict[str, Any]:
         """Fetch data for all instruments/timeframes."""
         results: Dict[str, Any] = {"fetched_at": datetime.now(tz=timezone.utc).isoformat()}
-        for instrument in self.config.instruments:
+        total = len(self.config.instruments)
+        for idx, instrument in enumerate(self.config.instruments):
             inst_id = instrument.instrument_id
             candle_tasks = [
                 self._fetch_candles(inst_id, tf, self.config.candle_limit)
@@ -67,6 +69,8 @@ class MarketCollector:
                 "funding_rate": funding,
                 "trades": trades,
             }
+            if idx < total - 1:
+                await asyncio.sleep(1.0 + max(0.0, self.config.request_delay_seconds))
         return results
 
     async def _fetch_candles(self, inst_id: str, timeframe: Timeframe, limit: int) -> list:
@@ -74,9 +78,10 @@ class MarketCollector:
         Retrieve historical candles. For 2m we build from 1m data aggregated in pairs.
         """
         if timeframe == "2m":
+            one_minute_limit = max(1, int(self.config.one_minute_lookback_minutes))
             raw = await self._get(
                 "/api/v5/market/candles",
-                params={"instId": inst_id, "bar": "1m", "limit": limit * 2},
+                params={"instId": inst_id, "bar": "1m", "limit": one_minute_limit},
             )
             return self._aggregate_two_minute(raw.get("data", []))
 
