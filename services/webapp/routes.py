@@ -264,6 +264,8 @@ _DEFAULT_RISK_SETTINGS = {
     "liquidation_silence_seconds": 300,
     "max_capital_pct_per_instrument": 0.1,
     "auto_close_time_shanghai": "05:50",
+    "long_settle_threshold": 0.2,
+    "short_settle_threshold": 0.2,
 }
 
 
@@ -333,6 +335,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
             "liquidation_silence_seconds",
             "max_capital_pct_per_instrument",
             "auto_close_time_shanghai",
+            "long_settle_threshold",
+            "short_settle_threshold",
         ):
             if key in raw:
                 config[key] = raw[key]  # type: ignore[assignment]
@@ -375,6 +379,11 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
     opposite_count = max(0, min(20, opposite_count))
     silence_seconds = max(0.0, min(300.0, silence_seconds))
     max_capital_pct = max(0.0, min(1.0, max_capital_pct))
+    # 处理多头和空头的settle_threshold参数
+    long_settle_threshold = float(config.get("long_settle_threshold", 0.2))
+    short_settle_threshold = float(config.get("short_settle_threshold", 0.2))
+    long_settle_threshold = max(0.0, min(50.0, long_settle_threshold))
+    short_settle_threshold = max(0.0, min(50.0, short_settle_threshold))
     return {
         "price_tolerance_pct": price,
         "max_drawdown_pct": drawdown,
@@ -394,6 +403,8 @@ def _sanitize_risk_config(raw: Optional[Dict[str, object]]) -> dict[str, float |
         "liquidation_opposite_count": opposite_count,
         "liquidation_silence_seconds": silence_seconds,
         "max_capital_pct_per_instrument": max_capital_pct,
+        "long_settle_threshold": long_settle_threshold,
+        "short_settle_threshold": short_settle_threshold,
         "auto_close_time_shanghai": auto_close_time,
     }
 
@@ -645,6 +656,8 @@ def get_risk_settings() -> dict:
             "liquidation_same_direction_count": int(_RISK_SETTINGS.get("liquidation_same_direction_count", 4)),
             "liquidation_opposite_count": int(_RISK_SETTINGS.get("liquidation_opposite_count", 3)),
             "liquidation_silence_seconds": int(_RISK_SETTINGS.get("liquidation_silence_seconds", 300)),
+            "long_settle_threshold": float(_RISK_SETTINGS.get("long_settle_threshold", 0.2)),
+            "short_settle_threshold": float(_RISK_SETTINGS.get("short_settle_threshold", 0.2)),
             "auto_close_time_shanghai": str(_RISK_SETTINGS.get("auto_close_time_shanghai") or ""),
             "updated_at": _RISK_SETTINGS["updated_at"],
         }
@@ -673,6 +686,8 @@ def update_risk_settings(
     liquidation_silence_seconds: int,
     max_capital_pct_per_instrument: float,
     auto_close_time_shanghai: str = "",
+    long_settle_threshold: float = 0.2,
+    short_settle_threshold: float = 0.2,
 ) -> dict:
     """Update risk parameters and persist them to config.py."""
     try:
@@ -696,6 +711,8 @@ def update_risk_settings(
         silence_seconds_val = int(liquidation_silence_seconds)
         max_capital_pct_percent = float(max_capital_pct_per_instrument)
         auto_close_label = _normalize_auto_close_time(auto_close_time_shanghai)
+        long_settle_threshold_val = float(long_settle_threshold)
+        short_settle_threshold_val = float(short_settle_threshold)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="数值需要为数字。")
     try:
@@ -746,6 +763,10 @@ def update_risk_settings(
 
     if max_capital_pct_percent < 0 or max_capital_pct_percent > 100:
         raise HTTPException(status_code=400, detail="单币对最大占用比例应在 0-100% 之间")
+    if long_settle_threshold_val < 0 or long_settle_threshold_val > 50:
+        raise HTTPException(status_code=400, detail="多头settle_threshold需在 0-50% 之间")
+    if short_settle_threshold_val < 0 or short_settle_threshold_val > 50:
+        raise HTTPException(status_code=400, detail="空头settle_threshold需在 0-50% 之间")
     max_capital_pct = max(0.0, min(1.0, max_capital_pct_percent / 100.0))
     normalized = {
         "price_tolerance_pct": price,
@@ -768,6 +789,8 @@ def update_risk_settings(
         "liquidation_opposite_count": opposite_count_val,
         "liquidation_silence_seconds": silence_seconds_val,
         "max_capital_pct_per_instrument": max_capital_pct,
+        "long_settle_threshold": long_settle_threshold_val,
+        "short_settle_threshold": short_settle_threshold_val,
         "auto_close_time_shanghai": auto_close_label,
     }
     with _RISK_SETTINGS_LOCK:

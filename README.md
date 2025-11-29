@@ -54,7 +54,7 @@ open-nof1.ai 尝试复刻 [nof1.ai](https://nof1.ai/) —— 让多个 AI 模型
 ### 启动控制台
 
 ```bash
-python run_server.py
+python3 -m uvicorn services.webapp.main:app --host 127.0.0.1 --port 8000 --workers 4
 ```
 
 浏览器访问 [http://localhost:8000](http://localhost:8000) 查看模型 Dashboard、OKX 摘要、管道配置等页面。若尚无真实数据，页面会展示占位信息。

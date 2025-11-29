@@ -105,6 +105,10 @@ class _WaveState:
     active_signal_code: Optional[str] = None
     event_counters: Dict[str, int] = field(default_factory=dict)
     last_signal: Optional[WaveSignal] = None
+    # 存储过去10个5分钟周期的成交量数据，用于计算平均值
+    volume_history: Deque[float] = field(default_factory=lambda: deque(maxlen=10))
+    # 存储最近3个5分钟周期的成交量数据，用于检查是否有成交量激增
+    recent_volumes: Deque[float] = field(default_factory=lambda: deque(maxlen=3))
 
 
 class WaveDetector:
@@ -119,13 +123,15 @@ class WaveDetector:
         window_size: int = 50,
         multiplier: float = 2.0,
         price_drop_threshold: float = 0.7,
-        settle_threshold: float = 0.2,
+        long_settle_threshold: float = 0.2,
+        short_settle_threshold: float = 0.2,
         smoothing: float = 0.2,
     ) -> None:
         self.window_size = max(5, window_size)
         self.multiplier = max(1.0, multiplier)
         self.price_drop_threshold = max(0.0, price_drop_threshold)
-        self.settle_threshold = max(0.0, settle_threshold)
+        self.long_settle_threshold = max(0.0, long_settle_threshold)
+        self.short_settle_threshold = max(0.0, short_settle_threshold)
         self.smoothing = max(0.0, min(1.0, smoothing))
         self._states: Dict[str, _WaveState] = {}
         self._signals: Dict[str, WaveSignal] = {}
@@ -214,13 +220,14 @@ class WaveDetector:
         self,
         window: Sequence[dict],
         state: _WaveState,
-        *,
-        baseline_override: float | None = None,
+        *, baseline_override: float | None = None,
     ) -> WaveMetrics:
         flv = 0.0
         fls = 0.0
         total_long = 0.0
         total_short = 0.0
+        # 计算当前5分钟窗口的成交量
+        current_volume = 0.0
         first_ts = window[0]["timestamp"]
         last_ts = window[-1]["timestamp"]
         first_price = self._coerce_float(window[0].get("last_price"))
@@ -237,6 +244,8 @@ class WaveDetector:
                 notional = qty * (entry.get("last_price") or 0.0)
             if notional is not None:
                 fls += abs(notional)
+            # 累加成交量（使用notional_value作为成交量指标）
+            current_volume += abs(notional) if notional is not None else 0.0
         duration_minutes = 0.0
         if first_ts and last_ts:
             duration_minutes = max(((last_ts - first_ts).total_seconds()) / 60.0, 0.0)
@@ -254,6 +263,10 @@ class WaveDetector:
             state.baseline = max(smoothed, 1e-9)
         le = (flv / price_drop_pct) if price_drop_pct > 0 else None
         pc = (fls / price_drop_pct) if price_drop_pct > 0 else None
+        # 更新成交量历史数据
+        state.volume_history.append(current_volume)
+        state.recent_volumes.append(current_volume)
+        
         lpi = flv / state.baseline if state.baseline else 0.0
         return WaveMetrics(
             flv=flv,
@@ -316,10 +329,21 @@ class WaveDetector:
             metrics.flv > metrics.baseline * self.multiplier
             and metrics.price_drop_pct >= self.price_drop_threshold
         )
+        # 根据价格变化方向选择合适的settle_threshold
+        settle_threshold = self.short_settle_threshold if metrics.price_change_pct > 0 else self.long_settle_threshold
         settle_condition = (
-            metrics.flv < metrics.baseline and abs(metrics.price_change_pct) < self.settle_threshold
+            metrics.flv < metrics.baseline and abs(metrics.price_change_pct) < settle_threshold
         )
-        absorbing = metrics.price_drop_pct < self.settle_threshold and metrics.flv > metrics.baseline
+        
+        # 判断成交量条件：检查过去三根5分钟周期中是否有一根成交量是平均的2倍以上
+        has_volume_surge = False
+        if len(state.volume_history) >= 10 and len(state.recent_volumes) >= 1:
+            avg_volume = sum(state.volume_history) / len(state.volume_history)
+            # 检查最近3个周期中是否有一个周期的成交量是平均值的2倍以上
+            has_volume_surge = any(volume >= avg_volume * 2 for volume in state.recent_volumes)
+        
+        # 修改为价格下跌幅度较大才触发买入信号
+        absorbing = metrics.price_drop_pct >= self.price_drop_threshold and metrics.flv > metrics.baseline
         short_absorb = absorbing and liquidation_side == "short"
         top_condition = (
             metrics.price_rise_pct >= self.price_drop_threshold
@@ -348,15 +372,20 @@ class WaveDetector:
             signal_code = "top_signal"
             direction = "sell"
             severity = 3
-        elif absorbing:
+        elif absorbing and has_volume_surge:
             status = "吸收"
-            signal_text = "强平被吸收 → 底部信号"
-            base_text = "强平被吸收 → 底部信号"
+            signal_text = "强平被吸收且成交量激增 → 底部信号"
+            base_text = "强平被吸收且成交量激增 → 底部信号"
             signal_text = f"{base_text} · {liquidation_label}" if liquidation_label else base_text
             signal_class = "wave-signal-bottom"
             signal_code = "bottom_absorb"
             direction = "buy"
-            severity = 2
+            severity = 3
+            if metrics.price_drop_pct > self.price_drop_threshold * 2:
+                severity = 4
+                signal_text = "大幅下跌后强平被吸收且成交量激增 → 强烈底部信号"
+                base_text = "大幅下跌后强平被吸收且成交量激增 → 强烈底部信号"
+                signal_text = f"{base_text} · {liquidation_label}" if liquidation_label else base_text
         elif short_reversal:
             status = "反转机会"
             base_text = "空单爆仓 → 反转信号"
@@ -365,14 +394,7 @@ class WaveDetector:
             signal_code = "short_reversal"
             direction = "sell"
             severity = 4
-        elif flv_dropping and liquidation_side == "short":
-            status = "衰减"
-            base_text = "空单爆仓量快速下降"
-            signal_text = f"{base_text} · {liquidation_label}" if liquidation_label else base_text
-            signal_class = "wave-signal-bottom"
-            signal_code = "short_decay"
-            direction = "buy"
-            severity = 2
+
         elif top_condition:
             status = "顶部预警"
             signal_text = "顶部信号"
@@ -425,8 +447,7 @@ class WaveDetector:
                 state.active_signal_code = signal_code
             elif state.active_signal_code != signal_code:
                 event_id = None
-        else:
-            state.active_signal_code = None
+        # 移除了当系统状态从'底部信号'或'吸收'变为'观望'时的多头出场信号逻辑
 
         signal = WaveSignal(
             instrument=instrument,
