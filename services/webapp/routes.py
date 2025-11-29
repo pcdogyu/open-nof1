@@ -2039,10 +2039,58 @@ def close_okx_position(
         "message": f"平仓 {symbol} 成功",
         "raw": response.get("raw"),
     }
+def reverse_okx_position(
+    *,
+    account_id: str,
+    instrument_id: str,
+    position_side: str,
+    quantity: float,
+    margin_mode: str | None = None,
+) -> dict:
+    """Close an existing position and open an equal-sized opposite position."""
+    try:
+        normalized_qty = float(quantity)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="�������·��������� 0��")
+    if normalized_qty <= 0:
+        raise HTTPException(status_code=400, detail="�������·��������� 0��")
 
+    normalized_symbol = (instrument_id or "").upper()
+    if not normalized_symbol:
+        raise HTTPException(status_code=400, detail="��ԼID����Ϊ��")
 
+    side_lower = (position_side or "").lower()
+    if side_lower in {"long", "buy"}:
+        open_side = "sell"
+    elif side_lower in {"short", "sell"}:
+        open_side = "buy"
+    else:
+        raise HTTPException(status_code=400, detail=f"δ֪�ĳֲַ��� {position_side}")
 
+    close_result = close_okx_position(
+        account_id=account_id,
+        instrument_id=normalized_symbol,
+        position_side=position_side,
+        quantity=normalized_qty,
+        margin_mode=margin_mode,
+    )
+    try:
+        open_result = place_manual_okx_order(
+            account_id=account_id,
+            instrument_id=normalized_symbol,
+            side=open_side,
+            order_type="market",
+            size=normalized_qty,
+            price=None,
+            margin_mode=margin_mode,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"�����˲���ʧ��: {exc}") from exc
 
+    return {
+        "close_order_id": close_result.get("order_id"),
+        "open_order_id": open_result.get("order_id"),
+    }
 
 
 @router.post("/okx/close-all-positions", include_in_schema=False)

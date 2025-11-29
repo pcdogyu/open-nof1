@@ -286,6 +286,36 @@ def okx_close_position(
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
+@app.post("/okx/reverse-position", include_in_schema=False)
+def okx_reverse_position(
+    account_id: str = Form(...),
+    instrument_id: str = Form(...),
+    position_side: str = Form(...),
+    quantity: float = Form(...),
+    margin_mode: Optional[str] = Form(None),
+) -> RedirectResponse:
+    try:
+        result = routes.reverse_okx_position(
+            account_id=account_id.strip(),
+            instrument_id=instrument_id.strip().upper(),
+            position_side=position_side.strip(),
+            quantity=quantity,
+            margin_mode=(margin_mode or "").strip() or None,
+        )
+        close_id = result.get("close_order_id") or "--"
+        open_id = result.get("open_order_id") or "--"
+        detail = f"反手完成：平仓订单 {close_id} · 开仓订单 {open_id}"
+        return RedirectResponse(
+            url=f"/okx?refresh=1&order_status=success&detail={urllib.parse.quote_plus(detail)}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    except Exception as exc:
+        return RedirectResponse(
+            url=f"/okx?refresh=1&order_status=error&detail={urllib.parse.quote_plus(str(exc))}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+
 @app.post("/okx/scale-position", include_in_schema=False)
 def okx_scale_position(
     account_id: str = Form(...),
@@ -1555,40 +1585,73 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
                 "</form>"
             )
 
-        action_pairs: list[str] = []
+        def _reverse_form(label: str, qty_value: str, tooltip: str) -> str:
+            return (
+                "<form method='post' action='/okx/reverse-position' class='inline-form'>"
+                f"<input type='hidden' name='account_id' value='{account_value}'>"
+                f"<input type='hidden' name='instrument_id' value='{instrument_value}'>"
+                f"<input type='hidden' name='position_side' value='{side_value}'>"
+                f"<input type='hidden' name='quantity' value='{qty_value}'>"
+                f"<button type='submit' class='btn-reverse' title='{esc(tooltip)}'>{label}</button>"
+                "</form>"
+            )
+
+        scale_options = [
+            (0.5, "补仓50%"),
+            (1.0, "补仓100%"),
+            (2.0, "补仓200%"),
+        ]
+        close_options = [
+            (0.1, "平仓10%"),
+            (0.2, "平仓20%"),
+            (0.5, "平仓50%"),
+        ]
+
+        scale_forms: list[str] = []
+        close_forms: list[str] = []
         if qty > 0:
-            close_options = [
-                (0.1, "平仓10%"),
-                (0.2, "平仓20%"),
-                (0.5, "平仓50%"),
-            ]
-            scale_options = [
-                (0.5, "补仓50%"),
-                (1.0, "补仓100%"),
-                (2.0, "补仓200%"),
-            ]
-            for idx, (close_portion, close_label) in enumerate(close_options):
-                scale_portion, scale_label = scale_options[idx]
-                close_qty = max(qty * close_portion, 0.0001)
-                scale_qty = max(qty * scale_portion, 0.0001)
-                close_qty_text = _fmt_quantity(close_qty)
+            for portion, label in scale_options:
+                scale_qty = max(qty * portion, 0.0001)
                 scale_qty_text = _fmt_quantity(scale_qty)
+                scale_tooltip = _build_action_tooltip("补仓", scale_qty_text, _calc_amount(scale_qty, price_reference))
+                scale_forms.append(_scale_form(label, esc(scale_qty_text), scale_tooltip))
+            for portion, label in close_options:
+                close_qty = max(qty * portion, 0.0001)
+                close_qty_text = _fmt_quantity(close_qty)
                 close_amount = _calc_amount(close_qty, price_reference)
                 close_tooltip = _build_action_tooltip("平仓", close_qty_text, close_amount)
-                scale_tooltip = _build_action_tooltip("补仓", scale_qty_text, _calc_amount(scale_qty, price_reference))
-                stack = (
-                    "<div class='action-pair'>"
-                    f"{_scale_form(scale_label, esc(scale_qty_text), scale_tooltip)}"
-                    f"{_close_form(close_label, esc(close_qty_text), close_tooltip, price_reference_text)}"
-                    "</div>"
-                )
-                action_pairs.append(stack)
-        action_pairs.append(
-            "<div class='action-pair full'>"
-            f"{_close_form('全部平仓', esc(total_qty_text), _build_action_tooltip('平仓', total_qty_text, _calc_amount(qty, price_reference)), price_reference_text)}"
-            "</div>"
+                close_forms.append(_close_form(label, esc(close_qty_text), close_tooltip, price_reference_text))
+        while len(scale_forms) < 3:
+            scale_forms.append("")
+        while len(close_forms) < 3:
+            close_forms.append("")
+
+        full_close_form = _close_form(
+            "全部平仓",
+            esc(total_qty_text),
+            _build_action_tooltip("平仓", total_qty_text, _calc_amount(qty, price_reference)),
+            price_reference_text,
         )
-        action_html = "<div class='close-actions'>{pairs}</div>".format(pairs="".join(action_pairs))
+        reverse_tooltip = (
+            f"反手 {instrument_value} 数量 {total_qty_text}，方向将切换为{'多' if raw_side.lower() in {'short','sell'} else '空'}单"
+        )
+        reverse_form = _reverse_form("全部反手", esc(total_qty_text), reverse_tooltip)
+
+        action_slots = [
+            scale_forms[0],
+            scale_forms[1],
+            scale_forms[2],
+            full_close_form,
+            close_forms[0],
+            close_forms[1],
+            close_forms[2],
+            reverse_form,
+        ]
+        slot_html = "".join(
+            f"<div class='action-slot'>{slot}</div>" if slot else "<div class='action-slot'></div>"
+            for slot in action_slots
+        )
+        action_html = f"<div class='close-actions'>{slot_html}</div>"
         pnl_value = pos.get("unrealized_pnl")
         pnl_value_text = _format_number(pnl_value)
         pnl_value_class = ""
@@ -2593,9 +2656,9 @@ OKX_TEMPLATE = r"""
         table.positions-table td {{ width: calc((100% - 35%) / 10); }}
         table.positions-table th.action-col,
         table.positions-table td.action-col {{ width: 35%; }}
-        .positions-table .close-actions {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; justify-items: end; }}
-        .positions-table .action-pair {{ display: flex; gap: 8px; justify-content: flex-end; }}
-        .positions-table .action-pair.full {{ grid-column: 1 / -1; }}
+        .positions-table .close-actions {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }}
+        .positions-table .action-slot {{ display: flex; }}
+        .positions-table .action-slot form {{ width: 100%; }}
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
         ul.curve-list li {{ padding: 6px 0; border-bottom: 1px dashed #334155; font-size: 0.9rem; }}
         .inline-form {{ display: inline-flex; align-items: center; margin: 0; }}
@@ -2626,12 +2689,40 @@ OKX_TEMPLATE = r"""
             transform: translateY(1px);
             box-shadow: 0 5px 12px rgba(248, 113, 113, 0.3);
         }}
+        .btn-close,
+        .btn-scale,
+        .btn-close-full,
+        .btn-reverse {{ width: 100%; justify-content: center; }}
         .btn-close-full {{
-            padding-top: 18px;
-            padding-bottom: 18px;
+            padding: 6px 16px;
             background-image: linear-gradient(135deg, #fb923c, #f97316);
             border-color: rgba(251, 146, 60, 0.8);
             box-shadow: 0 10px 24px rgba(251, 146, 60, 0.45);
+        }}
+        .btn-reverse {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 6px 16px;
+            border-radius: 999px;
+            border: 1px solid rgba(129, 140, 248, 0.6);
+            background-image: linear-gradient(135deg, #a855f7, #6366f1);
+            color: #fff;
+            font-weight: 600;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.15s ease;
+            box-shadow: 0 8px 18px rgba(129, 140, 248, 0.35);
+        }}
+        .btn-reverse:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 12px 24px rgba(129, 140, 248, 0.45);
+            opacity: 0.95;
+        }}
+        .btn-reverse:active {{
+            transform: translateY(1px);
+            box-shadow: 0 5px 12px rgba(129, 140, 248, 0.3);
         }}
         .local-time {{ color: #94a3b8; font-size: 0.9rem; }}
         .flash {{ margin: 10px 0 16px; padding: 12px 16px; border-radius: 10px; font-size: 0.95rem; }}
@@ -2701,15 +2792,6 @@ OKX_TEMPLATE = r"""
         .btn-scale:active {{
             transform: translateY(1px);
             box-shadow: 0 5px 12px rgba(34, 197, 94, 0.3);
-        }}
-        .action-pair {{
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-        }}
-        .action-pair.full {{
-            justify-content: space-between;
-            min-height: 96px;
         }}
         @media (max-width: 1100px) {{
             .page-header {{ flex-direction: column; align-items: flex-start; gap: 8px; }}
