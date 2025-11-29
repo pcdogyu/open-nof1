@@ -2590,9 +2590,9 @@ OKX_TEMPLATE = r"""
         table.dense th, table.dense td {{ padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 0.9rem; word-break: break-word; }}
         table.dense th.action-col, table.dense td.action-col {{ text-align: center; }}
         table.positions-table th,
-        table.positions-table td {{ width: calc((100% - 18%) / 10); }}
+        table.positions-table td {{ width: calc((100% - 35%) / 10); }}
         table.positions-table th.action-col,
-        table.positions-table td.action-col {{ width: 18%; }}
+        table.positions-table td.action-col {{ width: 35%; }}
         .positions-table .close-actions {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; justify-items: end; }}
         .positions-table .action-pair {{ display: flex; gap: 8px; justify-content: flex-end; }}
         .positions-table .action-pair.full {{ grid-column: 1 / -1; }}
