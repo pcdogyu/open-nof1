@@ -1623,7 +1623,7 @@ def _render_positions_table(positions: Sequence[dict] | None, *, account_id: str
         rows.append("<tr><td colspan='11'>当前无持仓</td></tr>")
 
     table_html = (
-        "<table class='dense'>"
+        "<table class='dense positions-table'>"
         "<thead><tr><th>交易对</th><th>方向</th><th>杠杆</th><th>持仓量</th><th>开仓均价</th><th>最新价格</th><th>保证金</th><th>未实现盈亏</th><th>盈亏%</th><th>下单时间</th><th class='action-col'>操作</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
@@ -2585,7 +2585,9 @@ OKX_TEMPLATE = r"""
         .trade-page-btn.active {{ background: #38bdf8; color: #0f172a; border-color: #38bdf8; }}
         table.dense {{ width: 100%; border-collapse: collapse; margin-top: 0.5rem; background-color: rgba(15, 23, 42, 0.6); border-radius: 6px; overflow: hidden; table-layout: fixed; }}
         table.dense th, table.dense td {{ padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 0.9rem; word-break: break-word; }}
-        table.dense th.action-col, table.dense td.action-col {{ text-align: center; width: 250%; }}
+        table.dense th.action-col, table.dense td.action-col {{ text-align: center; }}
+        table.positions-table th,
+        table.positions-table td {{ width: calc(100% / 11); }}
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
         ul.curve-list li {{ padding: 6px 0; border-bottom: 1px dashed #334155; font-size: 0.9rem; }}
         .inline-form {{ display: inline-flex; align-items: center; margin: 0; }}
