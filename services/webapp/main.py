@@ -2657,8 +2657,8 @@ OKX_TEMPLATE = r"""
         table.positions-table th.action-col,
         table.positions-table td.action-col {{ width: 35%; }}
         .positions-table .close-actions {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }}
-        .positions-table .action-slot {{ display: flex; justify-content: center; }}
-        .positions-table .action-slot form {{ width: 70%; }}
+        .positions-table .action-slot {{ display: flex; justify-content: flex-end; }}
+        .positions-table .action-slot form {{ width: 85%; }}
         ul.curve-list {{ list-style: none; padding: 0; margin: 0.5rem 0 0 0; }}
         ul.curve-list li {{ padding: 6px 0; border-bottom: 1px dashed #334155; font-size: 0.9rem; }}
         .inline-form {{ display: inline-flex; align-items: center; margin: 0; }}
@@ -2692,7 +2692,7 @@ OKX_TEMPLATE = r"""
         .btn-close,
         .btn-scale,
         .btn-close-full,
-        .btn-reverse {{ width: 70%; justify-content: center; margin: 0 auto; }}
+        .btn-reverse {{ width: 100%; justify-content: center; margin-left: auto; margin-right: 0; }}
         .btn-close-full {{
             padding: 6px 16px;
             background-image: linear-gradient(135deg, #fb923c, #f97316);
@@ -2710,7 +2710,7 @@ OKX_TEMPLATE = r"""
             background-image: linear-gradient(135deg, #a855f7, #6366f1);
             color: #fff;
             font-weight: 600;
-            font-size: 0.9rem;
+            font-size: 0.8rem;
             cursor: pointer;
             transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.15s ease;
             box-shadow: 0 8px 18px rgba(129, 140, 248, 0.35);
@@ -2779,7 +2779,7 @@ OKX_TEMPLATE = r"""
             background-image: linear-gradient(135deg, #22c55e, #16a34a);
             color: #fff;
             font-weight: 600;
-            font-size: 0.9rem;
+            font-size: 0.8rem;
             cursor: pointer;
             transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.15s ease;
             box-shadow: 0 8px 18px rgba(34, 197, 94, 0.35);
@@ -3309,7 +3309,7 @@ LIQUIDATION_TEMPLATE = r"""
             border: 1px solid rgba(56, 189, 248, 0.4);
             background: rgba(15, 23, 42, 0.65);
             color: #e2e8f0;
-            font-size: 0.9rem;
+            font-size: 0.8rem;
             display: none;
         }}
         .wave-notification.success {{ border-color: rgba(74, 222, 128, 0.8); color: #bbf7d0; }}
@@ -3396,7 +3396,7 @@ LIQUIDATION_TEMPLATE = r"""
     }}
     .payload-panel h3 {{
         margin: 0 0 6px;
-        font-size: 0.9rem;
+            font-size: 0.8rem;
         color: #38bdf8;
     }}
     .payload-panel pre {{
