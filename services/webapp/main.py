@@ -4454,8 +4454,12 @@ ORDERBOOK_TEMPLATE = r"""
             const idx = Math.round((series.length - 1) * (i / Math.max(1, tickCount - 1)));
             const pt = series[idx];
             const x = left + (chartWidth * idx) / Math.max(1, series.length - 1);
+            // 当时间框架为1小时或更长时，显示日期和时间
+            const showDate = timeframeKey === '1h' || timeframeKey === '4h';
             const label = pt.time instanceof Date && !Number.isNaN(pt.time.getTime())
-              ? `${{String(pt.time.getHours()).padStart(2, "0")}}:${{String(pt.time.getMinutes()).padStart(2, "0")}}:${{String(pt.time.getSeconds()).padStart(2, "0")}}`
+              ? showDate
+                ? `${{String(pt.time.getMonth() + 1).padStart(2, "0")}}/${{String(pt.time.getDate()).padStart(2, "0")}} ${{String(pt.time.getHours()).padStart(2, "0")}}:${{String(pt.time.getMinutes()).padStart(2, "0")}}`
+                : `${{String(pt.time.getHours()).padStart(2, "0")}}:${{String(pt.time.getMinutes()).padStart(2, "0")}}:${{String(pt.time.getSeconds()).padStart(2, "0")}}`
               : "";
             ctx.fillText(label, x, height - bottom + 6);
           }}
