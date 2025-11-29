@@ -1,96 +1,71 @@
-config.py
-# Project data directory
-data/
-# Virtual environments created on this machine, keep them local
+# Python缓存和编译文件
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+.virtualenvs/
+venv/
+env/
+envs/
 .vopennof
 .vopennof/
 .vopennof13/
 
-# Python caches
-__pycache__/
-**/__pycache__/
-**/__py_cache__/
-*pycache*/
-*.py[cod]
-*.pyc
-*.pyc
-*.pyo
-*.pyw
-*.pyd
-*.whl
-*.egg-info/
-*.egg
+# 测试和覆盖报告
+*.coverage
+coverage.xml
+pytest.xml
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .hypothesis/
 .cache/
 
-# Names that include "test" should stay local
-*test*
-*[Tt]est*
-models/__pycache__/utils.cpython-313.pyc
-services/webapp/__pycache__/main.cpython-313.pyc
-__pycache__/config.cpython-313.pyc
-
-# Local logs
+# 日志文件
+*.log
 data/logs/
-config.py
-services/jobs/__pycache__/scheduler.cpython-310.pyc
-services/jobs/__pycache__/scheduler.cpython-313.pyc
-__pycache__/config.cpython-313.pyc
-services/webapp/__pycache__/main.cpython-313.pyc
-services/webapp/__pycache__/main.cpython-312.pyc
-services/webapp/__pycache__/routes.cpython-312.pyc
-risk/__pycache__/notional_limits.cpython-312.pyc
 data/logs/ai_signals.jsonl
+
+# 数据目录
+data/
+data/state/
 data/state/active_influx_profile.json
-services/webapp/__pycache__/main.cpython-312.pyc
-services/webapp/__pycache__/routes.cpython-312.pyc
-data/logs/ai_signals.jsonl
-services/webapp/__pycache__/main.cpython-312.pyc
-services/webapp/__pycache__/main.cpython-312.pyc
-data/logs/ai_signals.jsonl
-services/webapp/__pycache__/main.cpython-312.pyc
-data/logs/ai_signals.jsonl
-data/logs/ai_signals.jsonl
-services/webapp/__pycache__/main.cpython-312.pyc
-services/webapp/__pycache__/routes.cpython-312.pyc
-.gitignore
-services/webapp/__pycache__/main.cpython-312.pyc
-services/webapp/__pycache__/routes.cpython-312.pyc
-data/logs/ai_signals.jsonl
-.gitignore
-services/webapp/__pycache__/main.cpython-312.pyc
-services/webapp/__pycache__/routes.cpython-312.pyc
-__pycache__/config.cpython-313.pyc
-exchanges/okx/__pycache__/paper.cpython-313.pyc
-risk/__pycache__/__init__.cpython-313.pyc
-risk/__pycache__/engine.cpython-313.pyc
-risk/__pycache__/notional_limits.cpython-313.pyc
-services/jobs/__pycache__/scheduler.cpython-313.pyc
-services/webapp/__pycache__/main.cpython-313.pyc
-services/webapp/__pycache__/routes.cpython-313.pyc
-__pycache__/config.cpython-313.pyc
-__pycache__/config.cpython-313.pyc
-data_pipeline/__pycache__/influx.cpython-310.pyc
-exchanges/okx/__pycache__/paper.cpython-310.pyc
-risk/__pycache__/__init__.cpython-310.pyc
-risk/__pycache__/engine.cpython-310.pyc
-risk/__pycache__/notional_limits.cpython-310.pyc
-services/jobs/__pycache__/scheduler.cpython-310.pyc
-services/webapp/__pycache__/main.cpython-310.pyc
-services/webapp/__pycache__/main.cpython-313.pyc
-services/webapp/__pycache__/routes.cpython-310.pyc
-data/logs/ai_signals.jsonl
-services/webapp/__pycache__/main.cpython-310.pyc
-services/webapp/__pycache__/main.cpython-313.pyc
-services/webapp/__pycache__/main.cpython-310.pyc
-services/jobs/__pycache__/scheduler.cpython-310.pyc
-services/webapp/__pycache__/main.cpython-310.pyc
-services/webapp/__pycache__/main.cpython-313.pyc
-services/webapp/__pycache__/routes.cpython-310.pyc
-websocket/__pycache__/streams.cpython-313.pyc
-data/logs/ai_signals.jsonl
-services/okx/__pycache__/live.cpython-313.pyc
-services/webapp/__pycache__/routes.cpython-313.pyc
+
+# 配置文件
+config.py
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE文件
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS生成的文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 构建输出
+*.whl
+*.egg-info/
+*.egg
+
+# 运行时数据
+pids
+*.pid
+*.seed
+*.pid.lock
