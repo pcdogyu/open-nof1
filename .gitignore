@@ -70,3 +70,4 @@ pids
 *.seed
 *.pid.lock
 websocket/__pycache__/streams.cpython-313.pyc
+data/logs/ai_signals.jsonl

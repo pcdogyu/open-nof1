@@ -3955,7 +3955,7 @@ LIQUIDATION_TEMPLATE = r"""
                 const qtyText = Number.isFinite(qtyValue) ? fmtNumber(qtyValue, qtyDigits) : '--';
                 const amountText = fmtNumber(confirmation, 2);
                 const invalidAmount = amountText === '-' || amountText === '--';
-                const amountLabel = invalidAmount ? '--' : `${{{{amountText}}}}} USDT`;
+                const amountLabel = invalidAmount ? '--' : `${{{{amountText}}}} USDT`;
                 updateOrderSummary({{
                   sideLabel: actionText,
                   pairLabel: instrumentLabel,
