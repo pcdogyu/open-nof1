@@ -69,3 +69,4 @@ pids
 *.pid
 *.seed
 *.pid.lock
+websocket/__pycache__/streams.cpython-313.pyc

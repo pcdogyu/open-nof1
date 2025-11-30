@@ -254,6 +254,60 @@ class InfluxWriter:
         point = point.time(timestamp_ns, WritePrecision.NS)
         self._write_api.write(bucket=self.config.bucket, org=self.config.org, record=point)
 
+    def write_market_depth(
+        self,
+        *,
+        instrument_id: str,
+        timestamp: datetime,
+        bids: Iterable[Iterable[float]],
+        asks: Iterable[Iterable[float]],
+        net_depth: List[List[float]],
+    ) -> None:
+        """Write detailed market depth data including net depth calculations."""
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        timestamp_ns = int(timestamp.timestamp() * 1e9)
+        bids_list: List[List[float]] = [list(level) for level in bids]
+        asks_list: List[List[float]] = [list(level) for level in asks]
+        
+        # Calculate basic metrics
+        best_bid = bids_list[0][0] if bids_list else None
+        best_ask = asks_list[0][0] if asks_list else None
+        total_bid = sum(level[1] for level in bids_list) if bids_list else 0.0
+        total_ask = sum(level[1] for level in asks_list) if asks_list else 0.0
+        overall_net_depth = total_bid - total_ask
+        spread = None
+        if best_bid is not None and best_ask is not None:
+            spread = best_ask - best_bid
+        
+        # Create point for detailed market depth measurement
+        point = (
+            Point("okx_market_depth")
+            .tag("instrument_id", instrument_id)
+            .field("total_bid_qty", float(total_bid))
+            .field("total_ask_qty", float(total_ask))
+            .field("net_depth", float(overall_net_depth))
+        )
+        
+        # Add optional fields
+        if best_bid is not None:
+            point = point.field("best_bid", float(best_bid))
+        if best_ask is not None:
+            point = point.field("best_ask", float(best_ask))
+        if spread is not None:
+            point = point.field("spread", float(spread))
+        
+        # Store detailed order book data
+        point = point.field("bids_json", json.dumps(bids_list, ensure_ascii=False))
+        point = point.field("asks_json", json.dumps(asks_list, ensure_ascii=False))
+        
+        # Store detailed net depth calculations
+        point = point.field("net_depth_details", json.dumps(net_depth, ensure_ascii=False))
+        
+        # Set timestamp and write
+        point = point.time(timestamp_ns, WritePrecision.NS)
+        self._write_api.write(bucket=self.config.bucket, org=self.config.org, record=point)
+
 
 def _normalize_profile(profile: dict[str, Any]) -> dict[str, str]:
     return {

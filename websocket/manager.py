@@ -8,7 +8,7 @@ import asyncio
 import logging
 from typing import Iterable, Sequence, Set
 
-from websocket.streams import BaseOkxStream, LiquidationStream, OrderbookDepthStream
+from websocket.streams import BaseOkxStream, LiquidationStream, OrderbookDepthStream, MarketDepthStream
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,8 @@ class WebsocketManager:
         self._streams = [
             _BaseStreamAdapter(LiquidationStream(self._instruments)),
             _BaseStreamAdapter(OrderbookDepthStream(self._instruments)),
+            # Add MarketDepthStream for enhanced market depth data with net depth calculation
+            _BaseStreamAdapter(MarketDepthStream(self._instruments)),
         ]
         for stream in self._streams:
             await stream.start()

@@ -205,9 +205,9 @@ class BaseOkxStream:
                         )
                     
                     # OKX closes connections that do not send data for 30s.
-                    # Send explicit JSON ping so upstream sees activity and respond with pong.
-                    ping_data = {"op": "ping", "ts": int(current_time * 1000)}  # Add timestamp for tracking
-                    await ws.send(json.dumps(ping_data))
+                    # Use standard websocket ping frame instead of custom JSON ping
+                    # to comply with OKX API requirements
+                    await ws.ping()
                     last_ping_at = current_time
                     ping_response_received = False  # Reset flag, will be set when pong is received
                     
@@ -366,6 +366,169 @@ class OrderbookDepthStream(BaseOkxStream):
             bids=bids,
             asks=asks,
         )
+
+
+class MarketDepthStream(BaseOkxStream):
+    """Streams multiple market depth channels (bbo-tbt, books5, etc.) and calculates net depth."""
+
+    def __init__(self, instruments: Iterable[str], channels: Iterable[str] = None) -> None:
+        super().__init__(instruments)
+        # Default channels if none provided
+        self._channels = channels or ["bbo-tbt", "books5"]
+        # Store latest depth data for net depth calculation
+        self._latest_depth_data = {}
+
+    def set_instruments(self, instruments: Iterable[str]) -> None:
+        super().set_instruments(instruments)
+        # Clear old data when instruments change
+        self._latest_depth_data.clear()
+
+    async def _subscribe(self, ws: WebSocketClientProtocol) -> None:
+        args = []
+        for instrument in sorted(self._instruments):
+            for channel in self._channels:
+                # For books and books5 channels, we need to specify the channel name only
+                # For other channels like books-l2-tbt, use the channel name directly
+                if channel.startswith("books") and channel != "books-l2-tbt" and channel != "books50-l2-tbt":
+                    arg = {"channel": channel, "instId": instrument}
+                    # Add depth parameter for books channel
+                    if channel == "books":
+                        arg["depth"] = "5"
+                    args.append(arg)
+                else:
+                    args.append({"channel": channel, "instId": instrument})
+        
+        if not args:
+            return
+            
+        await ws.send(json.dumps({"op": "subscribe", "args": args}))
+        logger.info("Subscribed to OKX market depth channels %s for %d instruments.", 
+                    ", ".join(self._channels), len(self._instruments))
+
+    async def _handle_payload(self, payload: dict) -> None:
+        arg = payload.get("arg", {})
+        channel = arg.get("channel")
+        inst_id = (arg.get("instId") or "").upper()
+        
+        if not channel or not inst_id or (self._instruments and inst_id not in self._instruments):
+            return
+            
+        data = payload.get("data") or []
+        if not data:
+            return
+            
+        # Process based on channel type
+        if channel in ["bbo-tbt", "books5", "books", "books-l2-tbt", "books50-l2-tbt"]:
+            await self._process_depth_data(inst_id, channel, data)
+        
+    async def _process_depth_data(self, inst_id: str, channel: str, data: list) -> None:
+        # Store the latest depth data
+        if inst_id not in self._latest_depth_data:
+            self._latest_depth_data[inst_id] = {}
+            
+        # Process and store data based on channel
+        for entry in data:
+            if channel == "bbo-tbt":
+                # Store latest BBO (Best Bid Offer) data
+                self._latest_depth_data[inst_id]["bbo"] = {
+                    "bid_px": float(entry.get("bidPx", 0)),
+                    "bid_sz": float(entry.get("bidSz", 0)),
+                    "ask_px": float(entry.get("askPx", 0)),
+                    "ask_sz": float(entry.get("askSz", 0)),
+                    "ts": _parse_timestamp_ms(entry.get("ts"))
+                }
+            elif channel in ["books5", "books", "books-l2-tbt", "books50-l2-tbt"]:
+                # Store order book levels
+                limit = 5 if channel == "books5" else 50
+                self._latest_depth_data[inst_id][channel] = {
+                    "bids": _parse_book_levels(entry.get("bids", []), limit=limit),
+                    "asks": _parse_book_levels(entry.get("asks", []), limit=limit),
+                    "ts": _parse_timestamp_ms(entry.get("ts"))
+                }
+        
+        # Calculate and store net depth when we have enough data
+        await self._calculate_net_depth(inst_id)
+    
+    async def _calculate_net_depth(self, inst_id: str) -> None:
+        # Get the latest order book data
+        book_data = None
+        for channel in ["books5", "books", "books-l2-tbt", "books50-l2-tbt"]:
+            if channel in self._latest_depth_data[inst_id]:
+                book_data = self._latest_depth_data[inst_id][channel]
+                break
+        
+        if not book_data:
+            return
+            
+        bids = book_data.get("bids", [])
+        asks = book_data.get("asks", [])
+        
+        if not bids or not asks:
+            return
+            
+        # Calculate cumulative volumes
+        cumulative_bids = []
+        cumulative_asks = []
+        
+        total_bid_volume = 0
+        for bid in bids:
+            total_bid_volume += bid[1]  # bid[1] is size/volume
+            cumulative_bids.append([bid[0], total_bid_volume])  # [price, cumulative_volume]
+        
+        total_ask_volume = 0
+        for ask in asks:
+            total_ask_volume += ask[1]  # ask[1] is size/volume
+            cumulative_asks.append([ask[0], total_ask_volume])  # [price, cumulative_volume]
+        
+        # Calculate net depth
+        net_depth = []
+        bid_idx = 0
+        ask_idx = 0
+        
+        while bid_idx < len(cumulative_bids) and ask_idx < len(cumulative_asks):
+            bid_price, bid_volume = cumulative_bids[bid_idx]
+            ask_price, ask_volume = cumulative_asks[ask_idx]
+            
+            # Find the price level to calculate net depth
+            if bid_price >= ask_price:  # This shouldn't happen in a valid order book
+                # Move to next level
+                bid_idx += 1
+                ask_idx += 1
+            else:
+                # Calculate price difference
+                price_diff = abs(bid_price - ask_price) / ask_price * 100  # Percentage difference
+                # Calculate net volume at this level
+                net_volume = bid_volume - ask_volume
+                net_depth.append([price_diff, net_volume])
+                
+                # Move to next level with the lower price
+                if bid_price < ask_price:
+                    bid_idx += 1
+                else:
+                    ask_idx += 1
+        
+        # Store net depth data
+        if inst_id not in self._latest_depth_data:
+            self._latest_depth_data[inst_id] = {}
+            
+        self._latest_depth_data[inst_id]["net_depth"] = {
+            "data": net_depth,
+            "ts": book_data.get("ts") or datetime.now(tz=timezone.utc)
+        }
+        
+        # Write to Influx if writer is available
+        try:
+            writer = self.writer
+            writer.write_market_depth(
+                instrument_id=inst_id,
+                timestamp=book_data.get("ts") or datetime.now(tz=timezone.utc),
+                bids=bids,
+                asks=asks,
+                net_depth=net_depth
+            )
+        except Exception as e:
+            logger.error("Error writing market depth data to Influx: %s", e)
+            # Continue processing even if Influx write fails
 
 
 @dataclass

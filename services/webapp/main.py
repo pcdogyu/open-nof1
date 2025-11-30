@@ -985,13 +985,45 @@ def _render_okx_dashboard(
 
 def _render_liquidation_page(snapshot: dict, instruments: Sequence[str]) -> str:
     esc = _escape
+    # 确保snapshot是一个字典
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    # 确保instruments是一个序列
+    if not isinstance(instruments, (list, tuple)):
+        instruments = []
+    
+    # 构建instrument选项
     instrument_options = _build_instrument_options(instruments, snapshot.get("instrument"))
-    rows = _render_liquidation_rows(snapshot.get("items") or [])
-    return LIQUIDATION_TEMPLATE.format(
-        instrument_options=instrument_options,
-        updated_at=esc(_format_asia_shanghai(snapshot.get("updated_at"))),
-        rows=rows,
-    )
+    
+    # 安全地获取和处理items
+    items = snapshot.get("items")
+    if not isinstance(items, (list, tuple)):
+        items = []
+    rows = _render_liquidation_rows(items)
+    
+    # 安全地格式化更新时间
+    updated_at = snapshot.get("updated_at")
+    try:
+        formatted_updated_at = esc(_format_asia_shanghai(updated_at)) if updated_at else "未知"
+    except Exception:
+        formatted_updated_at = "未知"
+    
+    try:
+        return LIQUIDATION_TEMPLATE.format(
+            instrument_options=instrument_options,
+            updated_at=formatted_updated_at,
+            rows=rows,
+        )
+    except KeyError as e:
+        # 处理模板变量缺失的情况
+        logger.error(f"Liquidation template missing variable: {e}")
+        # 返回一个简单的错误页面
+        return f"<html><body><h1>错误</h1><p>模板渲染失败: 缺失变量 {e}</p></body></html>"
+    except Exception as e:
+        # 处理其他渲染错误
+        logger.error(f"Failed to render liquidation page: {e}")
+        # 返回一个简单的错误页面
+        return f"<html><body><h1>错误</h1><p>页面渲染失败: {str(e)}</p></body></html>"
 
 
 def _render_orderbook_page(snapshot: dict, instruments: Sequence[str], levels: int) -> str:
@@ -1861,29 +1893,50 @@ def _build_depth_options(selected: int) -> str:
 def _render_liquidation_rows(items: Sequence[dict]) -> str:
     esc = _escape
     rows: list[str] = []
+    
+    # 确保items是一个序列
+    if not isinstance(items, (list, tuple)):
+        items = []
+    
     for item in items:
-        timestamp = _format_asia_shanghai(item.get("timestamp"))
+        # 确保item是一个字典
+        if not isinstance(item, dict):
+            item = {}
+        
+        try:
+            timestamp = _format_asia_shanghai(item.get("timestamp"))
+        except Exception:
+            timestamp = "--"
+        
         net_qty = item.get("net_qty")
         price = item.get("last_price")
         notional = item.get("notional_value")
+        
         if notional is None and net_qty is not None and price is not None:
             try:
                 notional = abs(float(net_qty)) * float(price)
             except (TypeError, ValueError):
                 notional = None
-        rows.append(
-            "<tr>"
-            f"<td>{esc(timestamp)}</td>"
-            f"<td>{esc(item.get('instrument_id') or '--')}</td>"
-            f"<td>{_format_number(item.get('long_qty'))}</td>"
-            f"<td>{_format_number(item.get('short_qty'))}</td>"
-            f"<td>{_format_number(item.get('net_qty'))}</td>"
-            f"<td>{_format_number(item.get('last_price'))}</td>"
-            f"<td>{_format_number(notional)}</td>"
-            "</tr>"
-        )
+        
+        try:
+            rows.append(
+                "<tr>"
+                f"<td>{esc(timestamp)}</td>"
+                f"<td>{esc(str(item.get('instrument_id') or '--'))}</td>"
+                f"<td>{_format_number(item.get('long_qty'))}</td>"
+                f"<td>{_format_number(item.get('short_qty'))}</td>"
+                f"<td>{_format_number(item.get('net_qty'))}</td>"
+                f"<td>{_format_number(item.get('last_price'))}</td>"
+                f"<td>{_format_number(notional)}</td>"
+                "</tr>"
+            )
+        except Exception:
+            # 如果单行渲染失败，跳过该行，继续处理其他行
+            continue
+    
     if not rows:
         rows.append("<tr><td colspan='7' class='empty-state'>暂无爆仓数据</td></tr>")
+    
     return "\n".join(rows)
 
 
@@ -3022,7 +3075,7 @@ OKX_TEMPLATE = r"""
               const btn = document.createElement('button');
               btn.type = 'button';
               btn.className = 'trade-page-btn' + (i === page ? ' active' : '');
-              btn.textContent = `${{i + 1}}`;
+              btn.textContent = `${{{{i + 1}}}}`;
               btn.disabled = i === page;
               btn.addEventListener('click', () => renderPage(i));
               pagination.appendChild(btn);
@@ -3182,7 +3235,7 @@ SCHEDULER_TEMPLATE = r"""
         const runTest = (button, meta) => {{
           if (!button) return;
           button.disabled = true;
-          setStatus(`正在触发${{meta.label}}...`, '');
+          setStatus(`正在触发${{{{meta.label}}}}...`, '');
           fetch(meta.url, {{ method: 'POST' }})
             .then((res) => {{
               if (!res.ok) throw new Error('请求失败');
@@ -3192,13 +3245,13 @@ SCHEDULER_TEMPLATE = r"""
               const status = (data.status || '').toLowerCase();
               const detail = data.detail || '无额外信息';
               if (status === 'error') {{
-                setStatus(`${{meta.label}}失败：${{detail}}`, 'error');
+                setStatus(`${{{{meta.label}}}}失败：${{{{detail}}}}`, 'error');
               }} else {{
-                setStatus(`${{meta.label}}完成：${{detail}}`, 'success');
+                setStatus(`${{{{meta.label}}}}完成：${{{{detail}}}}`, 'success');
               }}
             }})
             .catch((err) => {{
-              setStatus(`${{meta.label}}失败：${{err.message}}`, 'error');
+              setStatus(`${{{{meta.label}}}}失败：${{{{err.message}}}}`, 'error');
             }})
             .finally(() => {{
               button.disabled = false;
@@ -3369,6 +3422,9 @@ def _render_scheduler_page(settings: dict) -> str:
 def _format_number(value: object, digits: int = 2) -> str:
     try:
         number = float(value)
+        # 添加对无穷大和NaN的检查
+        if not math.isfinite(number):
+            return "-"
     except (TypeError, ValueError):
         return "-"
     return f"{number:.{digits}f}"
@@ -3547,7 +3603,9 @@ LIQUIDATION_TEMPLATE = r"""
                 <option value="notional" selected>按金额</option>
             </select>
         </label>
-        <span>最后更新：<span class="timestamp" id="liquidations-updated">{updated_at}</span></span>
+        <span>最后更新：<span class="timestamp" id="liquidations-updated">{updated_at}</span>
+        <span id="websocket-status-indicator" class="websocket-status-indicator"></span>
+        <span id="websocket-status-text" class="websocket-status-text"></span></span>
     </div>
     <div class="payload-panel" id="okx-payload-panel" hidden>
         <h3>OKX Payload</h3>
@@ -3660,7 +3718,7 @@ LIQUIDATION_TEMPLATE = r"""
           if (!isFinite(num)) {{ return '-'; }}
           return num.toFixed(digits);
         }};
-        const updateOrderSummary = ({{ sideLabel, pairLabel, qtyLabel, amountLabel }}) => {{
+        const updateOrderSummary = ({{{{ sideLabel, pairLabel, qtyLabel, amountLabel }}}}) => {{
           if (!orderSummaryPanel) {{ return; }}
           if (orderSideValue) {{ orderSideValue.textContent = sideLabel || '--'; }}
           if (orderPairValue) {{ orderPairValue.textContent = pairLabel || '--'; }}
@@ -3672,7 +3730,7 @@ LIQUIDATION_TEMPLATE = r"""
           if (!value) {{ return '--'; }}
           const date = new Date(value);
           if (!isFinite(date)) {{ return value; }}
-          return new Intl.DateTimeFormat('zh-CN', {{
+          return new Intl.DateTimeFormat('zh-CN', {{{{
             timeZone: 'Asia/Shanghai',
             year: 'numeric',
             month: '2-digit',
@@ -3681,7 +3739,7 @@ LIQUIDATION_TEMPLATE = r"""
             minute: '2-digit',
             second: '2-digit',
             hour12: false
-          }}).format(date);
+          }}}}).format(date);
         }};
         const _toAbsNumber = (value) => {{
           const num = Number(value);
@@ -3734,7 +3792,7 @@ LIQUIDATION_TEMPLATE = r"""
             return baseText;
           }}
           const explanation = describeLeElasticity(value);
-          return explanation ? `${{baseText}} (${{explanation}})` : baseText;
+          return explanation ? `${{{{baseText}}}} (${{{{explanation}}}})` : baseText;
         }};
         const describePcPressure = (value) => {{
           if (!Number.isFinite(value) || value <= 0) {{
@@ -3757,7 +3815,7 @@ LIQUIDATION_TEMPLATE = r"""
           }}
           const baseText = fmtNumber(value, 2);
           const label = describePcPressure(value);
-          return label ? `${{baseText}} (${{label}})` : baseText;
+          return label ? `${{{{baseText}}}} (${{{{label}}}})` : baseText;
         }};
         const signalOrderConfig = (signal) => {{
           const code = (signal.signal_code || '').toLowerCase();
@@ -3780,8 +3838,8 @@ LIQUIDATION_TEMPLATE = r"""
           const sellActive = recommended === 'sell' ? ' active' : '';
           return `
             <div class="order-action-group">
-              <button type="button" class="order-btn${{buyActive}}" data-instrument="${{instrument}}" data-side="buy">买入</button>
-              <button type="button" class="order-btn${{sellActive}}" data-instrument="${{instrument}}" data-side="sell">卖出</button>
+              <button type="button" class="order-btn${{{{buyActive}}}}" data-instrument="${{{{instrument}}}}" data-side="buy">买入</button>
+              <button type="button" class="order-btn${{{{sellActive}}}}" data-instrument="${{{{instrument}}}}" data-side="sell">卖出</button>
             </div>`;
         }};
         const normalizeInstrument = (value) => (value || '').trim().toUpperCase();
@@ -3813,10 +3871,10 @@ LIQUIDATION_TEMPLATE = r"""
           }}
           const rows = sortWaveSignals(signals).map((signal) => {{
             const metrics = signal.metrics || {{}};
-            const flvText = `${{fmtNumber(metrics.flv, 2)}} / ${{fmtNumber(metrics.baseline, 2)}}`;
+            const flvText = `${{{{fmtNumber(metrics.flv, 2)}}}} / ${{{{fmtNumber(metrics.baseline, 2)}}}}`;
             const priceChange = Number(metrics.price_change_pct);
             const priceText = Number.isFinite(priceChange)
-              ? `${{priceChange >= 0 ? '+' : ''}}${{priceChange.toFixed(2)}}%`
+              ? `${{{{priceChange >= 0 ? '+' : ''}}}}${{{{priceChange.toFixed(2)}}}}%`
               : '-';
             const endPrice = Number(metrics.end_price);
             const latestPriceText = Number.isFinite(endPrice) ? fmtNumber(endPrice, 4) : '-';
@@ -3825,30 +3883,30 @@ LIQUIDATION_TEMPLATE = r"""
             const pcValue = Number(metrics.pc);
             const pcText = Number.isFinite(pcValue) ? formatPcPressure(pcValue) : '-';
             const densityText = metrics.density_per_min
-              ? `${{fmtNumber(metrics.density_per_min, 2)}}/min`
+              ? `${{{{fmtNumber(metrics.density_per_min, 2)}}}}/min`
               : '-';
-            const lpiText = metrics.lpi === undefined ? '-' : fmtNumber(metrics.lpi, 2);
+            const lpiText = metrics.lpi === undefined ? '-' : ${{{{fmtNumber(metrics.lpi, 2)}}}};
             const signalClass = signal.signal_class || '';
             const detailText = signal.liquidation_side_label || '';
-            const detailHtml = detailText ? `<span class="signal-subtext">${{detailText}}</span>` : '';
+            const detailHtml = detailText ? `<span class="signal-subtext">${{{{detailText}}}}</span>` : '';
             const signalText = signal.signal || '???';
             return `
               <tr>
-                <td>${{signal.instrument || '--'}}</td>
-                <td>${{signal.wave || '--'}}</td>
-                <td>${{signal.status || '--'}}</td>
-                <td>${{flvText}}</td>
-                <td>${{latestPriceText}}</td>
-                <td>${{priceText}}</td>
-                <td>${{leText}}</td>
-                <td>${{pcText}}</td>
-                <td>${{densityText}}</td>
-                <td>${{lpiText}}</td>
-                <td class="${{signalClass}}">
-                  <div>${{signalText}}</div>
-                  ${{detailHtml}}
+                <td>${{{{signal.instrument || '--'}}}}</td>
+                <td>${{{{signal.wave || '--'}}}}</td>
+                <td>${{{{signal.status || '--'}}}}</td>
+                <td>${{{{flvText}}}}</td>
+                <td>${{{{latestPriceText}}}}</td>
+                <td>${{{{priceText}}}}</td>
+                <td>${{{{leText}}}}</td>
+                <td>${{{{pcText}}}}</td>
+                <td>${{{{densityText}}}}</td>
+                <td>${{{{lpiText}}}}</td>
+                <td class="${{{{signalClass}}}}">
+                  <div>${{{{signalText}}}}</div>
+                  ${{{{detailHtml}}}}
                 </td>
-                <td>${{renderOrderAction(signal)}}</td>
+                <td>${{{{renderOrderAction(signal)}}}}</td>
               </tr>`;
           }});
           body.innerHTML = rows.join('');
@@ -3897,14 +3955,14 @@ LIQUIDATION_TEMPLATE = r"""
                 const qtyText = Number.isFinite(qtyValue) ? fmtNumber(qtyValue, qtyDigits) : '--';
                 const amountText = fmtNumber(confirmation, 2);
                 const invalidAmount = amountText === '-' || amountText === '--';
-                const amountLabel = invalidAmount ? '--' : `${{amountText}} USDT`;
+                const amountLabel = invalidAmount ? '--' : `${{{{amountText}}}}} USDT`;
                 updateOrderSummary({{
                   sideLabel: actionText,
                   pairLabel: instrumentLabel,
                   qtyLabel: qtyText,
                   amountLabel,
                 }});
-                showNotification(`已提交${{instrumentLabel}} ${{actionText}}订单，数量 ${{qtyText}}，预估 $${{amountText}} USDT。`, 'success');
+                showNotification(`已提交${{{{instrumentLabel}}}}} ${{{{actionText}}}}}订单，数量 ${{{{qtyText}}}}}，预估 $${{{{amountText}}}}} USDT。`, 'success');
               }} else {{
                 showNotification(data.detail || '下单失败，请稍后重试。', 'error');
               }}
@@ -3971,27 +4029,27 @@ LIQUIDATION_TEMPLATE = r"""
 
             tr.innerHTML = `
 
-              <td>${{fmtTimestamp(item.timestamp)}}</td>
+              <td>${{{{fmtTimestamp(item.timestamp)}}}}</td>
 
-              <td>${{item.instrument_id || '--'}}</td>
+              <td>${{{{item.instrument_id || '--'}}}}</td>
 
-              <td>${{fmtNumber(item.long_qty, 2)}}</td>
+              <td>${{{{fmtNumber(item.long_qty, 2)}}}}</td>
 
-              <td>${{fmtNumber(item.short_qty, 2)}}</td>
+              <td>${{{{fmtNumber(item.short_qty, 2)}}}}</td>
 
-              <td>${{fmtNumber(item.net_qty, 2)}}</td>
+              <td>${{{{fmtNumber(item.net_qty, 2)}}}}</td>
 
-              <td>${{fmtNumber(item.last_price, 4)}}</td>
+              <td>${{{{fmtNumber(item.last_price, 4)}}}}</td>
 
-              <td>${{notional === null ? '-' : fmtNumber(notional, 2)}}</td>
+              <td>${{{{notional === null ? '-' : fmtNumber(notional, 2)}}}}</td>
 
               <td>
 
                 <div style="display:flex;gap:6px;">
 
-                  <button class="order-btn${{activeSignals.get(item.instrument_id || '--') === 'buy' ? ' active' : ''}}" data-side="buy" data-inst="${{item.instrument_id || '--'}}">买入</button>
+                  <button class="order-btn${{{{activeSignals.get(item.instrument_id || '--') === 'buy' ? ' active' : ''}}}}" data-side="buy" data-inst="${{{{item.instrument_id || '--'}}}}">买入</button>
 
-                  <button class="order-btn${{activeSignals.get(item.instrument_id || '--') === 'sell' ? ' active' : ''}}" data-side="sell" data-inst="${{item.instrument_id || '--'}}">卖出</button>
+                  <button class="order-btn${{{{activeSignals.get(item.instrument_id || '--') === 'sell' ? ' active' : ''}}}}" data-side="sell" data-inst="${{{{item.instrument_id || '--'}}}}">卖出</button>
 
                 </div>
 
@@ -4027,6 +4085,121 @@ LIQUIDATION_TEMPLATE = r"""
         }});
         refresh();
         setInterval(refresh, 1000);
+        
+        // 初始化WebSocket状态监控
+        async function initWebSocketStatus() {
+            try {
+                // 动态导入WebSocket状态监控模块
+                const moduleScript = document.createElement('script');
+                moduleScript.type = 'module';
+                moduleScript.textContent = `
+                    import { initWebSocketStatus } from '/static/websocket-status.js';
+                    
+                    // 初始化WebSocket状态监控
+                    const statusMonitor = initWebSocketStatus({
+                        statusElementId: 'websocket-status-indicator',
+                        statusTextElementId: 'websocket-status-text'
+                    });
+                    
+                    console.log('WebSocket状态监控已初始化');
+                `;
+                document.head.appendChild(moduleScript);
+                
+                // 备用方案：如果模块加载失败，使用普通脚本方式
+                moduleScript.onerror = function() {
+                    console.log('使用备用方案初始化WebSocket状态');
+                    const fallbackScript = document.createElement('script');
+                    fallbackScript.src = '/static/websocket-status.js';
+                    fallbackScript.onload = function() {
+                        if (window.WebSocketStatusMonitor) {
+                            const monitor = new window.WebSocketStatusMonitor({
+                                statusElementId: 'websocket-status-indicator',
+                                statusTextElementId: 'websocket-status-text'
+                            });
+                            monitor.simulateConnection();
+                        }
+                    };
+                    document.head.appendChild(fallbackScript);
+                };
+            } catch (error) {
+                console.error('初始化WebSocket状态监控失败:', error);
+            }
+        }
+        
+        // 加载WebSocket状态监控样式
+        function loadWebSocketStyles() {
+            const style = document.createElement('style');
+            style.textContent = `
+                .websocket-status-indicator {
+                    display: inline-block;
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 50%;
+                    margin: 0 8px;
+                    vertical-align: middle;
+                }
+                
+                .websocket-status-text {
+                    font-size: 0.85rem;
+                    color: #94a3b8;
+                    margin-left: 4px;
+                    vertical-align: middle;
+                }
+                
+                /* 断开状态 - 红色 */
+                .status-disconnected {
+                    background-color: #ef4444;
+                    animation: none;
+                }
+                
+                /* 连接中 - 黄色 */
+                .status-connecting {
+                    background-color: #f59e0b;
+                    animation: pulse 1.5s infinite;
+                }
+                
+                /* 连接成功 - 绿色 */
+                .status-connected {
+                    background-color: #10b981;
+                    animation: none;
+                }
+                
+                /* 接收数据 - 蓝色闪烁 */
+                .status-receiving {
+                    background-color: #3b82f6;
+                    animation: blink 1s infinite;
+                }
+                
+                @keyframes pulse {
+                    0% {
+                        opacity: 1;
+                        transform: scale(1);
+                    }
+                    50% {
+                        opacity: 0.6;
+                        transform: scale(0.9);
+                    }
+                    100% {
+                        opacity: 1;
+                        transform: scale(1);
+                    }
+                }
+                
+                @keyframes blink {
+                    0%, 100% {
+                        opacity: 1;
+                    }
+                    50% {
+                        opacity: 0.4;
+                    }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+        
+        // 加载样式和初始化状态监控
+        loadWebSocketStyles();
+        initWebSocketStatus();
       }})();
     </script>
 
@@ -4120,7 +4293,9 @@ ORDERBOOK_TEMPLATE = r"""
                 <button type="button" data-timeframe="4h">4h</button>
             </div>
         </div>
-        <span>最后更新：<span class="timestamp" id="orderbook-updated">{updated_at}</span></span>
+        <span>最后更新：<span class="timestamp" id="orderbook-updated">{updated_at}</span>
+        <span id="websocket-status-indicator" class="websocket-status-indicator"></span>
+        <span id="websocket-status-text" class="websocket-status-text"></span></span>
     </div>
     <div id="orderbook-container" class="{book_grid_class}">
         {cards}
@@ -4164,7 +4339,7 @@ ORDERBOOK_TEMPLATE = r"""
           }}
           const num = Number(value);
           if (num > 0) {{
-            return `+${{num.toFixed(digits)}}`;
+            return '+${{{{num.toFixed(digits)}}}}';
           }}
           if (num < 0) {{
             return num.toFixed(digits);
@@ -4458,8 +4633,8 @@ ORDERBOOK_TEMPLATE = r"""
             const showDate = timeframeKey === '1h' || timeframeKey === '4h';
             const label = pt.time instanceof Date && !Number.isNaN(pt.time.getTime())
               ? showDate
-                ? `${{String(pt.time.getMonth() + 1).padStart(2, "0")}}/${{String(pt.time.getDate()).padStart(2, "0")}} ${{String(pt.time.getHours()).padStart(2, "0")}}:${{String(pt.time.getMinutes()).padStart(2, "0")}}`
-                : `${{String(pt.time.getHours()).padStart(2, "0")}}:${{String(pt.time.getMinutes()).padStart(2, "0")}}:${{String(pt.time.getSeconds()).padStart(2, "0")}}`
+                ? `${{{{String(pt.time.getMonth() + 1).padStart(2, "0")}}}}/${{{{String(pt.time.getDate()).padStart(2, "0")}}}} ${{{{String(pt.time.getHours()).padStart(2, "0")}}}}:${{{{String(pt.time.getMinutes()).padStart(2, "0")}}}}`
+                : `${{{{String(pt.time.getHours()).padStart(2, "0")}}}}:${{{{String(pt.time.getMinutes()).padStart(2, "0")}}}}:${{{{String(pt.time.getSeconds()).padStart(2, "0")}}}}`
               : "";
             ctx.fillText(label, x, height - bottom + 6);
           }}
@@ -4479,9 +4654,9 @@ ORDERBOOK_TEMPLATE = r"""
           flushNetDepthQueue();
           const applyGridClass = (count) => {{
             if (count === 1) {{
-              container.className = `${{BASE_GRID_CLASS}} single-card`;
+              container.className = `${{{{BASE_GRID_CLASS}}}} single-card`;
             }} else if (count > 1 && count <= 2) {{
-              container.className = `${{BASE_GRID_CLASS}} two-cols`;
+              container.className = `${{{{BASE_GRID_CLASS}}}} two-cols`;
             }} else {{
               container.className = BASE_GRID_CLASS;
             }}
@@ -4544,32 +4719,32 @@ ORDERBOOK_TEMPLATE = r"""
             queueNetDepthUpdate(symbol, item.timestamp, netDepthValue);
             const committedSnapshot = getCommittedNetDepth(symbol);
             const netDepthText = committedSnapshot ? formatNumber(committedSnapshot.value, 2) : '--';
-            const analysis = `买盘占比 ${{Math.round(bidShare * 100)}}%，${{guidance}}（点差 ${{spreadText}}）`;
+            const analysis = `买盘占比 ${{{{Math.round(bidShare * 100)}}}}%，${{{{guidance}}}}（点差 ${{{{spreadText}}}}）`;
             const card = document.createElement('section');
-            card.className = `orderbook-chart tone-${{tone}}`;
+            card.className = `orderbook-chart tone-${{{{tone}}}}`;
             card.innerHTML = `
               <div class="chart-header">
                 <div>
-                  <h2>${{item.instrument_id || '--'}}</h2>
-                  <small>更新时间：${{formatTimestamp(item.timestamp)}}</small>
+                  <h2>${{{{item.instrument_id || '--'}}}}</h2>
+                  <small>更新时间：${{{{formatTimestamp(item.timestamp)}}}}</small>
                 </div>
               </div>
               <div class="chart-prices">
                 <div class="chart-price-group primary">
-                  <span>买一 ${{bestBidText}}</span>
-                  <span>卖一 ${{bestAskText}}</span>
-                  <span class="mid">中间价 ${{midText}}</span>
+                  <span>买一 ${{{{bestBidText}}}}</span>
+                  <span>卖一 ${{{{bestAskText}}}}</span>
+                  <span class="mid">中间价 ${{{{midText}}}}</span>
                 </div>
               </div>
               <div class="chart-stats">
-                <span class="stat-pill">买盘深度${{buyDepthText}}</span>
-                <span class="stat-pill">卖盘深度${{sellDepthText}}</span>
-                <span class="stat-pill">总深度 ${{totalDepthText}}</span>
-                <span class="stat-pill stat-accent">净深度 ${{netDepthText}}</span>
-                <span class="stat-pill stat-accent">点差 ${{spreadText}}</span>
+                <span class="stat-pill">买盘深度${{{{buyDepthText}}}}</span>
+                <span class="stat-pill">卖盘深度${{{{sellDepthText}}}}</span>
+                <span class="stat-pill">总深度 ${{{{totalDepthText}}}}</span>
+                <span class="stat-pill stat-accent">净深度 ${{{{netDepthText}}}}</span>
+                <span class="stat-pill stat-accent">点差 ${{{{spreadText}}}}</span>
               </div>
               <canvas class="chart-canvas"></canvas>
-              <p class="chart-insight ${{tone}}">${{analysis}}</p>
+              <p class="chart-insight ${{{{tone}}}}">${{{{analysis}}}}</p>
             `;
             const canvas = card.querySelector('canvas');
             container.appendChild(card);
@@ -4613,6 +4788,121 @@ ORDERBOOK_TEMPLATE = r"""
         window.addEventListener('resize', repaintCharts);
         refresh();
         setInterval(refresh, 2000);
+        
+        // 初始化WebSocket状态监控
+        async function initWebSocketStatus() {
+            try {
+                // 动态导入WebSocket状态监控模块
+                const moduleScript = document.createElement('script');
+                moduleScript.type = 'module';
+                moduleScript.textContent = `
+                    import { initWebSocketStatus } from '/static/websocket-status.js';
+                    
+                    // 初始化WebSocket状态监控
+                    const statusMonitor = initWebSocketStatus({
+                        statusElementId: 'websocket-status-indicator',
+                        statusTextElementId: 'websocket-status-text'
+                    });
+                    
+                    console.log('WebSocket状态监控已初始化');
+                `;
+                document.head.appendChild(moduleScript);
+                
+                // 备用方案：如果模块加载失败，使用普通脚本方式
+                moduleScript.onerror = function() {
+                    console.log('使用备用方案初始化WebSocket状态');
+                    const fallbackScript = document.createElement('script');
+                    fallbackScript.src = '/static/websocket-status.js';
+                    fallbackScript.onload = function() {
+                        if (window.WebSocketStatusMonitor) {
+                            const monitor = new window.WebSocketStatusMonitor({
+                                statusElementId: 'websocket-status-indicator',
+                                statusTextElementId: 'websocket-status-text'
+                            });
+                            monitor.simulateConnection();
+                        }
+                    };
+                    document.head.appendChild(fallbackScript);
+                };
+            } catch (error) {
+                console.error('初始化WebSocket状态监控失败:', error);
+            }
+        }
+        
+        // 加载WebSocket状态监控样式
+        function loadWebSocketStyles() {
+            const style = document.createElement('style');
+            style.textContent = `
+                .websocket-status-indicator {
+                    display: inline-block;
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 50%;
+                    margin: 0 8px;
+                    vertical-align: middle;
+                }
+                
+                .websocket-status-text {
+                    font-size: 0.85rem;
+                    color: #94a3b8;
+                    margin-left: 4px;
+                    vertical-align: middle;
+                }
+                
+                /* 断开状态 - 红色 */
+                .status-disconnected {
+                    background-color: #ef4444;
+                    animation: none;
+                }
+                
+                /* 连接中 - 黄色 */
+                .status-connecting {
+                    background-color: #f59e0b;
+                    animation: pulse 1.5s infinite;
+                }
+                
+                /* 连接成功 - 绿色 */
+                .status-connected {
+                    background-color: #10b981;
+                    animation: none;
+                }
+                
+                /* 接收数据 - 蓝色闪烁 */
+                .status-receiving {
+                    background-color: #3b82f6;
+                    animation: blink 1s infinite;
+                }
+                
+                @keyframes pulse {
+                    0% {
+                        opacity: 1;
+                        transform: scale(1);
+                    }
+                    50% {
+                        opacity: 0.6;
+                        transform: scale(0.9);
+                    }
+                    100% {
+                        opacity: 1;
+                        transform: scale(1);
+                    }
+                }
+                
+                @keyframes blink {
+                    0%, 100% {
+                        opacity: 1;
+                    }
+                    50% {
+                        opacity: 0.4;
+                    }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+        
+        // 加载样式和初始化状态监控
+        loadWebSocketStyles();
+        initWebSocketStatus();
       }})();
     </script>
 
@@ -4699,7 +4989,9 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
             <div class="map-meta-row">
                 <span>交易对：<strong id="map-symbol">$display_pair</strong></span>
                 <span>最新成交价：<strong id="map-last-price">$last_price</strong> USDT</span>
-                <span>最后刷新：<span class="timestamp" id="map-updated">$updated_at</span></span>
+                <span>最后刷新：<span class="timestamp" id="map-updated">$updated_at</span>
+                <span id="websocket-status-indicator" class="websocket-status-indicator"></span>
+                <span id="websocket-status-text" class="websocket-status-text"></span></span>
                 <div class="range-controls">
                     <span>统计区间：<strong id="map-range">--</strong></span>
                     <div class="range-buttons">
@@ -5397,6 +5689,121 @@ LIQUIDATION_MAP_TEMPLATE = Template(r"""
 
         refresh();
         setInterval(refresh, REFRESH_MS);
+        
+        // 初始化WebSocket状态监控
+        async function initWebSocketStatus() {
+            try {
+                // 动态导入WebSocket状态监控模块
+                const moduleScript = document.createElement('script');
+                moduleScript.type = 'module';
+                moduleScript.textContent = `
+                    import { initWebSocketStatus } from '/static/websocket-status.js';
+                    
+                    // 初始化WebSocket状态监控
+                    const statusMonitor = initWebSocketStatus({
+                        statusElementId: 'websocket-status-indicator',
+                        statusTextElementId: 'websocket-status-text'
+                    });
+                    
+                    console.log('WebSocket状态监控已初始化');
+                `;
+                document.head.appendChild(moduleScript);
+                
+                // 备用方案：如果模块加载失败，使用普通脚本方式
+                moduleScript.onerror = function() {
+                    console.log('使用备用方案初始化WebSocket状态');
+                    const fallbackScript = document.createElement('script');
+                    fallbackScript.src = '/static/websocket-status.js';
+                    fallbackScript.onload = function() {
+                        if (window.WebSocketStatusMonitor) {
+                            const monitor = new window.WebSocketStatusMonitor({
+                                statusElementId: 'websocket-status-indicator',
+                                statusTextElementId: 'websocket-status-text'
+                            });
+                            monitor.simulateConnection();
+                        }
+                    };
+                    document.head.appendChild(fallbackScript);
+                };
+            } catch (error) {
+                console.error('初始化WebSocket状态监控失败:', error);
+            }
+        }
+        
+        // 加载WebSocket状态监控样式
+        function loadWebSocketStyles() {
+            const style = document.createElement('style');
+            style.textContent = `
+                .websocket-status-indicator {
+                    display: inline-block;
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 50%;
+                    margin: 0 8px;
+                    vertical-align: middle;
+                }
+                
+                .websocket-status-text {
+                    font-size: 0.85rem;
+                    color: #94a3b8;
+                    margin-left: 4px;
+                    vertical-align: middle;
+                }
+                
+                /* 断开状态 - 红色 */
+                .status-disconnected {
+                    background-color: #ef4444;
+                    animation: none;
+                }
+                
+                /* 连接中 - 黄色 */
+                .status-connecting {
+                    background-color: #f59e0b;
+                    animation: pulse 1.5s infinite;
+                }
+                
+                /* 连接成功 - 绿色 */
+                .status-connected {
+                    background-color: #10b981;
+                    animation: none;
+                }
+                
+                /* 接收数据 - 蓝色闪烁 */
+                .status-receiving {
+                    background-color: #3b82f6;
+                    animation: blink 1s infinite;
+                }
+                
+                @keyframes pulse {
+                    0% {
+                        opacity: 1;
+                        transform: scale(1);
+                    }
+                    50% {
+                        opacity: 0.6;
+                        transform: scale(0.9);
+                    }
+                    100% {
+                        opacity: 1;
+                        transform: scale(1);
+                    }
+                }
+                
+                @keyframes blink {
+                    0%, 100% {
+                        opacity: 1;
+                    }
+                    50% {
+                        opacity: 0.4;
+                    }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+        
+        // 加载样式和初始化状态监控
+        loadWebSocketStyles();
+        initWebSocketStatus();
 
         if (chartSvg) {
           chartSvg.addEventListener('wheel', (event) => {

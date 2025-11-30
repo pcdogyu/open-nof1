@@ -2537,12 +2537,22 @@ def get_orderbook_snapshot(
             ]
         if len(history_list) > max_history_points:
             del history_list[max_history_points:]
+    # 查询现有的orderbook深度历史记录
     history_records = _query_influx_measurement(
         measurement="okx_orderbook_depth",
         limit=history_fetch_limit,
         instrument=instrument_filter or None,
         lookback=f"{ORDERBOOK_HISTORY_LOOKBACK_HOURS}h",
     )
+    # 同时查询新的WebSocket市场深度数据
+    market_depth_records = _query_influx_measurement(
+        measurement="okx_market_depth",
+        limit=history_fetch_limit,
+        instrument=instrument_filter or None,
+        lookback=f"{ORDERBOOK_HISTORY_LOOKBACK_HOURS}h",
+    )
+    # 合并两种记录
+    all_history_records = history_records + market_depth_records
     snapshot_records = _query_influx_measurement(
         measurement="okx_orderbook_depth",
         limit=fetch_limit * 2,
@@ -2566,12 +2576,19 @@ def get_orderbook_snapshot(
                 ts = None
         if isinstance(ts, datetime) and ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
+        
+        # 处理net_depth数据，支持从不同测量值获取
         net_depth = _coerce_float(row.get("net_depth"))
         if net_depth is None:
+            # 尝试从total_bid_qty和total_ask_qty计算
             total_bid_qty = _coerce_float(row.get("total_bid_qty"))
             total_ask_qty = _coerce_float(row.get("total_ask_qty"))
             if total_bid_qty is not None and total_ask_qty is not None:
                 net_depth = total_bid_qty - total_ask_qty
+            # 尝试从overall_net_depth获取（新的WebSocket市场深度数据）
+            elif row.get("overall_net_depth") is not None:
+                net_depth = _coerce_float(row.get("overall_net_depth"))
+        
         hist_entry = {
             "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(timestamp),
             "net_depth": net_depth,
@@ -2603,7 +2620,7 @@ def get_orderbook_snapshot(
         _seed_memory_history(inst_id, history)
         return history, cvd_history, cvd_map.get(inst_id)
 
-    for row in history_records:
+    for row in all_history_records:
         _append_history_entry(row)
     # When querying without a specific instrument filter, Influx may return fewer rows
     # than expected due to per-table limits. Backfill missing instruments with direct queries.
@@ -2618,12 +2635,21 @@ def get_orderbook_snapshot(
     for inst_id in target_instruments:
         if not inst_id or history_map.get(inst_id):
             continue
+        # 查询两种测量值的数据
         extra_rows = _query_influx_measurement(
             measurement="okx_orderbook_depth",
             limit=max_history_points,
             instrument=inst_id,
             lookback=f"{ORDERBOOK_HISTORY_LOOKBACK_HOURS}h",
         )
+        # 添加市场深度数据
+        market_depth_extra = _query_influx_measurement(
+            measurement="okx_market_depth",
+            limit=max_history_points,
+            instrument=inst_id,
+            lookback=f"{ORDERBOOK_HISTORY_LOOKBACK_HOURS}h",
+        )
+        extra_rows.extend(market_depth_extra)
         for row in extra_rows:
             _append_history_entry(row)
 
